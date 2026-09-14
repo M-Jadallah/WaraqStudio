@@ -1,0 +1,68 @@
+{
+  "output_root": "C:/WaraqStudio/results",
+  "cookies_file": "",
+  "youtube_request_delay": 3.0,
+  "youtube_sleep_min": 8,
+  "youtube_sleep_max": 15,
+  "youtube_client": "",
+  "youtube_cooldown": 900,
+  "download_enabled": true,
+  "deepgram_enabled": true,
+  "opencode_enabled": true,
+  "project_concurrency": 2,
+  "max_pending_audio": 12,
+  "min_free_gb": 2,
+  "audio_bitrate": 64,
+  "audio_rate": 16000,
+  "audio_channels": 1,
+  "chunk_seconds": 1800,
+  "split_after_minutes": 90,
+  "http_timeout": 1800,
+  "max_retries": 3,
+  "opencode_executable": "opencode.exe",
+  "opencode_timeout": 3600,
+  "opencode_context": "",
+  "prompt": "استخدم مهارة arabic-lesson-formatter-sequential لمعالجة ملف التفريغ الأصلي: {transcript_path}\nأنشئ مستند Word واحدًا واحفظه بالمسار: {output_path}\nعنوان الدرس: {title}\nرقم الدرس: {position}",
+  "strict_order": false,
+  "theme": "dark",
+  "deepgram_workers": [
+    {
+      "id": "dg1",
+      "name": "Deepgram 01",
+      "enabled": true,
+      "project": "default",
+      "model": "whisper-large",
+      "language": "ar",
+      "endpoint": "https://api.deepgram.com",
+      "diarize": false
+    },
+    {
+      "id": "dg2",
+      "name": "Deepgram 02",
+      "enabled": true,
+      "project": "default",
+      "model": "whisper-large",
+      "language": "ar",
+      "endpoint": "https://api.deepgram.com",
+      "diarize": false
+    }
+  ],
+  "opencode_workers": [
+    {
+      "id": "oc1",
+      "name": "OpenCode 01",
+      "enabled": true,
+      "model": "openai/gpt-6-astra",
+      "variant": "high",
+      "agent": "build"
+    },
+    {
+      "id": "oc2",
+      "name": "OpenCode 02",
+      "enabled": true,
+      "model": "openai/gpt-6-astra",
+      "variant": "high",
+      "agent": "build"
+    }
+  ]
+}

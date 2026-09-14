@@ -1,0 +1,22 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+Windows/
+*.sqlite3*
+settings.json
+cookies.txt
+
+# Excluded from indexing (non-app code, build artifacts, environments)
+legacy_reference/
+.opencode/
+.serena/
+.cgcignore
+dist/
+build/
+.venv/
+venv/
+env/
+node_modules/
+.next/
+coverage/
+env-report.json

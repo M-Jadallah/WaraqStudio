@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    name: Test gate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Engine and service tests
+        run: python -m pytest tests/test_engine.py -v --tb=short
+
+      - name: Native UI interaction checks
+        run: python tests/verify_ui.py
+
+  build-release:
+    name: Build exe and publish release
+    needs: tests
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Build Windows bundle (PyInstaller)
+        run: python build_windows.py
+
+      - name: Verify bundle contents
+        run: |
+          test -f Windows/WaraqStudio/WaraqStudio.exe
+          ls Windows/WaraqStudio | head -20
+
+      - name: Smoke test bundled exe (environment check)
+        run: |
+          ./Windows/WaraqStudio/WaraqStudio.exe --check-environment env-report.json
+          cat env-report.json
+
+      - name: Smoke test bundled exe (UI launch)
+        run: ./Windows/WaraqStudio/WaraqStudio.exe --smoke
+
+      - name: Package portable bundle
+        shell: pwsh
+        run: |
+          Copy-Item Start.cmd,README_AR.md Windows/WaraqStudio/
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path Windows/WaraqStudio -DestinationPath "dist/WaraqStudio-$env:TAG-windows-x64.zip" -Force
+
+      - name: Create source zip
+        run: |
+          mkdir -p dist
+          git archive --format=zip --prefix="WaraqStudio-$TAG/" -o "dist/WaraqStudio-$TAG-source.zip" HEAD
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: dist/*.zip
+          retention-days: 7
+
+      - name: Write release notes
+        run: |
+          cat > RELEASE_NOTES.md <<EOF
+          إصدار تلقائي بواسطة GitHub Actions (وسم $TAG).
+
+          ## الملفات المرفقة
+          - \`WaraqStudio-$TAG-windows-x64.zip\` — الحزمة الكاملة للتشغيل على Windows 10/11 (64-bit): تحتوي \`WaraqStudio.exe\` مع كل المكتبات وQt وFFmpeg.
+          - \`WaraqStudio-$TAG-source.zip\` — نسخة مضغوطة من الكود المصدري.
+
+          ## خطوات التثبيت
+          1. فك ضغط \`WaraqStudio-$TAG-windows-x64.zip\` في مجلد دائم.
+          2. شغّل \`WaraqStudio.exe\` (أو \`Start.cmd\`).
+          3. أدخل مفاتيح Deepgram وOpenCode من شاشة الإعدادات داخل التطبيق — لا تُضمَّن أي مفاتيح أو بيانات داخل الحزمة.
+
+          ملاحظة: يتوفر أيضًا «Source code (zip)» يُنشئه GitHub تلقائيًا أسفل الإصدار.
+          EOF
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" dist/*.zip \
+            --title "WaraqStudio $TAG" \
+            --notes-file RELEASE_NOTES.md
