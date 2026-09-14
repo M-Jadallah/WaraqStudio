@@ -325,6 +325,23 @@ def test_queue_order_independent_of_original_lesson_number(env):
     assert not scheduler.ready(jobs[1], "deepgram", jobs)
 
 
+def test_queue_order_stable_when_timestamps_tie(env, monkeypatch):
+    store, cfg = env
+    data = cfg.snapshot()
+    # Coarse Windows timers can hand identical time.time() values to rows inserted
+    # in the same batch; queue order must not depend on the clock.
+    monkeypatch.setattr("waraq.store.time.time", lambda: 1000.0)
+    store.add([items(4)[3], items(2)[1]], data)
+    jobs = store.jobs()
+    assert [j["position"] for j in jobs] == [4, 2]
+    assert [j["queue_order"] for j in jobs] == [1, 2]
+    second = cfg.snapshot()
+    monkeypatch.setattr("waraq.store.time.time", lambda: 1000.0)
+    store.add([items(9)[8]], second)
+    jobs = store.jobs()
+    assert [j["position"] for j in jobs] == [4, 2, 9]
+
+
 def test_opencode_only_reuses_committed_validated_document(env, tmp_path, monkeypatch):
     import waraq.services as services
     store, cfg = env

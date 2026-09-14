@@ -25,7 +25,8 @@ class Store:
               url TEXT NOT NULL, position INTEGER NOT NULL, batch TEXT NOT NULL,
               config TEXT NOT NULL, folder TEXT NOT NULL, created REAL NOT NULL,
               audio TEXT DEFAULT '', transcript TEXT DEFAULT '', document TEXT DEFAULT '',
-              input_path TEXT DEFAULT '', duration REAL DEFAULT 0, queue_order INTEGER DEFAULT 0
+              input_path TEXT DEFAULT '', duration REAL DEFAULT 0, queue_order INTEGER DEFAULT 0,
+              seq INTEGER DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS stages (
               job_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL,
@@ -42,6 +43,10 @@ class Store:
         if "queue_order" not in columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN queue_order INTEGER DEFAULT 0")
             self.db.execute("UPDATE jobs SET queue_order=position")
+        if "seq" not in columns:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN seq INTEGER DEFAULT 0")
+            # rowid equals insertion order; timestamps can tie on coarse Windows timers.
+            self.db.execute("UPDATE jobs SET seq=rowid")
 
     def event(self, job_id, message, level="info"):
         with self.lock:
@@ -67,16 +72,17 @@ class Store:
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
+                base = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM jobs").fetchone()[0]
                 for queue_order, item in enumerate(items, 1):
                     if not item.get("selected", True) or not item.get("available", True):
                         continue
                     ident = uuid.uuid4().hex[:12]
                     folder = str(Path(config["output_root"]) / ident)
-                    self.db.execute("INSERT INTO jobs(id,video_id,title,url,position,batch,config,folder,created,input_path,duration,queue_order) "
-                                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    self.db.execute("INSERT INTO jobs(id,video_id,title,url,position,batch,config,folder,created,input_path,duration,queue_order,seq) "
+                                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                     (ident, item["video_id"], item["title"], item.get("url", ""), item["position"],
                                      batch, json.dumps(config, ensure_ascii=False), folder, time.time(), input_path,
-                                     item.get("duration") or 0, queue_order))
+                                     item.get("duration") or 0, queue_order, base + queue_order))
                     local_txt = input_path.lower().endswith(".txt")
                     for stage in STAGES:
                         skip = not config[stage + "_enabled"] or (input_path and stage == "download") or (local_txt and stage == "deepgram")
@@ -94,7 +100,7 @@ class Store:
 
     def jobs(self):
         with self.lock:
-            rows = [dict(r) for r in self.db.execute("SELECT * FROM jobs ORDER BY created,position")]
+            rows = [dict(r) for r in self.db.execute("SELECT * FROM jobs ORDER BY seq")]
             for row in rows:
                 row["config"] = json.loads(row["config"])
                 row["stages"] = {s["name"]: dict(s) for s in self.db.execute("SELECT * FROM stages WHERE job_id=?", (row["id"],))}
