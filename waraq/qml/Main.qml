@@ -511,7 +511,7 @@ ApplicationWindow {
                 Item { Layout.fillHeight: true }
                 Rectangle { Layout.fillWidth: true; height: 1; color: "#29384b" }
                 Text { text: "سير عملك، تحت سيطرتك"; color: "#a5b6cd"; font.pixelSize: 13; Layout.alignment: Qt.AlignRight; Layout.topMargin: 14 }
-                Text { text: "نسخة محلية  ·  0.1.0"; color: "#91a3bc"; font.pixelSize: 11; Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 8 }
+                Text { text: "نسخة محلية  ·  " + backend.version; color: "#91a3bc"; font.pixelSize: 11; Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 8 }
             }
         }
     }

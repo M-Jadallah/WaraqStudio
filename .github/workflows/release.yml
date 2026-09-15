@@ -2,8 +2,11 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +14,12 @@ permissions:
 defaults:
   run:
     shell: bash
+
+# Serialize release builds so rapid pushes publish one after another
+# instead of racing on tags and release assets.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   tests:
@@ -41,11 +50,23 @@ jobs:
     name: Build exe and publish release
     needs: tests
     runs-on: windows-latest
-    env:
-      TAG: ${{ github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Compute version and tag
+        run: |
+          # Tag pushes (v*) keep their exact version; ordinary pushes to main
+          # auto-increment: base version from waraq/__init__.py + build number.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            BASE="$(python -c "import re; print(re.search(r'__version__ *= *\"([^\"]+)\"', open('waraq/__init__.py', encoding='utf-8').read()).group(1))")"
+            VERSION="$BASE.${{ github.run_number }}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION" >> "$GITHUB_ENV"
+          echo "Building version $VERSION (tag v$VERSION)"
 
       - name: Set up Python 3.14
         uses: actions/setup-python@v5
@@ -107,7 +128,7 @@ jobs:
       - name: Write release notes
         run: |
           cat > RELEASE_NOTES.md <<EOF
-          إصدار تلقائي بواسطة GitHub Actions (وسم $TAG).
+          إصدار تلقائي بواسطة GitHub Actions (وسم $TAG، من الالتزام ${GITHUB_SHA:0:7}).
 
           ## الملفات المرفقة
           - \`WaraqStudio-${TAG#v}-setup.exe\` — **ملف التثبيت**: شغّله وسيثبّت التطبيق وكل ما يحتاجه (Python وQt وFFmpeg وyt-dlp مضمّنة داخله — لا يحتاج تثبيت أي شيء آخر) في Program Files، مع اختصار في قائمة ابدأ (وسطح المكتب اختياريًا) وإمكانية الإزالة من إعدادات Windows.
@@ -124,6 +145,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A re-run of the same build must replace its release, not stack a
+          # duplicate under the same tag.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" dist/*.zip dist/*-setup.exe \
+            --target "$GITHUB_SHA" \
             --title "WaraqStudio $TAG" \
             --notes-file RELEASE_NOTES.md

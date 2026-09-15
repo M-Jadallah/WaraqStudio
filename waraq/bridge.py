@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Property, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog
 
+from . import __version__
 from .config import defaults
 from .services import resolve_opencode
 from .store import STAGES
@@ -64,6 +65,9 @@ class Bridge(QObject):
 
     @Property(str, notify=settingsChanged)
     def settingsJson(self): return json.dumps(self.config.snapshot(), ensure_ascii=False, indent=2)
+
+    @Property(str, constant=True)
+    def version(self): return __version__
 
     @Property("QVariantMap", notify=changed)
     def stats(self):
