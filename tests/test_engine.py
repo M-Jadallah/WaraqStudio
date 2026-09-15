@@ -365,3 +365,69 @@ def test_opencode_only_reuses_committed_validated_document(env, tmp_path, monkey
     adapter.process(job, worker, cfg.data, threading.Event(), lambda _: None)
     assert len(calls) == 2
     assert len(list(result.parent.glob("unverified-*.docx"))) == 1
+
+
+def test_prune_keeps_recent_events(env):
+    store, cfg = env
+    for i in range(30):
+        store.event("job", f"msg {i}")
+    store.prune(keep_events=10)
+    remaining = store.events(limit=100)
+    assert [e["message"] for e in remaining] == [f"msg {i}" for i in range(29, 19, -1)]
+
+
+def test_opencode_works_on_transcript_copy_inside_workspace(env, tmp_path, monkeypatch):
+    import waraq.services as services
+    store, cfg = env
+    txt = tmp_path / "original.txt"
+    txt.write_text("مادة اختبارية", encoding="utf-8")
+    ident = store.add(items(), cfg.snapshot(), input_path=str(txt))[0]
+    job = store.get(ident)
+    captured = {}
+    monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
+    def run(command, cwd, *args):
+        captured["cwd"] = Path(cwd)
+        captured["prompt"] = command[-1]
+        copy = captured["cwd"] / "original.txt"
+        assert copy.is_file()
+        assert copy.read_text(encoding="utf-8-sig").strip() == "مادة اختبارية"
+        make_docx(captured["cwd"] / "001-درس 1.docx")
+    monkeypatch.setattr(services, "run_process", run)
+    result = services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, threading.Event(), lambda _: None)
+    # The prompt points at the workspace copy, never at the original path.
+    assert str((captured["cwd"] / "original.txt").resolve()) in captured["prompt"]
+    assert str(txt) not in captured["prompt"]
+    assert str(result.resolve()) in captured["prompt"]
+    assert txt.read_text(encoding="utf-8") == "مادة اختبارية"
+    validate_docx(result)
+
+
+def test_opencode_permission_rejection_diagnosed(env, tmp_path, monkeypatch):
+    import waraq.services as services
+    store, cfg = env
+    txt = tmp_path / "original.txt"
+    txt.write_text("مادة اختبارية", encoding="utf-8")
+    ident = store.add(items(), cfg.snapshot(), input_path=str(txt))[0]
+    job = store.get(ident)
+    monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
+    def run(command, cwd, cancel, timeout, log, process_env=None):
+        log("permission requested: external_directory (C:\\blocked\\*); auto-rejecting")
+    monkeypatch.setattr(services, "run_process", run)
+    with pytest.raises(ServiceError) as exc:
+        services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, threading.Event(), lambda _: None)
+    # A dedicated diagnosis, not the generic missing-Word message, and the
+    # worker stays usable (failed, not blocked).
+    assert exc.value.kind == "failed"
+    assert "external_directory" in str(exc.value)
+
+
+def test_oversized_docx_entry_rejected(tmp_path):
+    # 101 MB of zeros compresses to ~100 KB, so the file is cheap to build but
+    # would previously be fully decompressed by testzip() before any size check.
+    path = tmp_path / "bloated.docx"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/media/huge.bin", b"\x00" * (101 * 1024 * 1024))
+    with pytest.raises(ServiceError):
+        validate_docx(path)

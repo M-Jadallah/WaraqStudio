@@ -11,6 +11,7 @@ legacy_reference/
 .opencode/
 .serena/
 .cgcignore
+.zcode/
 dist/
 build/
 .venv/

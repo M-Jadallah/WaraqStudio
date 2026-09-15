@@ -58,6 +58,14 @@ class Store:
             # An interrupted paid request is not automatically submitted again.
             self.db.execute("UPDATE stages SET status=CASE WHEN name='deepgram' THEN 'uncertain' ELSE 'paused' END, "
                             "worker='', error='توقف التشغيل السابق؛ راجع النتيجة قبل الاستئناف' WHERE status='running'")
+            self.prune()
+
+    def prune(self, keep_events=5000):
+        """Bound table growth: keep the most recent events, drop day-old cache rows."""
+        with self.lock:
+            self.db.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)",
+                            (keep_events,))
+            self.db.execute("DELETE FROM cache WHERE created < ?", (time.time() - 86400,))
 
     def add(self, items, config, batch="", input_path=""):
         if not any(config[s + "_enabled"] for s in STAGES):
@@ -101,13 +109,25 @@ class Store:
     def jobs(self):
         with self.lock:
             rows = [dict(r) for r in self.db.execute("SELECT * FROM jobs ORDER BY seq")]
+            # One pass over all stages instead of a query per job; the queue is
+            # rescanned several times per second by the UI timer and scheduler.
+            stages = {}
+            for s in self.db.execute("SELECT * FROM stages"):
+                stages.setdefault(s["job_id"], {})[s["name"]] = dict(s)
             for row in rows:
                 row["config"] = json.loads(row["config"])
-                row["stages"] = {s["name"]: dict(s) for s in self.db.execute("SELECT * FROM stages WHERE job_id=?", (row["id"],))}
+                row["stages"] = stages.get(row["id"], {})
             return rows
 
     def get(self, ident):
-        return next((j for j in self.jobs() if j["id"] == ident), None)
+        with self.lock:
+            row = self.db.execute("SELECT * FROM jobs WHERE id=?", (ident,)).fetchone()
+            if row is None:
+                return None
+            job = dict(row)
+            job["config"] = json.loads(job["config"])
+            job["stages"] = {s["name"]: dict(s) for s in self.db.execute("SELECT * FROM stages WHERE job_id=?", (ident,))}
+            return job
 
     def claim(self, ident, stage, worker):
         with self.lock:

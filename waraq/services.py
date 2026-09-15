@@ -59,14 +59,18 @@ def validate_docx(path):
         raise ServiceError("لم ينشئ OpenCode ملف Word المتوقع.")
     try:
         with zipfile.ZipFile(path) as z:
+            # Size caps come first: testzip() decompresses every entry, so an
+            # oversized package must be refused before spending memory on it.
+            total = 0
+            for info in z.infolist():
+                total += info.file_size
+                if info.file_size > 100_000_000 or total > 300_000_000:
+                    raise ValueError("package too large")
             if z.testzip():
                 raise ValueError("CRC")
             for name in ("[Content_Types].xml", "_rels/.rels", "word/document.xml"):
                 if name not in z.namelist():
                     raise ValueError(name)
-            info = z.getinfo("word/document.xml")
-            if info.file_size > 100_000_000:
-                raise ValueError("document too large")
             root = ET.fromstring(z.read("word/document.xml"))
             ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
             text = "".join(n.text or "" for n in root.iter(ns + "t"))
@@ -450,22 +454,35 @@ class OpenCode:
             # Only a committed validation record qualifies for automatic reuse.
             output.rename(work / ("unverified-" + str(time.time_ns()) + ".docx"))
         module_paths = self.prepare_context(work, cfg)
+        # The session is sandboxed to --dir: reads outside it hit OpenCode's
+        # external_directory permission, which headless runs auto-reject. The
+        # agent therefore works on a copy inside its workspace; the original
+        # TXT stays out of reach and its hash is still verified after the run.
+        local_transcript = work / transcript.name
+        shutil.copyfile(transcript, local_transcript)
         prompt = cfg["prompt"]
-        for key, value in {"transcript_path": str(transcript.resolve()), "output_path": str(output.resolve()),
+        for key, value in {"transcript_path": str(local_transcript.resolve()), "output_path": str(output.resolve()),
                            "title": job["title"], "position": str(job["position"])}.items():
             prompt = prompt.replace("{" + key + "}", value)
         # Exact output contract always applies, even to a custom formatting prompt.
-        prompt += f'\nالمخرج المطلوب مستند Word واحد بالمسار: "{output.resolve()}". لا تعدّل ملف TXT الأصلي.'
+        prompt += f'\nالمخرج المطلوب مستند Word واحد بالمسار: "{output.resolve()}". لا تعدّل ملف التفريغ.'
         env = os.environ.copy()
         if module_paths:
             env["NODE_PATH"] = os.pathsep.join(module_paths + ([env["NODE_PATH"]] if env.get("NODE_PATH") else []))
         command = [str(resolve_opencode(cfg["opencode_executable"])), "run", "--model", worker["model"],
                    "--variant", worker["variant"], "--agent", worker["agent"], "--dir", str(work), "--format", "json", prompt]
+        denied = []
+        def track(line):
+            if "auto-rejecting" in line:
+                denied.append(line)
+            log(line)
         try:
-            run_process(command, work, cancel, cfg["opencode_timeout"], log, env)
+            run_process(command, work, cancel, cfg["opencode_timeout"], track, env)
         finally:
             if digest(transcript) != original_hash:
                 raise ServiceError("تغيّر TXT الأصلي أثناء OpenCode؛ أوقفت اعتماد الناتج للمراجعة.", "blocked")
+        if not output.is_file() and denied:
+            raise ServiceError("منع OpenCode الوصول إلى مسار خارج مجلد عمله: " + denied[0], "failed")
         report = validate_docx(output)
         atomic_json(verified, {**report, "input_sha256": original_hash, "output": str(output)})
         return output

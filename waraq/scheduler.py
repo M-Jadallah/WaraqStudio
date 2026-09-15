@@ -90,9 +90,16 @@ class Scheduler:
         return True
 
     def loop(self):
+        next_prune = time.time() + 3600
         while not self.stop_event.wait(0.25):
             if not self.running:
                 continue
+            if time.time() >= next_prune:
+                next_prune = time.time() + 3600
+                try:
+                    self.store.prune()
+                except Exception as exc:
+                    self.store.event("", "تعذر تقليم السجل: " + str(exc), "error")
             try:
                 self.tick()
             except Exception as exc:

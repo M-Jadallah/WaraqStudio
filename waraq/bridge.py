@@ -30,6 +30,7 @@ class Bridge(QObject):
         super().__init__()
         self.store, self.config, self.secrets, self.scheduler = store, config, secrets, scheduler
         self._jobs, self._workers, self._logs, self._source = [], [], [], []
+        self._running = False
         self._source_title = ""
         self._busy = False
         self.discovery_cancel = threading.Event()
@@ -87,11 +88,16 @@ class Bridge(QObject):
                 "worker": stages[current]["worker"], "progress": stages[current]["progress"],
                 "steps": [{"name": name, "label": STAGE_LABELS[name], "status": stages[name]["status"]} for name in STAGES],
             })
-        self._jobs = result
-        self._workers = self.scheduler.workers()
-        for w in self._workers:
+        workers = self.scheduler.workers()
+        for w in workers:
             w["stageLabel"] = STAGE_LABELS[w["stage"]]
-        self._logs = [{**r, "time": time.strftime("%H:%M:%S", time.localtime(r["ts"]))} for r in self.store.events(100)]
+        logs = [{**r, "time": time.strftime("%H:%M:%S", time.localtime(r["ts"]))} for r in self.store.events(100)]
+        running = self.scheduler.running
+        # The timer fires while idle too; republishing identical state would
+        # make QML re-evaluate every binding for nothing.
+        if result == self._jobs and workers == self._workers and logs == self._logs and running == self._running:
+            return
+        self._jobs, self._workers, self._logs, self._running = result, workers, logs, running
         self.changed.emit()
 
     @Slot(str)
@@ -181,17 +187,33 @@ class Bridge(QObject):
     @Slot()
     def importLocal(self):
         paths, _ = QFileDialog.getOpenFileNames(None, "استيراد صوت أو تفريغ", "", "Media (*.mp3 *.wav *.m4a *.flac *.ogg *.txt)")
+        added = 0
         for name in paths:
             path = Path(name)
+            if path.suffix.lower() == ".txt":
+                # Reject unreadable transcripts here instead of failing later at the Word stage.
+                try:
+                    readable = path.read_text(encoding="utf-8-sig").strip()
+                except (OSError, UnicodeDecodeError) as exc:
+                    self.notice.emit(f"تعذر استيراد «{path.name}»: {exc}", True)
+                    continue
+                if not readable:
+                    self.notice.emit(f"تعذر استيراد «{path.name}»: ملف التفريغ فارغ.", True)
+                    continue
             cfg = self.config.snapshot()
             # Audio is normalized by FFmpeg before API upload; local TXT goes directly to Word.
             cfg["download_enabled"] = False
             cfg["deepgram_enabled"] = path.suffix.lower() != ".txt"
             cfg["opencode_enabled"] = True
-            self.store.add([{"video_id": "local-" + path.stem, "title": path.stem, "position": 1,
-                             "url": "", "available": True}], cfg, input_path=str(path))
-        if paths:
-            self.notice.emit(f"أضيفت {len(paths)} ملفات محلية.", False)
+            try:
+                self.store.add([{"video_id": "local-" + path.stem, "title": path.stem, "position": 1,
+                                 "url": "", "available": True}], cfg, input_path=str(path))
+            except Exception as exc:
+                self.notice.emit(f"تعذر استيراد «{path.name}»: {exc}", True)
+                continue
+            added += 1
+        if added:
+            self.notice.emit(f"أضيفت {added} ملفات محلية.", False)
             self.refresh()
 
     @Slot()
@@ -269,7 +291,7 @@ class Bridge(QObject):
 
     @Slot()
     def importLegacy(self):
-        path, _ = QFileDialog.getOpenFileName(None, "استيراد إعدادات السكربت", "C:/My-Project/Single_video", "JSON (*.json)")
+        path, _ = QFileDialog.getOpenFileName(None, "استيراد إعدادات السكربت", str(Path.home()), "JSON (*.json)")
         if path:
             try:
                 self.config.import_legacy(Path(path), self.secrets)

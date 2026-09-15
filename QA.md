@@ -2,7 +2,7 @@
 
 ## Local automated tests
 
-20 engine/service tests passed, covering:
+25 engine/service tests passed, covering:
 
 - Atomic task claims under competing workers.
 - Crash recovery and uncertain paid requests.
@@ -17,6 +17,10 @@
 - Invalid/empty Word rejection and reuse only after committed validation.
 - Revision creation while retaining prior files.
 - Configuration validation and YouTube 429 cooldown.
+- Bounded events log via startup and hourly pruning.
+- DOCX packages size-capped before any decompression work.
+- OpenCode runs on a transcript copy inside its revision workspace.
+- OpenCode permission auto-rejections surface as a dedicated failure message.
 
 Native UI interaction checks passed for all five screens, range selection, custom ordering, queue insertion, service pause/resume, theme persistence and a 1060 × 720 window. No QML errors were reported. Screenshots were inspected at 1380 × 900 and 1060 × 720 for Arabic shaping, reading order, contrast, spacing, modal readability and overflow. The interface is a native Qt application, so verification used Qt Test and QQuickWindow screenshots rather than a web browser.
 

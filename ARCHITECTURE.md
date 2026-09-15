@@ -17,6 +17,6 @@ Settings are snapshotted at enqueue. Worker model/language/agent parameters foll
 
 Deepgram commits raw responses before parsing and before honoring cancellation. Chunk responses are individually durable; a manifest marks completed audio segmentation. Lost network responses are uncertain rather than blindly retried. This reduces duplicate billing but cannot provide exactly-once external execution.
 
-OpenCode receives the original transcript absolute path and exact target DOCX path. Each task revision runs in a separate working directory. Success requires process exit success, a valid editable DOCX, and unchanged input hash. This is isolation of working files, not an OS security sandbox; OpenCode retains the account permissions granted by its own configuration.
+OpenCode works in a separate directory per task revision that receives a copy of the transcript; the prompt carries that copy's path plus the exact target DOCX path. The original TXT stays outside the agent's reach, and its hash is still verified after the run. Success requires process exit success, a valid editable DOCX, and an unchanged original hash. This is isolation of working files, not an OS security sandbox; OpenCode retains the account permissions granted by its own configuration, and a rejected external-directory permission is reported as a dedicated failure.
 
 Known product limits are documented in README_AR.md. Native integration and scheduler tests use temporary directories and service doubles; external provider availability and actual formatting require live acceptance testing.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 
@@ -127,6 +128,8 @@ class Config:
             raise ValueError("معدل العينة غير مدعوم.")
         if d["audio_channels"] not in [1, 2]:
             raise ValueError("عدد القنوات يجب أن يكون 1 أو 2.")
+        if d["youtube_client"] and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(d["youtube_client"])):
+            raise ValueError("youtube_client: استخدم اسم عميل بحروف وأرقام وشرطات فقط.")
         if "{transcript_path}" not in d["prompt"] or "{output_path}" not in d["prompt"]:
             raise ValueError("البرومبت يجب أن يحتوي {transcript_path} و{output_path}.")
         ids = set()
