@@ -86,11 +86,22 @@ jobs:
           mkdir -p dist
           git archive --format=zip --prefix="WaraqStudio-$TAG/" -o "dist/WaraqStudio-$TAG-source.zip" HEAD
 
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $version = $env:TAG -replace '^v', ''
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "installer.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-assets-${{ github.ref_name }}
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.exe
           retention-days: 7
 
       - name: Write release notes
@@ -99,21 +110,20 @@ jobs:
           إصدار تلقائي بواسطة GitHub Actions (وسم $TAG).
 
           ## الملفات المرفقة
-          - \`WaraqStudio-$TAG-windows-x64.zip\` — الحزمة الكاملة للتشغيل على Windows 10/11 (64-bit): تحتوي \`WaraqStudio.exe\` مع كل المكتبات وQt وFFmpeg.
+          - \`WaraqStudio-${TAG#v}-setup.exe\` — **ملف التثبيت**: شغّله وسيثبّت التطبيق وكل ما يحتاجه (Python وQt وFFmpeg وyt-dlp مضمّنة داخله — لا يحتاج تثبيت أي شيء آخر) في Program Files، مع اختصار في قائمة ابدأ (وسطح المكتب اختياريًا) وإمكانية الإزالة من إعدادات Windows.
+          - \`WaraqStudio-$TAG-windows-x64.zip\` — بديل محمول دون تثبيت: فك الضغط وشغّل \`WaraqStudio.exe\` (أو \`Start.cmd\`).
           - \`WaraqStudio-$TAG-source.zip\` — نسخة مضغوطة من الكود المصدري.
 
-          ## خطوات التثبيت
-          1. فك ضغط \`WaraqStudio-$TAG-windows-x64.zip\` في مجلد دائم.
-          2. شغّل \`WaraqStudio.exe\` (أو \`Start.cmd\`).
-          3. أدخل مفاتيح Deepgram وOpenCode من شاشة الإعدادات داخل التطبيق — لا تُضمَّن أي مفاتيح أو بيانات داخل الحزمة.
-
-          ملاحظة: يتوفر أيضًا «Source code (zip)» يُنشئه GitHub تلقائيًا أسفل الإصدار.
+          ## ملاحظات
+          - أدخل مفاتيح Deepgram وOpenCode من شاشة الإعدادات داخل التطبيق — لا تُضمَّن أي مفاتيح أو بيانات في التثبيت.
+          - بيانات المستخدم تُحفظ في \`%LOCALAPPDATA%\\WaraqStudio\` ولا تُحذف عند إزالة التطبيق.
+          - يتوفر أيضًا «Source code (zip)» يُنشئه GitHub تلقائيًا أسفل الإصدار.
           EOF
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" dist/*.zip \
+          gh release create "$TAG" dist/*.zip dist/*-setup.exe \
             --title "WaraqStudio $TAG" \
             --notes-file RELEASE_NOTES.md
