@@ -85,8 +85,11 @@ ApplicationWindow {
     }
     function reloadTemplates() {
         templ = JSON.parse(JSON.stringify(backend.templates))
-        tplBox.currentIndex = templ.length ? 0 : -1
-        loadTemplateFields()
+        // Run after the popup content exists; dialog content is created on open.
+        Qt.callLater(function() {
+            tplBox.currentIndex = templ.length ? 0 : -1
+            loadTemplateFields()
+        })
     }
 
     Connections {
@@ -444,7 +447,7 @@ ApplicationWindow {
                     spacing: 16
                     RowLayout {
                         AppButton { text: "حفظ الإعدادات"; primary: true; onClicked: { settings.prompt = promptField.text; save() } }
-                        AppButton { objectName: "templatesButton"; text: "قوالب البرومبت"; onClicked: { win.reloadTemplates(); templatesDialog.open() } }
+                        AppButton { objectName: "templatesButton"; text: "قوالب البرومبت"; onClicked: templatesDialog.open() }
                         AppButton { text: "استيراد إعدادات السكربت"; onClicked: backend.importLegacy() }
                         AppButton { text: "فحص البيئة"; onClicked: backend.checkEnvironment() }
                         Item { Layout.fillWidth: true }
@@ -658,7 +661,7 @@ ApplicationWindow {
     Dialog {
         id: templatesDialog; anchors.centerIn: parent; width: Math.min(860, win.width - 80); height: win.height - 140; modal: true
         title: "قوالب البرومبت"; standardButtons: Dialog.Save | Dialog.Cancel
-        onOpened: { standardButton(Dialog.Save).text = "حفظ القوالب"; standardButton(Dialog.Cancel).text = "إلغاء" }
+        onOpened: { standardButton(Dialog.Save).text = "حفظ القوالب"; standardButton(Dialog.Cancel).text = "إلغاء"; win.reloadTemplates() }
         background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
         contentItem: ColumnLayout {
             spacing: 10

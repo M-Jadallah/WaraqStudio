@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -88,9 +89,12 @@ def main():
         # The prompt-template editor opens, lists every template and re-evaluates its bindings.
         click("nav4")
         click("templatesButton")
-        QTest.qWait(120)
-        editor = find(root.contentItem(), "templateEditorBox")
-        assert editor is not None and editor.property("count") == 2
+        editor, deadline = None, time.time() + 3
+        while editor is None and time.time() < deadline:
+            QTest.qWait(50)
+            editor = find(root.contentItem(), "templateEditorBox")
+        assert editor is not None, "template editor dialog did not open"
+        assert editor.property("count") == 2
         QTest.keyClick(root, Qt.Key_Escape)
         QTest.qWait(80)
         click("nav0")
