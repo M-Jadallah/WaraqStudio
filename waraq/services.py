@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
-from .config import atomic_json
+from .config import atomic_json, compose_model, key_env_for, provider_isolated, provider_of
 from .store import fingerprint
 
 
@@ -54,6 +54,26 @@ def safe_title(text):
 
 
 LIMIT_MESSAGE = "بلغ OpenCode حد استخدام اشتراك ChatGPT (نافذة الخمس ساعات)، ولم يُنتج الملف بعد."
+
+
+def worker_env(worker, provider, secret, data_root):
+    """Environment overrides for one OpenCode worker.
+
+    A worker that authenticates with a key also gets its own OpenCode data and state
+    directories: five parallel runs would otherwise share one SQLite database, and the
+    login directory must stay untouched so a subscription session is never lost.
+    """
+    env = {}
+    if provider_isolated(provider) and data_root:
+        base = Path(data_root) / worker["id"]
+        env["XDG_DATA_HOME"] = str(base / "data")
+        env["XDG_STATE_HOME"] = str(base / "state")
+        # Parallel workers must not race an auto-update over one shared binary.
+        env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    name = key_env_for(provider, worker)
+    if name and secret:
+        env[name] = secret
+    return env
 
 
 def limit_reached(line):
@@ -452,7 +472,7 @@ class OpenCode:
                 break
         return module_paths
 
-    def process(self, job, worker, cfg, cancel, log):
+    def process(self, job, worker, cfg, secret, cancel, log):
         transcript = Path(job["transcript"])
         if not transcript.is_file() or not transcript.read_text(encoding="utf-8-sig").strip():
             raise ServiceError("ملف التفريغ فارغ أو غير موجود.", "blocked")
@@ -488,8 +508,15 @@ class OpenCode:
         env = os.environ.copy()
         if module_paths:
             env["NODE_PATH"] = os.pathsep.join(module_paths + ([env["NODE_PATH"]] if env.get("NODE_PATH") else []))
-        command = [str(resolve_opencode(cfg["opencode_executable"])), "run", "--model", worker["model"],
-                   "--variant", worker["variant"], "--agent", worker["agent"], "--dir", str(work), "--format", "json", prompt]
+        provider = provider_of(worker)
+        model = compose_model(provider, worker["model"])
+        env.update(worker_env(worker, provider, secret, cfg.get("opencode_data_root", "")))
+        log(f"المزود: {provider} · النموذج: {model}")
+        command = [str(resolve_opencode(cfg["opencode_executable"])), "run", "--model", model]
+        if str(worker.get("variant", "")).strip():
+            # Reasoning effort is provider specific; empty means the flag is left out.
+            command += ["--variant", worker["variant"]]
+        command += ["--agent", worker["agent"], "--dir", str(work), "--format", "json", prompt]
         denied = []
         limited = []
         def track(line):

@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from waraq.config import Config, defaults
+from waraq.config import Config, compose_model, credential_name, defaults
+from waraq.library import Library
 from waraq.scheduler import Scheduler
-from waraq.services import LIMIT_MESSAGE, Deepgram, ServiceError, Youtube, digest, transcript_from, validate_docx
+from waraq.services import LIMIT_MESSAGE, Deepgram, ServiceError, Youtube, digest, transcript_from, validate_docx, worker_env
 from waraq.store import Store, STAGES
 
 
@@ -200,11 +201,11 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
             p.write_text("تفريغ اختباري", encoding="utf-8")
             return p
     class FakeOC:
-        def process(self, job, worker, cfg, cancel, log):
+        def process(self, job, worker, cfg, secret, cancel, log):
             activity("opencode", 0.5)
             return make_docx(Path(job["folder"]) / "result.docx")
     class Keys:
-        def get(self, worker): return {"dg1": "key-one", "dg2": "key-two"}[worker]
+        def get(self, worker): return {"dg1": "key-one", "dg2": "key-two"}.get(worker, "")
     scheduler = Scheduler(store, cfg, Keys(), FakeYoutube(), FakeDG(), FakeOC())
     deadline = time.time() + 8
     while time.time() < deadline:
@@ -223,14 +224,42 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
 def test_project_cap(env):
     store, cfg = env
     cfg.data["project_concurrency"] = 1
-    assert cfg.data["deepgram_workers"][0]["project"] == cfg.data["deepgram_workers"][1]["project"]
-    # Held active request consumes the entire project slot.
+    # Workers sharing one project label share its cap; distinct labels run in parallel.
+    for worker in cfg.data["deepgram_workers"]:
+        worker["project"] = "shared"
     scheduler = Scheduler(store, cfg, type("Keys", (), {"get": lambda s,w: "x"})())
-    scheduler.active["dg1"] = {"stage": "deepgram", "project": "default", "job_id": "held", "started": time.time(), "cancel": threading.Event()}
+    scheduler.active["dg1"] = {"stage": "deepgram", "project": "shared", "job_id": "held", "started": time.time(), "cancel": threading.Event()}
     ids = store.add(items(), cfg.snapshot())
     store.set_stage(ids[0], "download", "completed")
     scheduler.tick()
     assert store.get(ids[0])["stages"]["deepgram"]["status"] == "pending"
+
+
+def test_distinct_projects_allow_five_parallel_deepgram_workers(env):
+    store, cfg = env
+    cfg.data["project_concurrency"] = 1
+    assert len({w["project"] for w in cfg.data["deepgram_workers"]}) == 5
+    used = []
+    class FakeDG:
+        def transcribe(self, job, worker, cfg, secret, cancel, progress):
+            used.append(worker["id"])
+            time.sleep(0.2)
+            path = Path(job["folder"]) / "transcript.txt"
+            path.write_text("تفريغ", encoding="utf-8")
+            return path
+    scheduler = Scheduler(store, cfg, type("Keys", (), {"get": lambda s, w: "x"})(), deepgram=FakeDG())
+    for worker in cfg.data["deepgram_workers"][:4]:
+        scheduler.active[worker["id"]] = {"stage": "deepgram", "project": worker["project"], "job_id": "held",
+                                          "started": time.time(), "cancel": threading.Event()}
+    ids = store.add(items(), cfg.snapshot())
+    store.set_stage(ids[0], "download", "completed")
+    scheduler.tick()
+    # Four projects are busy; the fifth worker still takes this job.
+    assert store.get(ids[0])["stages"]["deepgram"]["status"] == "running"
+    deadline = time.time() + 5
+    while "dg5" in scheduler.active and time.time() < deadline:
+        time.sleep(0.01)
+    assert used == ["dg5"]
 
 
 def test_chunk_resume_does_not_repeat_paid_chunks(env, tmp_path, monkeypatch):
@@ -358,11 +387,11 @@ def test_opencode_only_reuses_committed_validated_document(env, tmp_path, monkey
     monkeypatch.setattr(services, "run_process", run)
     adapter = services.OpenCode()
     worker = cfg.data["opencode_workers"][0]
-    result = adapter.process(job, worker, cfg.data, threading.Event(), lambda _: None)
-    adapter.process(job, worker, cfg.data, threading.Event(), lambda _: None)
+    result = adapter.process(job, worker, cfg.data, "", threading.Event(), lambda _: None)
+    adapter.process(job, worker, cfg.data, "", threading.Event(), lambda _: None)
     assert len(calls) == 1
     (result.parent / "validated.json").unlink()
-    adapter.process(job, worker, cfg.data, threading.Event(), lambda _: None)
+    adapter.process(job, worker, cfg.data, "", threading.Event(), lambda _: None)
     assert len(calls) == 2
     assert len(list(result.parent.glob("unverified-*.docx"))) == 1
 
@@ -394,7 +423,7 @@ def test_opencode_works_on_transcript_copy_inside_workspace(env, tmp_path, monke
         assert copy.read_text(encoding="utf-8-sig").strip() == "مادة اختبارية"
         make_docx(captured["cwd"] / "001-درس 1.docx")
     monkeypatch.setattr(services, "run_process", run)
-    result = services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, threading.Event(), lambda _: None)
+    result = services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, "", threading.Event(), lambda _: None)
     # The prompt points at the workspace copy, never at the original path.
     assert str((captured["cwd"] / "original.txt").resolve()) in captured["prompt"]
     assert str(txt) not in captured["prompt"]
@@ -416,7 +445,7 @@ def test_opencode_permission_rejection_diagnosed(env, tmp_path, monkeypatch):
         log("permission requested: external_directory (C:\\blocked\\*); auto-rejecting")
     monkeypatch.setattr(services, "run_process", run)
     with pytest.raises(ServiceError) as exc:
-        services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, threading.Event(), lambda _: None)
+        services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, "", threading.Event(), lambda _: None)
     # A dedicated diagnosis, not the generic missing-Word message, and the
     # worker stays usable (failed, not blocked).
     assert exc.value.kind == "failed"
@@ -526,7 +555,7 @@ def test_terminal_kinds_never_rescheduled(env, tmp_path, kind):
     ident = local_txt_job(store, cfg, tmp_path)
     calls = []
     class FakeOC:
-        def process(self, job, worker, cfg, cancel, log):
+        def process(self, job, worker, cfg, secret, cancel, log):
             calls.append(1)
             raise ServiceError("حالة نهائية", kind)
     scheduler = Scheduler(store, cfg, None, opencode=FakeOC(), retry_delays=(0.05,), limit_retry_delay=0.05)
@@ -541,7 +570,7 @@ def test_opencode_quota_retries_hourly_then_terminal(env, tmp_path):
     ident = local_txt_job(store, cfg, tmp_path, {"opencode_limit_retries": 2})
     calls = []
     class FakeOC:
-        def process(self, job, worker, cfg, cancel, log):
+        def process(self, job, worker, cfg, secret, cancel, log):
             calls.append(1)
             raise ServiceError(LIMIT_MESSAGE, "rate_limited")
     scheduler = Scheduler(store, cfg, None, opencode=FakeOC(), limit_retry_delay=0.05)
@@ -567,7 +596,7 @@ def test_retry_counter_resets_after_success(env, tmp_path):
     ident = local_txt_job(store, cfg, tmp_path)
     calls = []
     class FakeOC:
-        def process(self, job, worker, cfg, cancel, log):
+        def process(self, job, worker, cfg, secret, cancel, log):
             calls.append(1)
             if len(calls) == 1:
                 raise ServiceError("عابر", "failed")
@@ -643,5 +672,210 @@ def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises):
             raise ServiceError("فشلت العملية الخارجية")
     monkeypatch.setattr(services, "run_process", run)
     with pytest.raises(ServiceError) as exc:
-        services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, threading.Event(), lambda _: None)
+        services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, "", threading.Event(), lambda _: None)
     assert exc.value.kind == "rate_limited"
+
+
+def test_default_pools_offer_five_deepgram_and_five_openrouter_workers(tmp_path):
+    cfg = Config(tmp_path)
+    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5"]
+    assert len({w["project"] for w in cfg.data["deepgram_workers"]}) == 5
+    assert [w["provider"] for w in cfg.data["opencode_workers"]] == ["login", "login"] + ["openrouter"] * 5
+    assert all(w["variant"] == "" for w in cfg.data["opencode_workers"][2:])
+    Config.validate(cfg.data)
+
+
+def test_worker_pool_migration_runs_once_and_keeps_saved_workers(tmp_path):
+    legacy = {"deepgram_workers": [{"id": "dg1", "name": "Deepgram 01", "enabled": False, "project": "default",
+                                    "model": "whisper-large", "language": "ar",
+                                    "endpoint": "https://api.deepgram.com", "diarize": False}],
+              "opencode_workers": [{"id": "oc1", "name": "OpenCode 01", "enabled": True,
+                                    "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"}]}
+    (tmp_path / "settings.json").write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+    cfg = Config(tmp_path)
+    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5"]
+    # A saved worker keeps every field the user chose; only missing defaults are appended.
+    assert cfg.data["deepgram_workers"][0]["project"] == "default"
+    assert cfg.data["deepgram_workers"][0]["enabled"] is False
+    assert len(cfg.data["opencode_workers"]) == 7
+    assert cfg.migration_note
+    # Deleting a worker afterwards must not resurrect it on the next launch.
+    cfg.data["deepgram_workers"] = cfg.data["deepgram_workers"][:1]
+    cfg.save({})
+    again = Config(tmp_path)
+    assert [w["id"] for w in again.data["deepgram_workers"]] == ["dg1"]
+    assert again.migration_note == ""
+
+
+def test_provider_validation(tmp_path):
+    cfg = Config(tmp_path)
+    unknown = cfg.snapshot()
+    unknown["opencode_workers"][2]["provider"] = "nope"
+    with pytest.raises(ValueError):
+        Config.validate(unknown)
+    custom = cfg.snapshot()
+    custom["opencode_workers"][2].update({"provider": "custom", "key_env": "bad name"})
+    with pytest.raises(ValueError):
+        Config.validate(custom)
+    partial = cfg.snapshot()
+    partial["opencode_workers"][2].update({"provider": "custom", "key_env": "ACME_API_KEY", "model": "acme-model"})
+    with pytest.raises(ValueError):
+        Config.validate(partial)
+    ok = cfg.snapshot()
+    ok["opencode_workers"][2].update({"provider": "custom", "key_env": "ACME_API_KEY", "model": "acme/model-1"})
+    Config.validate(ok)
+    library = cfg.snapshot()
+    library["library_auto"] = "yes"
+    with pytest.raises(ValueError):
+        Config.validate(library)
+
+
+def test_provider_model_ids_and_worker_environment(tmp_path):
+    assert compose_model("login", "openai/gpt-6-astra") == "openai/gpt-6-astra"
+    assert compose_model("openrouter", "deepseek/deepseek-v4.1-flash") == "openrouter/deepseek/deepseek-v4.1-flash"
+    assert compose_model("openrouter", "openrouter/x/y") == "openrouter/x/y"
+    assert compose_model("custom", "acme/model-1") == "acme/model-1"
+    router = {"id": "oc3", "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash"}
+    env = worker_env(router, "openrouter", "sk-or-secret", str(tmp_path))
+    assert env["OPENROUTER_API_KEY"] == "sk-or-secret"
+    assert env["XDG_DATA_HOME"] == str(tmp_path / "oc3" / "data")
+    assert env["XDG_STATE_HOME"] == str(tmp_path / "oc3" / "state")
+    assert env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
+    # A login worker keeps OpenCode's own credentials and its shared directories.
+    login = {"id": "oc1", "provider": "login", "model": "openai/gpt-6-astra"}
+    assert worker_env(login, "login", "sk-or-secret", str(tmp_path)) == {}
+    custom = {"id": "oc9", "provider": "custom", "model": "acme/model-1", "key_env": "ACME_API_KEY"}
+    assert worker_env(custom, "custom", "k", str(tmp_path))["ACME_API_KEY"] == "k"
+    assert credential_name("opencode", "oc3", "openrouter") == "oc3:openrouter"
+    assert credential_name("deepgram", "dg1") == "dg1"
+
+
+def test_opencode_command_carries_provider_model_and_isolated_env(env, tmp_path, monkeypatch):
+    import waraq.services as services
+    store, cfg = env
+    ident = local_txt_job(store, cfg, tmp_path)
+    job = store.get(ident)
+    captured = {}
+    monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
+    def run(command, cwd, cancel, timeout, log, process_env=None):
+        captured["command"] = command
+        captured["env"] = process_env
+        make_docx(Path(cwd) / "001-درس 1.docx")
+    monkeypatch.setattr(services, "run_process", run)
+    router = {"id": "oc3", "name": "OpenRouter 01", "provider": "openrouter",
+              "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"}
+    services.OpenCode().process(job, router, cfg.data, "sk-or-secret", threading.Event(), lambda _: None)
+    assert captured["command"][captured["command"].index("--model") + 1] == "openrouter/deepseek/deepseek-v4.1-flash"
+    # Reasoning effort is provider specific, so an empty variant drops the flag entirely.
+    assert "--variant" not in captured["command"]
+    assert captured["env"]["OPENROUTER_API_KEY"] == "sk-or-secret"
+    assert captured["env"]["XDG_DATA_HOME"] == str(Path(cfg.data["opencode_data_root"]) / "oc3" / "data")
+    captured.clear()
+    login = {"id": "oc1", "name": "OpenCode 01", "provider": "login",
+             "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"}
+    services.OpenCode().process(job, login, cfg.data, "", threading.Event(), lambda _: None)
+    assert captured["command"][captured["command"].index("--model") + 1] == "openai/gpt-6-astra"
+    assert captured["command"][captured["command"].index("--variant") + 1] == "high"
+    assert "OPENROUTER_API_KEY" not in captured["env"]
+    assert "XDG_DATA_HOME" not in captured["env"]
+
+
+def test_isolated_worker_without_key_is_skipped(env, tmp_path):
+    store, cfg = env
+    calls = []
+    class FakeOC:
+        def process(self, job, worker, cfg, secret, cancel, log):
+            calls.append((worker["id"], worker["provider"]))
+            return make_docx(Path(job["folder"]) / "001-درس 1.docx")
+    scheduler = Scheduler(store, cfg, None, opencode=FakeOC())
+    ident = local_txt_job(store, cfg, tmp_path)
+    pump(scheduler, store, ident, "opencode", {"completed"})
+    # The login worker runs; key-based workers wait with a clear message until a key exists.
+    assert calls == [("oc1", "login")]
+    for worker in cfg.data["opencode_workers"][2:]:
+        assert "أضف مفتاح OpenRouter لهذا العامل" == scheduler.disabled_workers[worker["id"]]
+
+
+def test_provider_override_forces_every_worker(env, tmp_path):
+    store, cfg = env
+    seen = []
+    class FakeOC:
+        def process(self, job, worker, cfg, secret, cancel, log):
+            seen.append((worker["id"], worker["provider"], worker["model"], worker.get("variant"), secret))
+            return make_docx(Path(job["folder"]) / "001-درس 1.docx")
+    class Keys:
+        def get(self, worker): return "key-for-" + worker if worker.startswith("oc") else ""
+    scheduler = Scheduler(store, cfg, Keys(), opencode=FakeOC())
+    scheduler.set_provider_override("openrouter", "deepseek/deepseek-v4.1-flash")
+    ident = local_txt_job(store, cfg, tmp_path)
+    pump(scheduler, store, ident, "opencode", {"completed"})
+    # Even the login worker now runs on OpenRouter, with its own provider-scoped key.
+    assert seen == [("oc1", "openrouter", "openrouter/deepseek/deepseek-v4.1-flash", "", "key-for-oc1:openrouter")]
+    scheduler.set_provider_override("", "")
+    assert scheduler.provider_override == ""
+
+
+def test_completed_stage_mirrors_into_library(env, tmp_path):
+    store, cfg = env
+    cfg.data["library_root"] = str(tmp_path / "library")
+    class FakeOC:
+        def process(self, job, worker, cfg, secret, cancel, log):
+            return make_docx(Path(job["folder"]) / "001-درس 1.docx")
+    scheduler = Scheduler(store, cfg, None, opencode=FakeOC())
+    ident = local_txt_job(store, cfg, tmp_path)
+    pump(scheduler, store, ident, "opencode", {"completed"})
+    assert (tmp_path / "library" / "Word" / "001-درس 1.docx").is_file()
+    # Turning automatic organising off leaves the library untouched on later runs.
+    cfg.data["library_auto"] = False
+    (tmp_path / "library" / "Word" / "001-درس 1.docx").unlink()
+    store.retry(ident, "opencode", True)
+    pump(scheduler, store, ident, "opencode", {"completed"})
+    assert not (tmp_path / "library" / "Word" / "001-درس 1.docx").exists()
+
+
+def test_library_publish_is_idempotent_and_collision_safe(tmp_path):
+    cfg = Config(tmp_path)
+    cfg.data["library_root"] = str(tmp_path / "library")
+    library = Library()
+    folder = tmp_path / "job"
+    folder.mkdir()
+    job = {"id": "abc123", "position": 3, "title": "درس تجريبي",
+           "document": str(make_docx(folder / "003-درس.docx")),
+           "transcript": str(folder / "transcript.txt"), "audio": str(folder / "audio.mp3")}
+    Path(job["transcript"]).write_text("تفريغ", encoding="utf-8")
+    Path(job["audio"]).write_bytes(b"audio")
+    assert library.publish(job, cfg.data) == ["003-درس تجريبي.docx", "003-درس تجريبي.txt"]
+    # Audio is copied only when the user opts in: it would double the disk footprint.
+    assert not (tmp_path / "library" / "الصوت").exists()
+    assert library.publish(job, cfg.data) == []
+    with_audio = dict(cfg.data, library_copy_audio=True)
+    assert library.publish(job, with_audio) == ["003-درس تجريبي.mp3"]
+    # A different job with the same title gets its own file instead of overwriting.
+    other = dict(job, id="def456")
+    assert library.publish(other, cfg.data) == ["003-درس تجريبي (2).docx", "003-درس تجريبي (2).txt"]
+    assert sorted(item["kind"] for item in library.scan(cfg.data)) == ["audio", "document", "document", "transcript", "transcript"]
+    # A regenerated artifact refreshes the same mirror file rather than adding another copy.
+    Path(job["document"]).write_bytes(b"x" * 40)
+    assert library.publish(job, cfg.data) == ["003-درس تجريبي.docx"]
+    assert sorted(item["name"] for item in library.scan(cfg.data)) == sorted([
+        "003-درس تجريبي.docx", "003-درس تجريبي.txt", "003-درس تجريبي.mp3",
+        "003-درس تجريبي (2).docx", "003-درس تجريبي (2).txt"])
+
+
+def test_library_remove_stays_inside_the_library(tmp_path):
+    cfg = Config(tmp_path)
+    cfg.data["library_root"] = str(tmp_path / "library")
+    library = Library()
+    folder = tmp_path / "library" / "Word"
+    folder.mkdir(parents=True)
+    inside, outside = folder / "a.docx", tmp_path / "outside.docx"
+    inside.write_bytes(b"a")
+    outside.write_bytes(b"b")
+    with pytest.raises(ValueError):
+        library.remove(cfg.data, str(outside))
+    with pytest.raises(ValueError):
+        library.remove(cfg.data, str(tmp_path / "library" / "stray.docx"))
+    library.remove(cfg.data, str(inside))
+    assert not inside.exists() and outside.is_file()
+

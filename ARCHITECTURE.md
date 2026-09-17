@@ -4,10 +4,11 @@ The native Qt Quick/QML UI talks to a QObject bridge. The bridge runs source dis
 
 Modules:
 
-- `config.py`: validated non-secret settings, atomic writes, Windows credential-store integration and explicit legacy import.
+- `config.py`: validated non-secret settings, atomic writes, Windows credential-store integration, one-time worker-pool migration and explicit legacy import.
 - `store.py`: tasks, stages, events and metadata cache; atomic claims and crash recovery.
 - `services.py`: serialized YouTube access, speech normalization, Deepgram response/chunk persistence, isolated OpenCode execution, DOCX validation.
 - `scheduler.py`: dependency/order gates, per-project concurrency, downstream queue/disk backpressure and worker lifecycle.
+- `library.py`: type-grouped mirror of finished artifacts with a stable name manifest.
 - `bridge.py`: UI operations and background discovery; no paid requests on startup.
 - `qml/`: native screens and reusable controls.
 
@@ -16,6 +17,10 @@ Task stage states: pending → running → completed. Terminal/action states: fa
 Automatic retry policy: download/opencode `failed` outcomes defer on an escalating schedule (5/15/45 minutes, `auto_retry_attempts` 0 disables). Paid Deepgram stages are never deferred at stage level; their transient handling stays in-request with `Retry-After`, and `uncertain` always requires a user decision. OpenCode subscription-quota stops are classified from the provider's streamed error event (HTTP 429 / "usage limit has been reached"), not the exit code, and defer hourly up to `opencode_limit_retries` before a terminal failure that names the likely weekly limit.
 
 Settings are snapshotted at enqueue. Worker model/language/agent parameters follow that snapshot; repaired credentials and executable/cookie paths apply to waiting jobs. Pool membership and worker enabled state apply immediately to future dispatch. Explicit reprocessing creates a new revision fingerprint and retains prior artifacts. Prompt templates are ordinary validated settings (`opencode_templates`): the selected template's text and name are snapshotted into the job's prompt at enqueue, so the revision fingerprint distinguishes templates and later template edits never rewrite queued jobs.
+
+OpenCode workers carry a provider: `login` uses the credentials OpenCode already holds and its shared data directories, while every key-based provider (OpenRouter, OpenAI API, Anthropic, Google, or a custom environment variable) is fed a per-worker credential named `worker:provider` from the OS store and runs with `XDG_DATA_HOME`/`XDG_STATE_HOME` pointed at its own directory under `opencode_data_root`. That keeps five parallel runs off OpenCode's shared SQLite database and off the login directory, and auto-update is disabled for those runs so they cannot race over one binary. The model id is composed as `provider/model` unless it already carries the prefix; `login` and custom models pass through as typed. An empty `variant` drops `--variant` entirely, because reasoning effort is provider specific. A key-based worker without a stored credential is parked with an explicit message instead of consuming a job. A session-only queue override can force one provider and model on every OpenCode worker regardless of its own configuration; it is not persisted and applies to the next dispatch, so switching providers mid-queue resumes deferred work under the new provider.
+
+The library mirrors finished artifacts into `Word`, `التفريغات` and `الصوت` folders under `library_root`. A manifest pins the file name chosen for each (job, kind) pair, so republishing updates one file, two lessons sharing a title never overwrite each other, and a regenerated artifact refreshes its own mirror. Publishing copies (never moves) after each completed stage, is idempotent by size and timestamp, is skipped when `library_auto` is off, and can never fail a stage. Deletion is confined to the three library folders.
 
 The bridge can arm a session-only auto-stop: when no stage is pending or running, no worker is active, and no discovery is in flight, it logs queue completion and quits through the normal shutdown path. Deferred, paused, blocked, or otherwise pending work always keeps the application open.
 

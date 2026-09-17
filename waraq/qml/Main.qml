@@ -30,7 +30,10 @@ ApplicationWindow {
     property string search: ""
     property string sourceSearch: ""
     property string librarySearch: ""
-    property var pageNames: ["مركز العمليات", "إضافة مصدر", "العمال والخدمات", "مكتبة النتائج", "الإعدادات"]
+    property string fileSearch: ""
+    property string fileKind: "all"
+    property var pendingFile: ({})
+    property var pageNames: ["مركز العمليات", "إضافة مصدر", "العمال والخدمات", "مكتبة النتائج", "الملفات", "الإعدادات"]
     color: bg
     palette.window: panel
     palette.windowText: ink
@@ -55,18 +58,53 @@ ApplicationWindow {
         return muted
     }
     function save() { return backend.saveSettings(JSON.stringify(settings)) }
+    function resolvedModel(provider, model) {
+        if (!provider || provider === "login" || provider === "custom") return model
+        return model.indexOf(provider + "/") === 0 ? model : provider + "/" + model
+    }
+    function workerLine(w) {
+        if (w.stage === "download") return ""
+        if (w.stage === "deepgram") return w.hasKey ? "المفتاح محفوظ في مخزن الاعتماد" : "لا مفتاح محفوظ لهذا العامل"
+        var parts = [w.providerLabel, w.modelResolved]
+        parts.push(!w.keyEnv ? "تسجيل دخول OpenCode" : (w.hasKey ? "المفتاح محفوظ" : "لا مفتاح محفوظ"))
+        return parts.join("  ·  ")
+    }
+    function kindLabel(kind) { return kind === "document" ? "Word" : kind === "transcript" ? "تفريغ" : "صوت" }
+    function fileSize(bytes) {
+        if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " م.ب"
+        if (bytes >= 1024) return Math.round(bytes / 1024) + " ك.ب"
+        return bytes + " بايت"
+    }
+    function applyProviderOverride() {
+        var provider = providerForce.currentValue || ""
+        if (provider) {
+            var first = settings.opencode_workers.find(function(w) { return (w.provider || "login") === provider })
+            forceModel.text = first ? (first.model || "") : ""
+        }
+        pushProviderOverride()
+    }
+    function pushProviderOverride() {
+        var provider = providerForce.currentValue || ""
+        backend.setProviderOverride(provider, provider ? forceModel.text : "")
+    }
+    function fillWorkerFields() {
+        workerName.text = editingWorker.name
+        workerModel.text = editingWorker.model
+        workerExtra.text = workerKind === "deepgram" ? editingWorker.language : editingWorker.variant
+        workerProject.text = workerKind === "deepgram" ? editingWorker.project : editingWorker.agent
+        endpoint.currentIndex = Math.max(0, ["https://api.deepgram.com", "https://api.eu.deepgram.com", "https://api.au.deepgram.com"].indexOf(editingWorker.endpoint))
+        diarize.checked = !!editingWorker.diarize
+        var ids = backend.providers.map(function(p) { return p.id })
+        workerProvider.currentIndex = Math.max(0, ids.indexOf(editingWorker.provider || "login"))
+        workerKeyEnv.text = editingWorker.key_env || ""
+        workerEnabled.checked = editingWorker.enabled || false
+        apiKey.text = ""
+    }
     function editWorker(worker, kind) {
         workerKind = kind
         var arr = kind === "deepgram" ? settings.deepgram_workers : settings.opencode_workers
         workerIndex = arr.findIndex(function(w) { return w.id === worker.id })
         editingWorker = JSON.parse(JSON.stringify(arr[workerIndex]))
-        workerName.text = editingWorker.name
-        workerModel.text = editingWorker.model
-        workerExtra.text = kind === "deepgram" ? editingWorker.language : editingWorker.variant
-        workerProject.text = kind === "deepgram" ? editingWorker.project : editingWorker.agent
-        endpoint.currentIndex = Math.max(0, ["https://api.deepgram.com", "https://api.eu.deepgram.com", "https://api.au.deepgram.com"].indexOf(editingWorker.endpoint))
-        diarize.checked = !!editingWorker.diarize
-        apiKey.text = ""
         workerDialog.open()
     }
     function openJob(job) { selectedJob = job; jobDialog.open() }
@@ -109,6 +147,11 @@ ApplicationWindow {
             }
         }
     }
+    Connections {
+        target: win
+        // The file page reads the disk on demand, not on the 700ms UI timer.
+        function onPageChanged() { if (win.page === 4) backend.refreshLibrary() }
+    }
     Timer { id: toastTimer; interval: 9000; onTriggered: toastText = "" }
     Timer { id: autoStopTimer; interval: 2500; onTriggered: Qt.quit() }
 
@@ -133,34 +176,67 @@ ApplicationWindow {
             spacing: 0
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 94
+                Layout.preferredHeight: 140
                 color: win.bg
-                RowLayout {
+                ColumnLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 32
                     anchors.rightMargin: 32
-                    spacing: 12
-                    AppButton {
-                        objectName: "runButton"
-                        text: backend.running ? "إيقاف بعد المهام الحالية" : "تشغيل الطابور"
-                        primary: !backend.running
-                        onClicked: backend.toggleRunning()
+                    anchors.topMargin: 12
+                    anchors.bottomMargin: 12
+                    spacing: 10
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        AppButton {
+                            objectName: "runButton"
+                            text: backend.running ? "إيقاف بعد المهام الحالية" : "تشغيل الطابور"
+                            primary: !backend.running
+                            onClicked: backend.toggleRunning()
+                        }
+                        Rectangle { width: 7; height: 7; radius: 4; color: backend.running ? win.accent : win.muted }
+                        SubText { text: backend.running ? "المحرك يعمل" : "المحرك متوقف" }
+                        CheckBox {
+                            objectName: "autoStopBox"
+                            text: "إيقاف التطبيق بعد اكتمال الطابور"
+                            palette.windowText: win.muted
+                            onClicked: backend.setAutoStop(checked)
+                            Accessible.name: "إيقاف التطبيق تلقائيًا بعد اكتمال الطابور"
+                        }
+                        Item { Layout.fillWidth: true }
+                        ColumnLayout {
+                            Layout.alignment: Qt.AlignRight
+                            spacing: 3
+                            LabelText { text: win.pageNames[win.page]; font.pixelSize: 26; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
+                            SubText { text: "من الفيديو إلى مستند يستحق القراءة"; Layout.alignment: Qt.AlignRight }
+                        }
                     }
-                    Rectangle { width: 7; height: 7; radius: 4; color: backend.running ? win.accent : win.muted }
-                    SubText { text: backend.running ? "المحرك يعمل" : "المحرك متوقف" }
-                    CheckBox {
-                        objectName: "autoStopBox"
-                        text: "إيقاف التطبيق بعد اكتمال الطابور"
-                        palette.windowText: win.muted
-                        onClicked: backend.setAutoStop(checked)
-                        Accessible.name: "إيقاف التطبيق تلقائيًا بعد اكتمال الطابور"
-                    }
-                    Item { Layout.fillWidth: true }
-                    ColumnLayout {
-                        Layout.alignment: Qt.AlignRight
-                        spacing: 3
-                        LabelText { text: win.pageNames[win.page]; font.pixelSize: 26; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
-                        SubText { text: "من الفيديو إلى مستند يستحق القراءة"; Layout.alignment: Qt.AlignRight }
+                    // Optional per-run provider: forcing one overrides every OpenCode worker.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        LabelText { text: "فرض مزود على عمال OpenCode" }
+                        ComboBox {
+                            id: providerForce
+                            objectName: "providerForceBox"
+                            model: [{id: "", name: "بدون فرض مزود"}].concat(backend.providers)
+                            textRole: "name"
+                            valueRole: "id"
+                            Layout.preferredWidth: 210
+                            onActivated: win.applyProviderOverride()
+                            Accessible.name: "فرض مزود على عمال OpenCode"
+                        }
+                        AppField {
+                            id: forceModel
+                            objectName: "forceModelField"
+                            visible: (providerForce.currentValue || "") !== ""
+                            Layout.preferredWidth: 320
+                            placeholderText: "معرّف النموذج"
+                            horizontalAlignment: Text.AlignRight
+                            onEditingFinished: win.pushProviderOverride()
+                            Accessible.name: "النموذج المفروض"
+                        }
+                        Item { Layout.fillWidth: true }
                     }
                 }
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
@@ -370,8 +446,9 @@ ApplicationWindow {
                     SubText { text: "كل عامل يعمل على مهمة واحدة. إيقاف الاستقبال يسمح للمهمة الحالية بالاكتمال."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                     RowLayout {
                         Layout.fillWidth: true
-                        AppButton { text: "إضافة عامل OpenCode"; onClicked: { var w = JSON.parse(JSON.stringify(settings.opencode_workers[0])); w.id = "oc" + Date.now(); w.name = "OpenCode " + (settings.opencode_workers.length + 1); settings.opencode_workers.push(w); save() } }
-                        AppButton { text: "إضافة عامل Deepgram"; onClicked: { var w = JSON.parse(JSON.stringify(settings.deepgram_workers[0])); w.id = "dg" + Date.now(); w.name = "Deepgram " + (settings.deepgram_workers.length + 1); settings.deepgram_workers.push(w); save() } }
+                        AppButton { text: "إضافة عامل OpenCode"; onClicked: { var w = JSON.parse(JSON.stringify(settings.opencode_workers[0])); w.id = "oc" + Date.now(); w.name = "OpenCode " + (settings.opencode_workers.length + 1); w.provider = "login"; settings.opencode_workers.push(w); save() } }
+                        AppButton { text: "إضافة عامل OpenRouter"; onClicked: { var t = settings.opencode_workers.find(function(x){ return x.provider === "openrouter" }) || settings.opencode_workers[0]; var w = JSON.parse(JSON.stringify(t)); w.id = "or" + Date.now(); w.name = "OpenRouter " + (settings.opencode_workers.length + 1); w.provider = "openrouter"; w.variant = ""; settings.opencode_workers.push(w); save() } }
+                        AppButton { text: "إضافة عامل Deepgram"; onClicked: { var w = JSON.parse(JSON.stringify(settings.deepgram_workers[0])); w.id = "dg" + Date.now(); w.name = "Deepgram " + (settings.deepgram_workers.length + 1); w.project = "proj-" + (settings.deepgram_workers.length + 1); settings.deepgram_workers.push(w); save() } }
                         Item { Layout.fillWidth: true }
                         LabelText { text: "إدارة السعة"; font.pixelSize: 18 }
                     }
@@ -382,7 +459,7 @@ ApplicationWindow {
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
                             required property var modelData
-                            width: workerList.width; height: modelData.error ? 126 : 102
+                            width: workerList.width; height: modelData.error ? 150 : 126
                             ColumnLayout {
                                 anchors.fill: parent; anchors.margins: 18; spacing: 8
                                 RowLayout {
@@ -390,11 +467,21 @@ ApplicationWindow {
                                     AppButton { text: "إعدادات"; visible: modelData.stage !== "download"; onClicked: win.editWorker(modelData, modelData.stage) }
                                     AppButton { text: modelData.paused ? "استئناف الخدمة" : "إيقاف الخدمة"; onClicked: backend.pauseStage(modelData.stage, !modelData.paused) }
                                     AppButton { text: "إعادة فحص العامل"; visible: !!modelData.error; onClicked: backend.resetWorker(modelData.id) }
+                                    CheckBox {
+                                        objectName: "workerEnableBox"
+                                        text: "يستقبل مهامًا"
+                                        visible: modelData.stage !== "download"
+                                        checked: !!modelData.enabled
+                                        palette.windowText: win.muted
+                                        onClicked: backend.setWorkerEnabled(modelData.id, checked)
+                                        Accessible.name: "تفعيل العامل " + modelData.name
+                                    }
                                     Item { Layout.fillWidth: true }
                                     ColumnLayout {
                                         Layout.alignment: Qt.AlignRight
                                         LabelText { text: modelData.name; font.pixelSize: 17; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
                                         SubText { text: modelData.job_id ? "يعالج " + modelData.job_id + "  ·  " + modelData.elapsed + " ثانية" : (!modelData.enabled ? "معطل" : modelData.paused ? "الاستقبال متوقف" : modelData.stageLabel + "  ·  جاهز لاستقبال مهمة"); Layout.alignment: Qt.AlignRight }
+                                        SubText { text: win.workerLine(modelData); visible: text.length > 0; Layout.alignment: Qt.AlignRight }
                                     }
                                     Rectangle { width: 10; height: 10; radius: 5; color: modelData.error ? "#f4b880" : modelData.job_id ? win.accent : win.muted }
                                 }
@@ -403,8 +490,8 @@ ApplicationWindow {
                         }
                     }
                     Box {
-                        Layout.fillWidth: true; Layout.preferredHeight: 72
-                        SubText { anchors.fill: parent; anchors.margins: 18; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; text: "مفاتيح Deepgram محفوظة في Windows Credential Manager. تعدد المفاتيح لا يزيد حصة المشروع تلقائيًا؛ يُطبق حد تزامن مشترك لكل مشروع." }
+                        Layout.fillWidth: true; Layout.preferredHeight: 96
+                        SubText { anchors.fill: parent; anchors.margins: 18; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; text: "مفاتيح Deepgram و OpenRouter محفوظة في Windows Credential Manager، مفتاح مستقل لكل عامل. عمال Deepgram ذوو معرّف المشروع نفسه يتقاسمون حد التزامن؛ اجعل المعرّف مطابقًا لمشروع المفتاح. عامل OpenCode بمزود غير «تسجيل الدخول» يعمل في مجلد بيانات مستقل فلا تتعارض العمليات المتوازية." }
                     }
                 }
 
@@ -443,6 +530,63 @@ ApplicationWindow {
                     }
                 }
 
+                // Files
+                ColumnLayout {
+                    spacing: 16
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppButton { objectName: "organizeButton"; text: "تنظيم الآن"; primary: true; enabled: !backend.libraryBusy; onClicked: backend.organizeLibrary() }
+                        AppButton { text: "تحديث"; enabled: !backend.libraryBusy; onClicked: backend.refreshLibrary() }
+                        AppButton { text: "فتح مجلد المكتبة"; onClicked: backend.openPath(settings.library_root) }
+                        AppButton { text: "فتح ملف من الجهاز"; onClicked: { var path = backend.choosePath("file"); if (path) backend.openPath(path) } }
+                        Item { Layout.fillWidth: true }
+                        LabelText { text: backend.library.length + " ملف في المكتبة"; font.pixelSize: 20 }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 14
+                        AppField { Layout.fillWidth: true; placeholderText: "بحث في أسماء الملفات"; horizontalAlignment: Text.AlignRight; onTextChanged: win.fileSearch = text; Accessible.name: "بحث في الملفات" }
+                        Repeater {
+                            model: [{id: "all", label: "الكل"}, {id: "document", label: "Word"}, {id: "transcript", label: "التفريغات"}, {id: "audio", label: "الصوت"}]
+                            delegate: CheckBox {
+                                required property var modelData
+                                objectName: "fileKind_" + modelData.id
+                                text: modelData.label
+                                checked: win.fileKind === modelData.id
+                                palette.windowText: win.ink
+                                onClicked: win.fileKind = modelData.id
+                            }
+                        }
+                    }
+                    ListView {
+                        id: fileList
+                        objectName: "fileList"
+                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 10
+                        model: backend.library.filter(function(f){ return (win.fileKind === "all" || f.kind === win.fileKind) && (win.fileSearch === "" || f.name.toLowerCase().indexOf(win.fileSearch.toLowerCase()) >= 0) })
+                        ScrollBar.vertical: ScrollBar {}
+                        delegate: Box {
+                            required property var modelData
+                            width: fileList.width; height: 78
+                            RowLayout {
+                                anchors.fill: parent; anchors.margins: 16; spacing: 12
+                                AppButton { text: "فتح"; primary: true; onClicked: backend.openPath(modelData.path) }
+                                AppButton { text: "فتح المجلد"; onClicked: backend.openPath(modelData.folder) }
+                                AppButton { text: "نسخ المسار"; onClicked: backend.copyText(modelData.path) }
+                                AppButton { text: "حذف"; danger: true; onClicked: { win.pendingFile = modelData; deleteFileDialog.open() } }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    LabelText { text: modelData.name; font.pixelSize: 16; Layout.fillWidth: true }
+                                    SubText { text: win.kindLabel(modelData.kind) + "  ·  " + win.fileSize(modelData.size) + "  ·  " + Qt.formatDateTime(new Date(modelData.modified * 1000), "yyyy-MM-dd HH:mm") }
+                                }
+                            }
+                        }
+                        SubText {
+                            anchors.centerIn: parent; visible: fileList.count === 0; wrapMode: Text.WordWrap
+                            width: parent.width - 60; horizontalAlignment: Text.AlignHCenter
+                            text: backend.libraryBusy ? "جارٍ التنظيم…" : "لا ملفات في المكتبة بعد. «تنظيم الآن» ينسخ نتائج المهام المكتملة إلى مجلدات Word والتفريغات والصوت داخل: " + settings.library_root
+                        }
+                    }
+                }
+
                 // Settings
                 ColumnLayout {
                     spacing: 16
@@ -465,7 +609,7 @@ ApplicationWindow {
                                     id: storageColumn; anchors.fill: parent; anchors.margins: 20; spacing: 12
                                     LabelText { text: "الملفات والأدوات"; font.pixelSize: 18; Layout.alignment: Qt.AlignRight }
                                     Repeater {
-                                        model: [{key:"output_root",label:"مجلد النتائج",kind:"folder"},{key:"cookies_file",label:"ملف كوكيز Netscape",kind:"file"},{key:"opencode_executable",label:"ملف OpenCode التنفيذي",kind:"file"},{key:"opencode_context",label:"مجلد المشروع السابق",kind:"folder"}]
+                                        model: [{key:"output_root",label:"مجلد النتائج",kind:"folder"},{key:"library_root",label:"مجلد المكتبة",kind:"folder"},{key:"cookies_file",label:"ملف كوكيز Netscape",kind:"file"},{key:"opencode_executable",label:"ملف OpenCode التنفيذي",kind:"file"},{key:"opencode_context",label:"مجلد المشروع السابق",kind:"folder"},{key:"opencode_data_root",label:"مجلد بيانات عمال OpenCode",kind:"folder"}]
                                         delegate: RowLayout {
                                             required property var modelData
                                             Layout.fillWidth: true
@@ -499,6 +643,16 @@ ApplicationWindow {
                                         CheckBox { text: "التنزيل"; checked: settings.download_enabled; onClicked: settings.download_enabled = checked; palette.windowText: win.ink }
                                         LabelText { text: "القالب المخصص" }
                                     }
+                                }
+                            }
+                            Box {
+                                Layout.fillWidth: true; implicitHeight: libraryColumn.implicitHeight + 40
+                                ColumnLayout {
+                                    id: libraryColumn; anchors.fill: parent; anchors.margins: 20; spacing: 12
+                                    LabelText { text: "مكتبة الملفات"; font.pixelSize: 18; Layout.alignment: Qt.AlignRight }
+                                    SubText { text: "نسخة منظّمة من النتائج داخل مجلدات Word والتفريغات والصوت لسهولة الوصول من خارج التطبيق. المهمة تُعاد معالجتها فتُحدَّث نسختها في المكتبة."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    CheckBox { text: "تنظيم تلقائي بعد اكتمال كل مرحلة"; checked: settings.library_auto; onClicked: settings.library_auto = checked; palette.windowText: win.ink; Layout.alignment: Qt.AlignRight }
+                                    CheckBox { text: "انسخ الصوت أيضًا إلى المكتبة (يضاعف المساحة)"; checked: settings.library_copy_audio; onClicked: settings.library_copy_audio = checked; palette.windowText: win.ink; Layout.alignment: Qt.AlignRight }
                                 }
                             }
                             Box {
@@ -614,9 +768,9 @@ ApplicationWindow {
         onAccepted: { backend.retry(selectedJob.id, "deepgram", true); jobDialog.close() }
     }
     Dialog {
-        id: workerDialog; anchors.centerIn: parent; width: 620; height: workerKind === "deepgram" ? 650 : 450; modal: true
+        id: workerDialog; anchors.centerIn: parent; width: 620; height: workerKind === "deepgram" ? 650 : 610; modal: true
         title: "إعدادات العامل"; standardButtons: Dialog.Save | Dialog.Cancel
-        onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Cancel).text = "إلغاء" }
+        onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Cancel).text = "إلغاء"; Qt.callLater(win.fillWorkerFields) }
         background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
         contentItem: ColumnLayout {
             spacing: 10
@@ -625,8 +779,25 @@ ApplicationWindow {
             LabelText { text: "النموذج"; Layout.alignment: Qt.AlignRight }
             AppField { id: workerModel; Layout.fillWidth: true }
             RowLayout {
+                visible: workerKind !== "deepgram"
+                ComboBox { id: workerProvider; Layout.fillWidth: true; model: backend.providers; textRole: "name"; valueRole: "id" }
+                LabelText { text: "مزود الخدمة" }
+            }
+            RowLayout {
+                visible: workerKind !== "deepgram" && workerProvider.currentValue === "custom"
+                AppField { id: workerKeyEnv; Layout.fillWidth: true; placeholderText: "MY_PROVIDER_API_KEY" }
+                LabelText { text: "متغير المفتاح" }
+            }
+            SubText {
+                visible: workerKind !== "deepgram"
+                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                text: workerProvider.currentValue === "login"
+                      ? "يستخدم تسجيل الدخول المحفوظ داخل OpenCode (اشتراك ChatGPT وغيره) دون مفتاح، وفي مجلد بيانات OpenCode المشترك."
+                      : "يُشغَّل بمفتاح هذا العامل، وفي مجلد بيانات مستقل حتى لا تتعارض العمليات المتوازية. المعرّف المرسل: " + win.resolvedModel(workerProvider.currentValue, workerModel.text)
+            }
+            RowLayout {
                 AppField { id: workerExtra; Layout.fillWidth: true }
-                LabelText { text: workerKind === "deepgram" ? "اللغة: ar أو auto" : "درجة التفكير" }
+                LabelText { text: workerKind === "deepgram" ? "اللغة: ar أو auto" : "درجة التفكير (اتركها فارغة للمزودين بلا درجات)" }
             }
             RowLayout {
                 AppField { id: workerProject; Layout.fillWidth: true }
@@ -634,8 +805,17 @@ ApplicationWindow {
             }
             ComboBox { id: endpoint; visible: workerKind === "deepgram"; Layout.fillWidth: true; model: ["https://api.deepgram.com", "https://api.eu.deepgram.com", "https://api.au.deepgram.com"] }
             CheckBox { id: diarize; visible: workerKind === "deepgram"; text: "تمييز المتحدثين"; palette.windowText: win.ink }
-            LabelText { text: "مفتاح API خاص بهذا العامل"; visible: workerKind === "deepgram"; Layout.alignment: Qt.AlignRight }
-            AppField { id: apiKey; visible: workerKind === "deepgram"; Layout.fillWidth: true; echoMode: TextInput.Password; placeholderText: "اتركه فارغًا للاحتفاظ بالمفتاح المحفوظ" }
+            LabelText {
+                visible: workerKind === "deepgram" || workerProvider.currentValue !== "login"
+                text: workerKind === "deepgram" ? "مفتاح API خاص بهذا العامل" : "مفتاح المزود لهذا العامل"
+                Layout.alignment: Qt.AlignRight
+            }
+            AppField {
+                id: apiKey
+                visible: workerKind === "deepgram" || workerProvider.currentValue !== "login"
+                Layout.fillWidth: true; echoMode: TextInput.Password
+                placeholderText: "اتركه فارغًا للاحتفاظ بالمفتاح المحفوظ"
+            }
             CheckBox { id: workerEnabled; text: "استقبال مهام جديدة"; checked: editingWorker.enabled || false; palette.windowText: win.ink }
             Item { Layout.fillHeight: true }
         }
@@ -645,12 +825,23 @@ ApplicationWindow {
                 editingWorker.language = workerExtra.text; editingWorker.project = workerProject.text; editingWorker.endpoint = endpoint.currentText; editingWorker.diarize = diarize.checked
                 settings.deepgram_workers[workerIndex] = editingWorker
             } else {
-                editingWorker.variant = workerExtra.text; editingWorker.agent = workerProject.text; settings.opencode_workers[workerIndex] = editingWorker
+                editingWorker.variant = workerExtra.text; editingWorker.agent = workerProject.text
+                editingWorker.provider = workerProvider.currentValue || "login"
+                editingWorker.key_env = editingWorker.provider === "custom" ? workerKeyEnv.text.trim() : ""
+                settings.opencode_workers[workerIndex] = editingWorker
             }
-            if(save() && workerKind === "deepgram" && apiKey.text.length > 0) backend.saveKey(editingWorker.id, apiKey.text)
+            var needsKey = workerKind === "deepgram" || editingWorker.provider !== "login"
+            if(save() && needsKey && apiKey.text.length > 0) backend.saveKey(editingWorker.id, apiKey.text)
             apiKey.text = ""
         }
         onRejected: apiKey.text = ""
+    }
+    Dialog {
+        id: deleteFileDialog; anchors.centerIn: parent; width: 520; modal: true; title: "حذف من المكتبة"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Ok).text = "حذف"; standardButton(Dialog.Cancel).text = "إلغاء" }
+        Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُحذف «" + win.pendingFile.name + "» من مجلد المكتبة. النسخة الأصلية داخل مجلد المهمة تبقى محفوظة، ويمكن إعادة التنظيم لاحقًا." }
+        onAccepted: backend.deleteLibraryFile(win.pendingFile.path)
     }
     Dialog {
         id: advancedDialog; anchors.centerIn: parent; width: Math.min(850, win.width - 100); height: win.height - 120; modal: true

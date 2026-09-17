@@ -19,6 +19,68 @@ DEFAULT_PROMPT = '''استخدم مهارة arabic-lesson-formatter-sequential �
 تحقق من تنسيق المستند واتجاه العربية قبل إنهاء المهمة.'''
 
 
+# OpenCode provider catalog. "login" uses the credentials OpenCode already holds
+# (subscription or any provider logged in there); every other provider is fed a key
+# from the OS store and runs in its own data directory so parallel workers cannot
+# contend over OpenCode's shared database.
+PROVIDERS = [
+    {"id": "login", "name": "تسجيل دخول OpenCode", "key_env": "", "isolated": False},
+    {"id": "openrouter", "name": "OpenRouter", "key_env": "OPENROUTER_API_KEY", "isolated": True},
+    {"id": "openai", "name": "OpenAI (مفتاح API)", "key_env": "OPENAI_API_KEY", "isolated": True},
+    {"id": "anthropic", "name": "Anthropic", "key_env": "ANTHROPIC_API_KEY", "isolated": True},
+    {"id": "google", "name": "Google Gemini", "key_env": "GOOGLE_GENERATIVE_AI_API_KEY", "isolated": True},
+    {"id": "custom", "name": "مزود مخصص", "key_env": "", "isolated": True},
+]
+PROVIDER_MAP = {p["id"]: p for p in PROVIDERS}
+OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
+
+
+def provider_of(worker):
+    """Provider of an OpenCode worker; jobs saved before providers existed count as login."""
+    value = str((worker or {}).get("provider", "") or "login")
+    return value if value in PROVIDER_MAP else "login"
+
+
+def provider_isolated(provider):
+    return bool(PROVIDER_MAP.get(provider, PROVIDER_MAP["login"])["isolated"])
+
+
+def key_env_for(provider, worker=None):
+    """Environment variable carrying this provider's key; empty when a login is enough."""
+    if provider == "custom":
+        return str((worker or {}).get("key_env", "")).strip()
+    return PROVIDER_MAP.get(provider, {}).get("key_env", "")
+
+
+def compose_model(provider, model):
+    """Full provider/model id OpenCode expects. Login and custom models pass through."""
+    model = str(model or "").strip()
+    if not model or provider in ("", "login", "custom") or model.startswith(provider + "/"):
+        return model
+    return provider + "/" + model
+
+
+def credential_name(stage, worker_id, provider=""):
+    """Credential-store entry: one key per provider per OpenCode worker, bare id for Deepgram."""
+    if stage == "opencode":
+        return f"{worker_id}:{provider or 'login'}"
+    return worker_id
+
+
+def default_deepgram_workers(count=5):
+    return [{"id": f"dg{i}", "name": f"Deepgram {i:02d}", "enabled": True, "project": f"proj-{i}",
+             "model": "whisper-large", "language": "ar",
+             "endpoint": "https://api.deepgram.com", "diarize": False} for i in range(1, count + 1)]
+
+
+def default_opencode_workers(count=5):
+    login = [{"id": f"oc{i}", "name": f"OpenCode {i:02d}", "enabled": True, "provider": "login",
+              "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"} for i in range(1, 3)]
+    routers = [{"id": f"oc{i}", "name": f"OpenRouter {i - 2:02d}", "enabled": True, "provider": "openrouter",
+                "model": OPENROUTER_MODEL, "variant": "", "agent": "build"} for i in range(3, 3 + count)]
+    return login + routers
+
+
 def atomic_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
@@ -47,21 +109,12 @@ def defaults(home: Path):
         "opencode_context": "", "prompt": DEFAULT_PROMPT, "strict_order": False,
         "opencode_templates": [{"id": "default", "name": "افتراضي", "text": DEFAULT_PROMPT}],
         "auto_retry_attempts": 3, "opencode_limit_retries": 5,
+        "opencode_data_root": str(home / "opencode-workers"),
+        "library_root": str(home / "library"),
+        "library_auto": True, "library_copy_audio": False,
         "theme": "dark",
-        "deepgram_workers": [
-            {"id": "dg1", "name": "Deepgram 01", "enabled": True,
-             "project": "default", "model": "whisper-large", "language": "ar",
-             "endpoint": "https://api.deepgram.com", "diarize": False},
-            {"id": "dg2", "name": "Deepgram 02", "enabled": True,
-             "project": "default", "model": "whisper-large", "language": "ar",
-             "endpoint": "https://api.deepgram.com", "diarize": False},
-        ],
-        "opencode_workers": [
-            {"id": "oc1", "name": "OpenCode 01", "enabled": True,
-             "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},
-            {"id": "oc2", "name": "OpenCode 02", "enabled": True,
-             "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},
-        ],
+        "deepgram_workers": default_deepgram_workers(),
+        "opencode_workers": default_opencode_workers(),
     }
 
 
@@ -84,10 +137,37 @@ class Config:
     def __init__(self, home: Path):
         self.home = home
         self.path = home / "settings.json"
+        self.migration_note = ""
         self.data = defaults(home)
         if self.path.exists():
             saved = json.loads(self.path.read_text(encoding="utf-8"))
             self.data.update(saved)
+        self.migrate()
+
+    def migrate(self):
+        """One-time top-up of the default pools. Existing workers are never touched."""
+        if self.data.get("workers_expanded"):
+            return
+        try:
+            added = []
+            wanted = defaults(self.home)
+            for kind in ("deepgram_workers", "opencode_workers"):
+                pool = self.data[kind]
+                for worker in wanted[kind]:
+                    if len(pool) >= 16:
+                        break
+                    if any(item["id"] == worker["id"] for item in pool):
+                        continue
+                    pool.append(worker)
+                    added.append(worker["name"])
+            self.data["workers_expanded"] = True
+            self.save({})
+            if added:
+                self.migration_note = ("أُضيفت عمال افتراضية جديدة (" + "، ".join(added) +
+                                       "). أضف مفتاح كل عامل من صفحة العمال قبل تشغيله.")
+        except Exception:
+            # A failed top-up must never block startup; it retries on the next launch.
+            self.data.pop("workers_expanded", None)
 
     def snapshot(self):
         return copy.deepcopy(self.data)
@@ -105,6 +185,12 @@ class Config:
             raise ValueError("اختر مسار نتائج مطلقًا.")
         if os.name == "nt" and len(str(Path(d["output_root"]))) > 125:
             raise ValueError("اختر مجلد نتائج بمسار أقصر من 126 محرفًا لحماية مسارات Word على Windows.")
+        for key, label in (("opencode_data_root", "بيانات عمال OpenCode"), ("library_root", "مكتبة الملفات")):
+            if not Path(d[key]).is_absolute():
+                raise ValueError(f"اختر مسار {label} مسارًا مطلقًا.")
+        for k in ("library_auto", "library_copy_audio"):
+            if not isinstance(d[k], bool):
+                raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
         for k, low, high in [
             ("youtube_request_delay", 1, 120), ("youtube_sleep_min", 5, 600),
             ("youtube_sleep_max", 5, 1200), ("project_concurrency", 1, 50),
@@ -163,6 +249,15 @@ class Config:
                 ids.add(worker["id"])
                 if not worker["model"].strip():
                     raise ValueError("حدد نموذجًا لكل عامل.")
+                if kind == "opencode_workers":
+                    provider = str(worker.get("provider", "login") or "login")
+                    if provider not in PROVIDER_MAP:
+                        raise ValueError("مزود العامل غير معروف: " + provider)
+                    if provider == "custom":
+                        if not re.fullmatch(r"[A-Z][A-Z0-9_]{2,40}", str(worker.get("key_env", ""))):
+                            raise ValueError("المزود المخصص يحتاج اسم متغير مفتاح مثل MY_PROVIDER_API_KEY.")
+                        if "/" not in worker["model"]:
+                            raise ValueError("المزود المخصص يحتاج معرّف نموذج كاملًا مثل provider/model.")
                 if kind == "deepgram_workers" and worker["endpoint"] not in [
                     "https://api.deepgram.com", "https://api.eu.deepgram.com", "https://api.au.deepgram.com"
                 ]:
@@ -183,6 +278,9 @@ class Config:
             for k in ["model", "language", "diarize"]:
                 worker[k] = d.get("deepgram_" + k, worker[k])
         for worker in new["opencode_workers"]:
+            # Only the login pool follows the legacy script; OpenRouter workers keep their own model.
+            if provider_of(worker) != "login":
+                continue
             for k in ["model", "variant", "agent"]:
                 worker[k] = d.get("opencode_" + k, worker[k])
         if d.get("opencode_prompt_template"):

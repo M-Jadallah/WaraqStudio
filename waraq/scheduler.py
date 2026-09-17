@@ -5,17 +5,20 @@ import threading
 import time
 from pathlib import Path
 
+from .config import PROVIDER_MAP, compose_model, credential_name, key_env_for, provider_of
+from .library import Library
 from .services import Cancelled, Deepgram, OpenCode, ServiceError, Youtube
 from .store import STAGES
 
 
 class Scheduler:
-    def __init__(self, store, config, secrets, youtube=None, deepgram=None, opencode=None,
+    def __init__(self, store, config, secrets, youtube=None, deepgram=None, opencode=None, library=None,
                  retry_delays=(300, 900, 2700), limit_retry_delay=3600):
         self.store, self.config, self.secrets = store, config, secrets
         self.youtube = youtube or Youtube(store)
         self.deepgram = deepgram or Deepgram()
         self.opencode = opencode or OpenCode()
+        self.library = library or Library()
         self.retry_delays = tuple(retry_delays)
         self.limit_retry_delay = limit_retry_delay
         self.running = False
@@ -24,7 +27,49 @@ class Scheduler:
         self.lock = threading.RLock()
         self.paused_stages = set()
         self.disabled_workers = {}
+        self.provider_override = ""
+        self.provider_override_model = ""
+        self._keys = {}
         self.thread = None
+
+    def set_provider_override(self, provider, model=""):
+        """Session-only: force one provider (and model) on every OpenCode worker."""
+        with self.lock:
+            self.provider_override = provider if provider in PROVIDER_MAP else ""
+            self.provider_override_model = str(model or "")
+            self.disabled_workers.clear()
+
+    def provider_of_worker(self, worker):
+        """Effective OpenCode provider: the queue override wins over the worker default."""
+        return self.provider_override or provider_of(worker)
+
+    def effective_worker(self, worker):
+        """Apply a queue-level override to one OpenCode worker."""
+        if not self.provider_override:
+            return worker
+        return {**worker, "provider": self.provider_override, "variant": "",
+                "model": compose_model(self.provider_override, self.provider_override_model)}
+
+    def key_state(self, stage, worker, provider=""):
+        """Whether the OS store holds a credential for this worker; cached briefly.
+
+        The worker list is republished several times per second, and one credential
+        read per worker per refresh would hammer the Windows store for nothing.
+        """
+        name = credential_name(stage, worker["id"], provider)
+        now = time.time()
+        with self.lock:
+            cached = self._keys.get(name)
+            if cached and now - cached[0] < 10:
+                return cached[1]
+        value = bool(self.secrets.get(name)) if self.secrets else False
+        with self.lock:
+            self._keys[name] = (now, value)
+        return value
+
+    def forget_keys(self):
+        with self.lock:
+            self._keys.clear()
 
     def start(self):
         self.running = True
@@ -80,10 +125,21 @@ class Scheduler:
                                    ("deepgram", cfg["deepgram_workers"]), ("opencode", cfg["opencode_workers"])]:
                 for w in workers:
                     active = self.active.get(w["id"], {})
-                    results.append({**w, "stage": stage, "job_id": active.get("job_id", ""),
-                                    "elapsed": round(time.time() - active["started"]) if active else 0,
-                                    "paused": stage in self.paused_stages,
-                                    "error": self.disabled_workers.get(w["id"], "")})
+                    entry = {**w, "stage": stage, "job_id": active.get("job_id", ""),
+                             "elapsed": round(time.time() - active["started"]) if active else 0,
+                             "paused": stage in self.paused_stages,
+                             "error": self.disabled_workers.get(w["id"], ""),
+                             "provider": "", "providerLabel": "", "keyEnv": "", "hasKey": False,
+                             "modelResolved": w.get("model", "")}
+                    if stage == "opencode":
+                        provider = self.provider_of_worker(w)
+                        entry.update({"provider": provider, "providerLabel": PROVIDER_MAP[provider]["name"],
+                                      "keyEnv": key_env_for(provider, w),
+                                      "modelResolved": compose_model(provider, w.get("model", "")),
+                                      "hasKey": self.key_state(stage, w, provider)})
+                    elif stage == "deepgram":
+                        entry["hasKey"] = self.key_state(stage, w)
+                    results.append(entry)
             return results
 
     def ready(self, job, stage, jobs):
@@ -137,11 +193,20 @@ class Scheduler:
                         if concurrent >= cfg["project_concurrency"]:
                             continue
                 secret = ""
-                if stage == "deepgram":
-                    secret = self.secrets.get(wid) if self.secrets else ""
-                    if not secret:
-                        self.disabled_workers[wid] = "أضف مفتاح API لهذا العامل"
-                        continue
+                if stage != "download":
+                    provider = self.provider_of_worker(worker) if stage == "opencode" else ""
+                    # Login-based OpenCode workers use whatever OpenCode already holds.
+                    if stage == "deepgram" or key_env_for(provider, worker):
+                        secret = self.secrets.get(credential_name(stage, wid, provider)) if self.secrets else ""
+                        if not secret:
+                            if stage == "deepgram":
+                                label = "API"
+                            elif provider == "custom":
+                                label = key_env_for(provider, worker)
+                            else:
+                                label = PROVIDER_MAP[provider]["name"]
+                            self.disabled_workers[wid] = f"أضف مفتاح {label} لهذا العامل"
+                            continue
                 for job in jobs:
                     if not self.ready(job, stage, jobs):
                         continue
@@ -170,9 +235,11 @@ class Scheduler:
             saved_workers = cfg[stage + "_workers"]
             saved = next((w for w in saved_workers if w["id"] == wid), saved_workers[0])
             worker = {**saved, "id": wid, "name": worker["name"], "project": worker.get("project", "")}
+            if stage == "opencode":
+                worker = self.effective_worker(worker)
         # Cookie repairs and executable paths apply without recreating queued work.
         live = self.config.snapshot()
-        for k in ("cookies_file", "opencode_executable", "opencode_context"):
+        for k in ("cookies_file", "opencode_executable", "opencode_context", "opencode_data_root"):
             cfg[k] = live[k]
         self.store.event(ident, f"بدء {stage} — {wid}")
         progress = lambda value: self.store.progress(ident, stage, value)
@@ -184,11 +251,12 @@ class Scheduler:
                 output = self.deepgram.transcribe(job, worker, cfg, secret, cancel, progress)
                 kind = "transcript"
             else:
-                output = self.opencode.process(job, worker, cfg, cancel, lambda line: self.store.event(ident, line))
+                output = self.opencode.process(job, worker, cfg, secret, cancel, lambda line: self.store.event(ident, line))
                 kind = "document"
             self.store.artifact(ident, kind, output)
             self.store.set_stage(ident, stage, "completed", progress=100)
             self.store.event(ident, f"اكتملت {stage}")
+            self.publish_library(ident)
         except ServiceError as exc:
             kind = exc.kind
             used = int(job["stages"][stage].get("retries", 0))
@@ -221,3 +289,16 @@ class Scheduler:
         finally:
             with self.lock:
                 self.active.pop(wid, None)
+
+    def publish_library(self, ident):
+        """Mirror finished artifacts into the readable library; never fails the stage."""
+        live = self.config.snapshot()
+        if not live.get("library_auto", True):
+            return
+        try:
+            job = self.store.get(ident)
+            copied = self.library.publish(job, live) if job else []
+            if copied:
+                self.store.event(ident, "نُسخ إلى المكتبة: " + "، ".join(copied))
+        except Exception as exc:
+            self.store.event(ident, "تعذر التنظيم في المكتبة: " + str(exc), "error")

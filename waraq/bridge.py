@@ -6,11 +6,11 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Property, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QFileDialog
 
 from . import __version__
-from .config import defaults
+from .config import PROVIDER_MAP, PROVIDERS, credential_name, defaults, key_env_for, provider_of
 from .services import resolve_opencode
 from .store import STAGES
 
@@ -27,6 +27,7 @@ class Bridge(QObject):
     sourceReady = Signal(str)
     backgroundError = Signal(str)
     autoStopReached = Signal()
+    libraryChanged = Signal()
 
     def __init__(self, store, config, secrets, scheduler):
         super().__init__()
@@ -38,6 +39,8 @@ class Bridge(QObject):
         self._auto_stop = False
         self._auto_stop_seen = False
         self._auto_stop_fired = False
+        self._library = []
+        self._library_busy = False
         self.discovery_cancel = threading.Event()
         self.sourceReady.connect(self._accept_source)
         self.backgroundError.connect(self._error)
@@ -45,6 +48,11 @@ class Bridge(QObject):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(700)
         self.refresh()
+        if self.config.migration_note:
+            note = self.config.migration_note
+            self.store.event("", note)
+            # Delayed so the notice lands after the window is on screen.
+            QTimer.singleShot(2500, lambda: self.notice.emit(note, False))
 
     @Property("QVariantList", notify=changed)
     def jobs(self): return self._jobs
@@ -76,6 +84,16 @@ class Bridge(QObject):
     @Property("QVariantList", notify=settingsChanged)
     def templates(self):
         return [{"id": t["id"], "name": t["name"], "text": t["text"]} for t in self.config.snapshot()["opencode_templates"]]
+
+    @Property("QVariantList", constant=True)
+    def providers(self):
+        return [{"id": p["id"], "name": p["name"], "keyEnv": p["key_env"], "isolated": p["isolated"]} for p in PROVIDERS]
+
+    @Property("QVariantList", notify=libraryChanged)
+    def library(self): return self._library
+
+    @Property(bool, notify=libraryChanged)
+    def libraryBusy(self): return self._library_busy
 
     @Property("QVariantMap", notify=changed)
     def stats(self):
@@ -291,6 +309,11 @@ class Bridge(QObject):
         else:
             self.notice.emit("الملف أو المجلد غير موجود بعد.", True)
 
+    @Slot(str)
+    def copyText(self, text):
+        QGuiApplication.clipboard().setText(str(text))
+        self.notice.emit("نُسخ المسار إلى الحافظة.", False)
+
     @Slot(str, result=str)
     def choosePath(self, kind):
         if kind == "folder":
@@ -303,6 +326,7 @@ class Bridge(QObject):
         try:
             self.config.save(json.loads(raw))
             self.scheduler.disabled_workers.clear()
+            self.scheduler.forget_keys()
             self.settingsChanged.emit()
             self.notice.emit("حُفظت الإعدادات. المهام الجديدة تستخدم إعدادات المعالجة الجديدة.", False)
             return True
@@ -313,16 +337,101 @@ class Bridge(QObject):
     @Slot(str, str)
     def saveKey(self, worker, key):
         try:
-            self.secrets.set(worker, key)
+            stage, provider = self._worker_scope(worker)
+            self.secrets.set(credential_name(stage, worker, provider), key)
+            self.scheduler.forget_keys()
             self.scheduler.disabled_workers.pop(worker, None)
             self.notice.emit("حُفظ المفتاح في مخزن بيانات اعتماد Windows.", False)
+            self.refresh()
         except Exception as exc:
             self.notice.emit("تعذر حفظ المفتاح: " + str(exc), True)
+
+    def _worker_scope(self, worker):
+        """Stage and configured provider of a worker id, used for the credential name."""
+        data = self.config.snapshot()
+        for item in data["deepgram_workers"]:
+            if item["id"] == worker:
+                return "deepgram", ""
+        for item in data["opencode_workers"]:
+            if item["id"] == worker:
+                return "opencode", provider_of(item)
+        raise ValueError("لم يُعثر على العامل.")
+
+    @Slot(str, bool)
+    def setWorkerEnabled(self, worker, enabled):
+        """Start or stop this worker taking new jobs, straight from the worker list."""
+        data = self.config.snapshot()
+        for kind in ("deepgram_workers", "opencode_workers"):
+            for item in data[kind]:
+                if item["id"] == worker:
+                    item["enabled"] = bool(enabled)
+                    self.config.save(data)
+                    self.scheduler.disabled_workers.clear()
+                    self.settingsChanged.emit()
+                    self.notice.emit(("سُجّل العامل " if enabled else "أُوقف العامل ") + item["name"] +
+                                     (" لاستقبال المهام." if enabled else " عن استقبال مهام جديدة."), False)
+                    self.refresh()
+                    return
+        self.notice.emit("لم يُعثر على العامل.", True)
+
+    @Slot(str, str)
+    def setProviderOverride(self, provider, model):
+        """Session-only: run every OpenCode worker on one provider regardless of its own setup."""
+        self.scheduler.set_provider_override(provider, model)
+        if provider:
+            workers = self.config.snapshot()["opencode_workers"]
+            missing = [w["name"] for w in workers
+                       if key_env_for(provider, w) and not self.scheduler.key_state("opencode", w, provider)]
+            note = f"سيُفرض مزود {PROVIDER_MAP[provider]['name']} على عمال OpenCode."
+            if missing:
+                note += " بلا مفتاح حتى الآن: " + "، ".join(missing) + "."
+            self.notice.emit(note, False)
+        else:
+            self.notice.emit("أُلغي فرض المزود؛ كل عامل يعود إلى إعداده الخاص.", False)
+        self.refresh()
 
     @Slot(str)
     def resetWorker(self, worker):
         self.scheduler.disabled_workers.pop(worker, None)
+        self.scheduler.forget_keys()
         self.refresh()
+
+    @Slot()
+    def refreshLibrary(self):
+        """Rescan the library folders. Called when the file page opens, not on the UI timer."""
+        try:
+            self._library = self.scheduler.library.scan(self.config.snapshot())
+        except Exception as exc:
+            self._library = []
+            self.notice.emit("تعذر قراءة المكتبة: " + str(exc), True)
+        self.libraryChanged.emit()
+
+    @Slot()
+    def organizeLibrary(self):
+        """Copy every finished artifact into the library, off the UI thread."""
+        if self._library_busy:
+            return
+        self._library_busy = True
+        self.libraryChanged.emit()
+        def work():
+            try:
+                copied = self.scheduler.library.organize_all(self.store.jobs(), self.config.snapshot())
+                self.notice.emit(f"نُظّم {copied} ملفًا في المكتبة.", False)
+            except Exception as exc:
+                self.notice.emit("تعذر التنظيم: " + str(exc), True)
+            finally:
+                self._library_busy = False
+                self.refreshLibrary()
+        threading.Thread(target=work, daemon=True, name="library").start()
+
+    @Slot(str)
+    def deleteLibraryFile(self, path):
+        try:
+            self.scheduler.library.remove(self.config.snapshot(), path)
+            self.notice.emit("حُذف الملف من المكتبة؛ النسخة الأصلية في مجلد المهمة باقية.", False)
+        except Exception as exc:
+            self.notice.emit(str(exc), True)
+        self.refreshLibrary()
 
     @Slot()
     def importLegacy(self):
@@ -331,6 +440,7 @@ class Bridge(QObject):
             try:
                 self.config.import_legacy(Path(path), self.secrets)
                 self.scheduler.disabled_workers.clear()
+                self.scheduler.forget_keys()
                 self.settingsChanged.emit()
                 self.notice.emit("استوردت الإعدادات ومفتاح العامل الأول. أضف مفتاحًا مستقلًا للعامل الثاني.", False)
             except Exception as exc:

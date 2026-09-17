@@ -1,5 +1,8 @@
 {
   "output_root": "C:/WaraqStudio/results",
+  "library_root": "C:/WaraqStudio/library",
+  "library_auto": true,
+  "library_copy_audio": false,
   "cookies_file": "",
   "youtube_request_delay": 3.0,
   "youtube_sleep_min": 8,
@@ -22,47 +25,26 @@
   "opencode_executable": "opencode.exe",
   "opencode_timeout": 3600,
   "opencode_context": "",
+  "opencode_data_root": "C:/WaraqStudio/opencode-workers",
   "prompt": "استخدم مهارة arabic-lesson-formatter-sequential لمعالجة ملف التفريغ الأصلي: {transcript_path}\nأنشئ مستند Word واحدًا واحفظه بالمسار: {output_path}\nعنوان الدرس: {title}\nرقم الدرس: {position}",
   "strict_order": false,
+  "auto_retry_attempts": 3,
+  "opencode_limit_retries": 5,
   "theme": "dark",
   "deepgram_workers": [
-    {
-      "id": "dg1",
-      "name": "Deepgram 01",
-      "enabled": true,
-      "project": "default",
-      "model": "whisper-large",
-      "language": "ar",
-      "endpoint": "https://api.deepgram.com",
-      "diarize": false
-    },
-    {
-      "id": "dg2",
-      "name": "Deepgram 02",
-      "enabled": true,
-      "project": "default",
-      "model": "whisper-large",
-      "language": "ar",
-      "endpoint": "https://api.deepgram.com",
-      "diarize": false
-    }
+    {"id": "dg1", "name": "Deepgram 01", "enabled": true, "project": "proj-1", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
+    {"id": "dg2", "name": "Deepgram 02", "enabled": true, "project": "proj-2", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
+    {"id": "dg3", "name": "Deepgram 03", "enabled": true, "project": "proj-3", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
+    {"id": "dg4", "name": "Deepgram 04", "enabled": true, "project": "proj-4", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
+    {"id": "dg5", "name": "Deepgram 05", "enabled": true, "project": "proj-5", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false}
   ],
   "opencode_workers": [
-    {
-      "id": "oc1",
-      "name": "OpenCode 01",
-      "enabled": true,
-      "model": "openai/gpt-6-astra",
-      "variant": "high",
-      "agent": "build"
-    },
-    {
-      "id": "oc2",
-      "name": "OpenCode 02",
-      "enabled": true,
-      "model": "openai/gpt-6-astra",
-      "variant": "high",
-      "agent": "build"
-    }
+    {"id": "oc1", "name": "OpenCode 01", "enabled": true, "provider": "login", "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},
+    {"id": "oc2", "name": "OpenCode 02", "enabled": true, "provider": "login", "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},
+    {"id": "oc3", "name": "OpenRouter 01", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
+    {"id": "oc4", "name": "OpenRouter 02", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
+    {"id": "oc5", "name": "OpenRouter 03", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
+    {"id": "oc6", "name": "OpenRouter 04", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
+    {"id": "oc7", "name": "OpenRouter 05", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"}
   ]
 }

@@ -52,7 +52,7 @@ def main():
             p = item.mapToScene(item.boundingRect().center())
             QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(p.x()), int(p.y())))
             QTest.qWait(60)
-        for index in range(5):
+        for index in range(6):
             click("nav" + str(index))
             assert root.property("page") == index
         click("nav1")
@@ -107,6 +107,47 @@ def main():
         assert editor.property("count") == 2
         QTest.keyClick(root, Qt.Key_Escape)
         QTest.qWait(80)
+        # Worker list: direct enable toggle, queue-wide provider override, per-provider keys.
+        click("nav2")
+        assert find(root.contentItem(), "workerEnableBox") is not None
+        assert find(root.contentItem(), "providerForceBox") is not None
+        oc3 = [w for w in scheduler.workers() if w["id"] == "oc3"][0]
+        assert oc3["provider"] == "openrouter" and oc3["modelResolved"] == "openrouter/deepseek/deepseek-v4.1-flash"
+        assert not oc3["hasKey"]
+        bridge.setWorkerEnabled("oc3", False)
+        assert not [w for w in scheduler.workers() if w["id"] == "oc3"][0]["enabled"]
+        bridge.setWorkerEnabled("oc3", True)
+        assert [w for w in scheduler.workers() if w["id"] == "oc3"][0]["enabled"]
+        bridge.setProviderOverride("login", "")
+        assert scheduler.provider_override == "login"
+        assert [w for w in scheduler.workers() if w["id"] == "oc3"][0]["provider"] == "login"
+        bridge.setProviderOverride("", "")
+        assert scheduler.provider_override == ""
+        saved = {}
+        keys.set = lambda worker, value: saved.update({worker: value})
+        bridge.saveKey("oc3", "sk-or-test")
+        assert saved == {"oc3:openrouter": "sk-or-test"}, saved
+        # Library: organise a finished artifact into its type folder, list it, then delete it.
+        library_root = Path(temp) / "library"
+        tuned = config.snapshot()
+        tuned["library_root"] = str(library_root)
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
+        source = Path(temp) / "003-درس.docx"
+        source.write_bytes(b"docx-bytes")
+        job = store.jobs()[0]
+        store.artifact(job["id"], "document", str(source))
+        bridge.organizeLibrary()
+        deadline = time.time() + 5
+        while bridge.libraryBusy and time.time() < deadline:
+            QTest.qWait(50)
+        target = library_root / "Word" / f'{job["position"]:03d}-{job["title"]}.docx'
+        assert target.is_file(), list((library_root / "Word").iterdir())
+        click("nav4")
+        assert root.property("page") == 4
+        assert find(root.contentItem(), "organizeButton") is not None
+        assert [f["name"] for f in bridge.library] == [target.name]
+        bridge.deleteLibraryFile(str(target))
+        assert not target.exists() and bridge.library == []
         click("nav0")
         # Pause controls exercised with no dispatch: stage-specific pause, worker controls, theme persistence.
         bridge.pauseStage("download", True)
@@ -126,7 +167,7 @@ def main():
             root.setProperty("toastText", "")
             evidence = Path(sys.argv[1])
             evidence.mkdir(parents=True, exist_ok=True)
-            for index in range(5):
+            for index in range(6):
                 click("nav" + str(index))
                 QTest.qWait(80)
                 root.grabWindow().save(str(evidence / f"page-{index}-1060.png"))
@@ -134,6 +175,12 @@ def main():
             QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", config.data["deepgram_workers"][0]), Q_ARG("QVariant", "deepgram"))
             QTest.qWait(100)
             root.grabWindow().save(str(evidence / "worker-dialog.png"))
+            QTest.keyClick(root, Qt.Key_Escape)
+            QTest.qWait(80)
+            router = [w for w in config.data["opencode_workers"] if w.get("provider") == "openrouter"][0]
+            QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", router), Q_ARG("QVariant", "opencode"))
+            QTest.qWait(120)
+            root.grabWindow().save(str(evidence / "worker-dialog-opencode.png"))
         root.close()
         scheduler.shutdown()
         bridge.timer.stop()
@@ -142,7 +189,8 @@ def main():
         store.db.close()
     failures = [m for m in messages if any(s in m for s in ("Error", "Unable", "Cannot", "ReferenceError", "binding loop"))]
     assert not failures, failures
-    print("Native UI passed: 5 pages, range selection, reorder, enqueue, templates, auto-stop toggle, stage pause, themes, 1060x720, no QML errors.")
+    print("Native UI passed: 6 pages, range selection, reorder, enqueue, templates, auto-stop toggle, worker toggles, "
+          "provider override, library organise/list/delete, stage pause, themes, 1060x720, no QML errors.")
 
 
 if __name__ == "__main__":
