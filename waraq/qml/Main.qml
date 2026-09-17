@@ -70,11 +70,34 @@ ApplicationWindow {
         workerDialog.open()
     }
     function openJob(job) { selectedJob = job; jobDialog.open() }
+    property var templ: []
+    function loadTemplateFields() {
+        if (tplBox.currentIndex >= 0 && tplBox.currentIndex < templ.length) {
+            tplName.text = templ[tplBox.currentIndex].name
+            tplText.text = templ[tplBox.currentIndex].text
+        } else { tplName.text = ""; tplText.text = "" }
+    }
+    function commitTemplateFields() {
+        if (tplBox.currentIndex >= 0 && tplBox.currentIndex < templ.length) {
+            if (tplName.text.trim().length > 0) templ[tplBox.currentIndex].name = tplName.text.trim()
+            templ[tplBox.currentIndex].text = tplText.text
+        }
+    }
+    function reloadTemplates() {
+        templ = JSON.parse(JSON.stringify(backend.templates))
+        tplBox.currentIndex = templ.length ? 0 : -1
+        loadTemplateFields()
+    }
 
     Connections {
         target: backend
         function onNotice(message, error) { toastText = message; toastError = error; toastTimer.restart() }
         function onSettingsChanged() { settings = JSON.parse(backend.settingsJson); rawSettings.text = backend.settingsJson }
+        function onAutoStopReached() {
+            toastText = "اكتمل تنفيذ الطابور؛ سيُغلق التطبيق تلقائيًا."
+            toastError = false
+            autoStopTimer.restart()
+        }
         function onChanged() {
             if (jobDialog.opened && selectedJob.id) {
                 var currentJob = backend.jobs.find(function(j){return j.id === selectedJob.id})
@@ -83,6 +106,7 @@ ApplicationWindow {
         }
     }
     Timer { id: toastTimer; interval: 9000; onTriggered: toastText = "" }
+    Timer { id: autoStopTimer; interval: 2500; onTriggered: Qt.quit() }
 
     component LabelText: Text {
         color: win.ink
@@ -120,6 +144,13 @@ ApplicationWindow {
                     }
                     Rectangle { width: 7; height: 7; radius: 4; color: backend.running ? win.accent : win.muted }
                     SubText { text: backend.running ? "المحرك يعمل" : "المحرك متوقف" }
+                    CheckBox {
+                        objectName: "autoStopBox"
+                        text: "إيقاف التطبيق بعد اكتمال الطابور"
+                        palette.windowText: win.muted
+                        onClicked: backend.setAutoStop(checked)
+                        Accessible.name: "إيقاف التطبيق تلقائيًا بعد اكتمال الطابور"
+                    }
                     Item { Layout.fillWidth: true }
                     ColumnLayout {
                         Layout.alignment: Qt.AlignRight
@@ -216,7 +247,7 @@ ApplicationWindow {
                                         ColumnLayout {
                                             Layout.preferredWidth: 155
                                             LabelText { text: modelData.statusLabel; color: win.stateColor(modelData.status); Layout.alignment: Qt.AlignRight }
-                                            SubText { text: modelData.worker || modelData.stageLabel; Layout.alignment: Qt.AlignRight }
+                                            SubText { text: modelData.retryAt ? "محاولة قادمة " + modelData.retryAt : (modelData.worker || modelData.stageLabel); Layout.alignment: Qt.AlignRight }
                                         }
                                         RowLayout {
                                             Layout.preferredWidth: 230; spacing: 6
@@ -320,10 +351,12 @@ ApplicationWindow {
                     }
                     RowLayout {
                         Layout.fillWidth: true
-                        AppButton { text: "إضافة إلى الطابور"; primary: true; enabled: backend.source.some(function(x){return x.selected}); onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex]); win.page = 0 } }
+                        AppButton { text: "إضافة إلى الطابور"; primary: true; enabled: backend.source.some(function(x){return x.selected}); onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex], backend.templates.length > 0 ? templateBox.currentValue : ""); win.page = 0 } }
                         Item { Layout.fillWidth: true }
+                        ComboBox { id: templateBox; objectName: "templateBox"; visible: backend.templates.length > 0; model: backend.templates; textRole: "name"; valueRole: "id"; Layout.preferredWidth: 200; Accessible.name: "قالب البرومبت" }
+                        LabelText { text: "قالب البرومبت"; visible: templateBox.visible }
                         ComboBox { id: preset; model: ["الدورة الكاملة حتى Word", "تنزيل وتفريغ فقط", "تنزيل فقط", "القالب المخصص من الإعدادات"]; Layout.preferredWidth: 230 }
-                        LabelText { text: "قالب المعالجة" }
+                        LabelText { text: "مراحل المعالجة" }
                     }
                 }
 
@@ -411,6 +444,7 @@ ApplicationWindow {
                     spacing: 16
                     RowLayout {
                         AppButton { text: "حفظ الإعدادات"; primary: true; onClicked: { settings.prompt = promptField.text; save() } }
+                        AppButton { objectName: "templatesButton"; text: "قوالب البرومبت"; onClicked: { win.reloadTemplates(); templatesDialog.open() } }
                         AppButton { text: "استيراد إعدادات السكربت"; onClicked: backend.importLegacy() }
                         AppButton { text: "فحص البيئة"; onClicked: backend.checkEnvironment() }
                         Item { Layout.fillWidth: true }
@@ -537,11 +571,13 @@ ApplicationWindow {
             spacing: 14
             LabelText { text: selectedJob.title || ""; font.pixelSize: 20; Layout.fillWidth: true }
             SubText { text: (selectedJob.statusLabel || "") + "  ·  " + (selectedJob.stageLabel || ""); Layout.fillWidth: true }
+            SubText { text: selectedJob.retryAt ? "أُعيدت الجدولة تلقائيًا — المحاولة القادمة الساعة " + selectedJob.retryAt : ""; visible: !!selectedJob.retryAt; color: win.dark ? "#87b7ff" : "#215cc4"; Layout.fillWidth: true }
+            SubText { text: selectedJob.template ? "قالب البرومبت: " + selectedJob.template : ""; visible: !!selectedJob.template; Layout.fillWidth: true }
             SubText { text: selectedJob.error || ""; visible: !!selectedJob.error; color: win.dark ? "#ffbc88" : "#98450b"; wrapMode: Text.WordWrap; Layout.fillWidth: true }
             ProgressBar { Layout.fillWidth: true; from: 0; to: 100; value: selectedJob.progress || 0; indeterminate: selectedJob.status === "running" && selectedJob.progress < 0; visible: selectedJob.status === "running" }
             RowLayout {
                 AppButton { text: "إلغاء المهمة"; danger: true; enabled: selectedJob.status !== "completed"; onClicked: { backend.cancelJob(selectedJob.id); jobDialog.close() } }
-                AppButton { text: "إعادة المحاولة"; enabled: ["failed","blocked","uncertain","paused","cancelled"].indexOf(selectedJob.status) >= 0; onClicked: { retryWarning.open() } }
+                AppButton { text: "إعادة المحاولة"; enabled: ["failed","blocked","uncertain","paused","cancelled"].indexOf(selectedJob.status) >= 0 || !!selectedJob.retryAt; onClicked: { retryWarning.open() } }
                 AppButton { text: "فتح المجلد"; onClicked: backend.openPath(selectedJob.folder) }
                 AppButton { text: "فتح Word"; enabled: !!selectedJob.document; primary: true; onClicked: backend.openPath(selectedJob.document) }
             }
@@ -618,5 +654,50 @@ ApplicationWindow {
         onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Cancel).text = "إلغاء" }
         contentItem: ScrollView { TextArea { id: rawSettings; text: backend.settingsJson; selectByMouse: true; wrapMode: TextEdit.Wrap; font.family: "Consolas"; font.pixelSize: 13 } }
         onAccepted: backend.saveSettings(rawSettings.text)
+    }
+    Dialog {
+        id: templatesDialog; anchors.centerIn: parent; width: Math.min(860, win.width - 80); height: win.height - 140; modal: true
+        title: "قوالب البرومبت"; standardButtons: Dialog.Save | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Save).text = "حفظ القوالب"; standardButton(Dialog.Cancel).text = "إلغاء" }
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: ColumnLayout {
+            spacing: 10
+            RowLayout {
+                Layout.fillWidth: true
+                AppButton { text: "قالب جديد"; onClicked: {
+                    win.commitTemplateFields()
+                    var next = win.templ.slice()
+                    next.push({id: "tpl" + Date.now(), name: "قالب " + (next.length + 1), text: "{transcript_path}\n{output_path}\n"})
+                    win.templ = next
+                    tplBox.currentIndex = next.length - 1
+                    win.loadTemplateFields()
+                } }
+                AppButton { text: "حذف المحدد"; enabled: tplBox.currentIndex >= 0; onClicked: {
+                    var index = tplBox.currentIndex
+                    var next = win.templ.slice()
+                    next.splice(index, 1)
+                    win.templ = next
+                    tplBox.currentIndex = next.length ? Math.min(index, next.length - 1) : -1
+                    win.loadTemplateFields()
+                } }
+                Item { Layout.fillWidth: true }
+                LabelText { text: "القوالب المحفوظة"; font.pixelSize: 16 }
+            }
+            ComboBox { id: tplBox; objectName: "templateEditorBox"; Layout.fillWidth: true; model: win.templ; textRole: "name"; onActivated: win.loadTemplateFields() }
+            RowLayout {
+                AppField { id: tplName; Layout.fillWidth: true; Accessible.name: "اسم القالب" }
+                LabelText { text: "اسم القالب"; Layout.preferredWidth: 110 }
+            }
+            SubText { text: "يجب أن يحتوي كل قالب {transcript_path} و{output_path}، ويمكن استخدام {title} و{position}."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+            ScrollView {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                TextArea { id: tplText; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: 14; horizontalAlignment: Text.AlignRight; background: Rectangle { color: win.dark ? "#0f192a" : "#f7f9fc"; radius: 8; border.color: win.line } }
+            }
+        }
+        onAccepted: {
+            win.commitTemplateFields()
+            settings.opencode_templates = win.templ
+            if (save()) win.templ = JSON.parse(JSON.stringify(backend.templates))
+        }
     }
 }

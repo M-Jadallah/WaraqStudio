@@ -11,7 +11,7 @@ import pytest
 
 from waraq.config import Config, defaults
 from waraq.scheduler import Scheduler
-from waraq.services import Deepgram, ServiceError, Youtube, digest, transcript_from, validate_docx
+from waraq.services import LIMIT_MESSAGE, Deepgram, ServiceError, Youtube, digest, transcript_from, validate_docx
 from waraq.store import Store, STAGES
 
 
@@ -431,3 +431,217 @@ def test_oversized_docx_entry_rejected(tmp_path):
         z.writestr("word/media/huge.bin", b"\x00" * (101 * 1024 * 1024))
     with pytest.raises(ServiceError):
         validate_docx(path)
+
+
+def pump(scheduler, store, ident, stage, wanted, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        scheduler.tick()
+        if store.get(ident)["stages"][stage]["status"] in wanted:
+            # Let the worker thread leave its finally block: closing the shared
+            # sqlite connection mid-write is not thread-safe.
+            while not scheduler.idle() and time.time() < deadline:
+                time.sleep(0.005)
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"{stage} stuck at {store.get(ident)['stages'][stage]['status']}")
+
+
+def download_only_job(store, cfg, overrides=None):
+    data = cfg.snapshot()
+    data["deepgram_enabled"] = False
+    data["opencode_enabled"] = False
+    data.update(overrides or {})
+    return store.add(items(), data)[0]
+
+
+def local_txt_job(store, cfg, tmp_path, overrides=None):
+    txt = tmp_path / "درس.txt"
+    txt.write_text("مادة اختبارية", encoding="utf-8")
+    data = cfg.snapshot()
+    data.update(overrides or {})
+    return store.add(items(), data, input_path=str(txt))[0]
+
+
+def test_transient_failure_rescheduled_then_completes(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    calls = []
+    class FakeYoutube:
+        cooldown_until = 0
+        def download(self, job, cfg, cancel, progress):
+            calls.append(1)
+            if len(calls) < 3:
+                raise ServiceError("انقطاع الشبكة المؤقت", "failed")
+            path = Path(job["folder"]) / "audio.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+    scheduler = Scheduler(store, cfg, None, FakeYoutube(), retry_delays=(0.05, 0.05, 0.05))
+    pump(scheduler, store, ident, "download", ("completed",))
+    stage = store.get(ident)["stages"]["download"]
+    assert stage["attempts"] == 3
+    assert stage["next_retry"] == 0
+    assert len([e for e in store.events(50) if "أُعيدت الجدولة" in e["message"]]) == 2
+
+
+def test_transient_retry_budget_exhausted(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg, {"auto_retry_attempts": 1})
+    class FakeYoutube:
+        cooldown_until = 0
+        def download(self, job, cfg, cancel, progress):
+            raise ServiceError("فشل متكرر", "failed")
+    scheduler = Scheduler(store, cfg, None, FakeYoutube(), retry_delays=(0.05,))
+    pump(scheduler, store, ident, "download", ("failed",))
+    stage = store.get(ident)["stages"]["download"]
+    assert stage["retries"] == 0  # the terminal transition clears the episode counter
+    assert len([e for e in store.events(50) if "أُعيدت الجدولة" in e["message"]]) == 1
+
+
+def test_deepgram_failure_not_auto_rescheduled(env, tmp_path):
+    store, cfg = env
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"audio fixture")
+    data = cfg.snapshot()
+    ident = store.add(items(), data, input_path=str(audio))[0]
+    calls = []
+    class FakeDG:
+        def transcribe(self, job, worker, cfg, secret, cancel, progress):
+            calls.append(1)
+            raise ServiceError("فشل Deepgram: HTTP 400", "failed")
+    keys = type("Keys", (), {"get": lambda s, w: "key"})()
+    scheduler = Scheduler(store, cfg, keys, deepgram=FakeDG(), retry_delays=(0.05,))
+    pump(scheduler, store, ident, "deepgram", ("failed",))
+    time.sleep(0.1)
+    scheduler.tick()
+    stage = store.get(ident)["stages"]["deepgram"]
+    assert stage["status"] == "failed" and stage["retries"] == 0 and stage["next_retry"] == 0
+    assert len(calls) == 1  # paid transcription is never resubmitted automatically
+
+
+@pytest.mark.parametrize("kind", ["uncertain", "blocked", "cancelled"])
+def test_terminal_kinds_never_rescheduled(env, tmp_path, kind):
+    store, cfg = env
+    ident = local_txt_job(store, cfg, tmp_path)
+    calls = []
+    class FakeOC:
+        def process(self, job, worker, cfg, cancel, log):
+            calls.append(1)
+            raise ServiceError("حالة نهائية", kind)
+    scheduler = Scheduler(store, cfg, None, opencode=FakeOC(), retry_delays=(0.05,), limit_retry_delay=0.05)
+    pump(scheduler, store, ident, "opencode", (kind,))
+    time.sleep(0.15)
+    scheduler.tick()
+    assert len(calls) == 1
+
+
+def test_opencode_quota_retries_hourly_then_terminal(env, tmp_path):
+    store, cfg = env
+    ident = local_txt_job(store, cfg, tmp_path, {"opencode_limit_retries": 2})
+    calls = []
+    class FakeOC:
+        def process(self, job, worker, cfg, cancel, log):
+            calls.append(1)
+            raise ServiceError(LIMIT_MESSAGE, "rate_limited")
+    scheduler = Scheduler(store, cfg, None, opencode=FakeOC(), limit_retry_delay=0.05)
+    deadline = time.time() + 5
+    deferred = None
+    while time.time() < deadline:
+        stage = store.get(ident)["stages"]["opencode"]
+        if stage["status"] == "pending" and stage["retries"] >= 1:
+            deferred = stage
+            break
+        scheduler.tick()
+        time.sleep(0.01)
+    assert deferred is not None and deferred["next_retry"] > time.time()
+    pump(scheduler, store, ident, "opencode", ("failed",))
+    stage = store.get(ident)["stages"]["opencode"]
+    assert "استُنفدت محاولات الانتظار (2)" in stage["error"]
+    assert len(calls) == 3
+    assert len([e for e in store.events(50) if "أُعيدت الجدولة" in e["message"]]) == 2
+
+
+def test_retry_counter_resets_after_success(env, tmp_path):
+    store, cfg = env
+    ident = local_txt_job(store, cfg, tmp_path)
+    calls = []
+    class FakeOC:
+        def process(self, job, worker, cfg, cancel, log):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ServiceError("عابر", "failed")
+            return make_docx(Path(job["folder"]) / "out.docx")
+    scheduler = Scheduler(store, cfg, None, opencode=FakeOC(), retry_delays=(0.05,))
+    pump(scheduler, store, ident, "opencode", ("completed",))
+    stage = store.get(ident)["stages"]["opencode"]
+    assert stage["attempts"] == 2 and stage["retries"] == 0
+
+
+def test_scheduled_retry_survives_restart(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    store.claim(ident, "download", "yt1")
+    store.defer_retry(ident, "download", "خطأ عابر", 3600)
+    store.recover()
+    stage = store.get(ident)["stages"]["download"]
+    assert stage["status"] == "pending" and stage["retries"] == 1
+    scheduler = Scheduler(store, cfg, None)
+    jobs = store.jobs()
+    assert not scheduler.ready(jobs[0], "download", jobs)
+    assert not store.claim(ident, "download", "yt1")
+
+
+def test_queue_drained_detection(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    assert not store.queue_drained()
+    store.defer_retry(ident, "download", "بانتظار", 3600)
+    assert not store.queue_drained()  # deferred work keeps the app open
+    store.set_stage(ident, "download", "completed")
+    assert store.queue_drained()
+
+
+def test_template_config_validation(env):
+    _, cfg = env
+    assert cfg.data["opencode_templates"][0]["name"] == "افتراضي"
+    good = cfg.snapshot()
+    good["opencode_templates"] = [{"id": "t1", "name": "دروس", "text": "{transcript_path}\n{output_path}"}]
+    cfg.save(good)
+    assert [t["id"] for t in cfg.data["opencode_templates"]] == ["t1"]
+    missing = cfg.snapshot()
+    missing["opencode_templates"] = [{"id": "t1", "name": "ناقص", "text": "بلا متغيرات"}]
+    with pytest.raises(ValueError):
+        cfg.save(missing)
+    duplicate = cfg.snapshot()
+    duplicate["opencode_templates"] = [{"id": "t1", "name": "أ", "text": "{transcript_path} {output_path}"},
+                                       {"id": "t1", "name": "ب", "text": "{transcript_path} {output_path}"}]
+    with pytest.raises(ValueError):
+        cfg.save(duplicate)
+
+
+def test_quota_line_matching():
+    from waraq.services import limit_reached
+    assert limit_reached('{"type":"error","error":{"data":{"statusCode":429,"message":"The usage limit has been reached"}}}')
+    assert limit_reached("AI_APICallError: The usage limit has been reached")
+    assert not limit_reached("AI_APICallError: Our servers are currently overloaded. Please try again later.")
+    assert not limit_reached('{"type":"text","part":{"text":"نص عادي"}}')
+
+
+@pytest.mark.parametrize("raises", [True, False])
+def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises):
+    import waraq.services as services
+    store, cfg = env
+    ident = local_txt_job(store, cfg, tmp_path)
+    job = store.get(ident)
+    monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
+    quota = '{"type":"error","sessionID":"ses_x","error":{"data":{"statusCode":429,"message":"The usage limit has been reached"}}}'
+    def run(command, cwd, cancel, timeout, log, process_env=None):
+        log(quota)
+        if raises:
+            raise ServiceError("فشلت العملية الخارجية")
+    monkeypatch.setattr(services, "run_process", run)
+    with pytest.raises(ServiceError) as exc:
+        services.OpenCode().process(job, cfg.data["opencode_workers"][0], cfg.data, threading.Event(), lambda _: None)
+    assert exc.value.kind == "rate_limited"

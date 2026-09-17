@@ -53,6 +53,25 @@ def safe_title(text):
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text).strip().rstrip(". ")[:55] or "درس"
 
 
+LIMIT_MESSAGE = "بلغ OpenCode حد استخدام اشتراك ChatGPT (نافذة الخمس ساعات)، ولم يُنتج الملف بعد."
+
+
+def limit_reached(line):
+    """Match the subscription quota error on an opencode stdout line, not the exit code."""
+    lowered = line.lower()
+    if "usage limit has been reached" in lowered:
+        return True
+    if '"type":"error"' in line or '"type": "error"' in line:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return False
+        error = event.get("error") if isinstance(event, dict) else None
+        payload = error.get("data") if isinstance(error, dict) else None
+        return isinstance(payload, dict) and payload.get("statusCode") == 429
+    return False
+
+
 def validate_docx(path):
     path = Path(path)
     if not path.is_file() or path.stat().st_size < 100:
@@ -472,17 +491,29 @@ class OpenCode:
         command = [str(resolve_opencode(cfg["opencode_executable"])), "run", "--model", worker["model"],
                    "--variant", worker["variant"], "--agent", worker["agent"], "--dir", str(work), "--format", "json", prompt]
         denied = []
+        limited = []
         def track(line):
             if "auto-rejecting" in line:
                 denied.append(line)
+            if limit_reached(line):
+                limited.append(line)
             log(line)
         try:
             run_process(command, work, cancel, cfg["opencode_timeout"], track, env)
+        except Cancelled:
+            raise
+        except ServiceError:
+            # A quota stop is retryable; other failures keep their own diagnosis.
+            if limited:
+                raise ServiceError(LIMIT_MESSAGE, "rate_limited") from None
+            raise
         finally:
             if digest(transcript) != original_hash:
                 raise ServiceError("تغيّر TXT الأصلي أثناء OpenCode؛ أوقفت اعتماد الناتج للمراجعة.", "blocked")
         if not output.is_file() and denied:
             raise ServiceError("منع OpenCode الوصول إلى مسار خارج مجلد عمله: " + denied[0], "failed")
+        if not output.is_file() and limited:
+            raise ServiceError(LIMIT_MESSAGE, "rate_limited")
         report = validate_docx(output)
         atomic_json(verified, {**report, "input_sha256": original_hash, "output": str(output)})
         return output

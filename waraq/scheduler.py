@@ -10,11 +10,14 @@ from .store import STAGES
 
 
 class Scheduler:
-    def __init__(self, store, config, secrets, youtube=None, deepgram=None, opencode=None):
+    def __init__(self, store, config, secrets, youtube=None, deepgram=None, opencode=None,
+                 retry_delays=(300, 900, 2700), limit_retry_delay=3600):
         self.store, self.config, self.secrets = store, config, secrets
         self.youtube = youtube or Youtube(store)
         self.deepgram = deepgram or Deepgram()
         self.opencode = opencode or OpenCode()
+        self.retry_delays = tuple(retry_delays)
+        self.limit_retry_delay = limit_retry_delay
         self.running = False
         self.stop_event = threading.Event()
         self.active = {}
@@ -60,6 +63,14 @@ class Scheduler:
     def idle(self):
         with self.lock:
             return not self.active
+
+    @staticmethod
+    def human_delay(seconds):
+        if seconds >= 3600:
+            return f"{seconds / 3600:g} ساعة"
+        if seconds >= 60:
+            return f"{seconds // 60:g} دقيقة"
+        return f"{int(seconds)} ثانية"
 
     def workers(self):
         cfg = self.config.snapshot()
@@ -127,7 +138,7 @@ class Scheduler:
                             continue
                 secret = ""
                 if stage == "deepgram":
-                    secret = self.secrets.get(wid)
+                    secret = self.secrets.get(wid) if self.secrets else ""
                     if not secret:
                         self.disabled_workers[wid] = "أضف مفتاح API لهذا العامل"
                         continue
@@ -179,13 +190,29 @@ class Scheduler:
             self.store.set_stage(ident, stage, "completed", progress=100)
             self.store.event(ident, f"اكتملت {stage}")
         except ServiceError as exc:
-            self.store.set_stage(ident, stage, exc.kind if exc.kind != "split" else "failed", str(exc))
-            self.store.event(ident, str(exc), "error")
-            if exc.kind == "blocked":
-                if stage == "download":
-                    self.pause_stage(stage, True)
-                else:
-                    self.disabled_workers[wid] = str(exc)
+            kind = exc.kind
+            used = int(job["stages"][stage].get("retries", 0))
+            # Jobs snapshotted before these settings existed keep sane defaults.
+            budget = cfg.get("opencode_limit_retries", 5) if kind == "rate_limited" else cfg.get("auto_retry_attempts", 3)
+            retryable = (kind == "rate_limited" and stage == "opencode") or \
+                        (kind == "failed" and stage in ("download", "opencode"))
+            if retryable and used < budget:
+                delay = self.limit_retry_delay if kind == "rate_limited" else self.retry_delays[min(used, len(self.retry_delays) - 1)]
+                count = self.store.defer_retry(ident, stage, str(exc), delay)
+                self.store.event(ident, f"أُعيدت الجدولة بعد {self.human_delay(delay)} "
+                                        f"(محاولة {count}/{budget}): {str(exc)[:300]}")
+            elif kind == "rate_limited":
+                message = f"استُنفدت محاولات الانتظار ({budget}) وظل حد استخدام OpenCode ممتلئًا — غالبًا الحد الأسبوعي. أعد المحاولة يدويًا لاحقًا."
+                self.store.set_stage(ident, stage, "failed", message)
+                self.store.event(ident, message, "error")
+            else:
+                self.store.set_stage(ident, stage, kind if kind != "split" else "failed", str(exc))
+                self.store.event(ident, str(exc), "error")
+                if kind == "blocked":
+                    if stage == "download":
+                        self.pause_stage(stage, True)
+                    else:
+                        self.disabled_workers[wid] = str(exc)
         except Exception as exc:
             # Remove API key before storing any unexpected exception.
             message = str(exc).replace(secret, "[محجوب]") if secret else str(exc)

@@ -1,8 +1,8 @@
-# Verification — 2026-09-15
+# Verification — 2026-09-17
 
 ## Local automated tests
 
-25 engine/service tests passed, covering:
+39 engine/service tests passed, covering:
 
 - Atomic task claims under competing workers.
 - Crash recovery and uncertain paid requests.
@@ -21,8 +21,13 @@
 - DOCX packages size-capped before any decompression work.
 - OpenCode runs on a transcript copy inside its revision workspace.
 - OpenCode permission auto-rejections surface as a dedicated failure message.
+- Transient download failures defer with a future `next_retry` and complete on retry; the budget caps attempts and success resets the counter.
+- Deepgram failures are never auto-deferred (paid-stage protection); uncertain/blocked/cancelled stay terminal.
+- OpenCode quota stops detected from the provider's streamed 429 event and deferred hourly up to the configured budget, then failed with a named message.
+- Deferred retries persist across `recover()`; claims respect `next_retry`; `queue_drained()` is true only when nothing is pending or running.
+- Prompt-template validation (required variables, unique ids, size cap) and enqueue-time template snapshotting into the job prompt.
 
-Native UI interaction checks passed for all five screens, range selection, custom ordering, queue insertion, service pause/resume, theme persistence and a 1060 × 720 window. No QML errors were reported. Screenshots were inspected at 1380 × 900 and 1060 × 720 for Arabic shaping, reading order, contrast, spacing, modal readability and overflow. The interface is a native Qt application, so verification used Qt Test and QQuickWindow screenshots rather than a web browser.
+Native UI interaction checks passed for all five screens, range selection, custom ordering, queue insertion, template publication/save/enqueue snapshotting, the auto-stop toggle wiring, service pause/resume, theme persistence and a 1060 × 720 window. No QML errors were reported. Screenshots were inspected at 1380 × 900 and 1060 × 720 for Arabic shaping, reading order, contrast, spacing, modal readability and overflow. The interface is a native Qt application, so verification used Qt Test and QQuickWindow screenshots rather than a web browser.
 
 The source environment resolves FFmpeg, yt-dlp, EJS, Requests, OpenPyXL, Windows Credential Manager, Node.js and the installed OpenCode executable.
 

@@ -45,6 +45,8 @@ def defaults(home: Path):
         "http_timeout": 1800, "max_retries": 3,
         "opencode_executable": "opencode", "opencode_timeout": 3600,
         "opencode_context": "", "prompt": DEFAULT_PROMPT, "strict_order": False,
+        "opencode_templates": [{"id": "default", "name": "افتراضي", "text": DEFAULT_PROMPT}],
+        "auto_retry_attempts": 3, "opencode_limit_retries": 5,
         "theme": "dark",
         "deepgram_workers": [
             {"id": "dg1", "name": "Deepgram 01", "enabled": True,
@@ -111,6 +113,7 @@ class Config:
             ("audio_bitrate", 32, 192), ("http_timeout", 30, 7200),
             ("max_retries", 1, 6), ("opencode_timeout", 60, 43200),
             ("youtube_cooldown", 60, 86400),
+            ("auto_retry_attempts", 0, 6), ("opencode_limit_retries", 0, 12),
         ]:
             if not isinstance(d[k], (int, float)) or isinstance(d[k], bool):
                 raise ValueError(f"{k}: اكتب قيمة رقمية دون علامات اقتباس.")
@@ -119,7 +122,8 @@ class Config:
         for k in ("download_enabled", "deepgram_enabled", "opencode_enabled", "strict_order"):
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
-        for k in ("project_concurrency", "max_pending_audio", "chunk_seconds", "audio_bitrate", "audio_rate", "audio_channels", "max_retries"):
+        for k in ("project_concurrency", "max_pending_audio", "chunk_seconds", "audio_bitrate", "audio_rate", "audio_channels", "max_retries",
+                  "auto_retry_attempts", "opencode_limit_retries"):
             if not isinstance(d[k], int) or isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون عددًا صحيحًا.")
         if int(d["youtube_sleep_max"]) < int(d["youtube_sleep_min"]):
@@ -132,6 +136,23 @@ class Config:
             raise ValueError("youtube_client: استخدم اسم عميل بحروف وأرقام وشرطات فقط.")
         if "{transcript_path}" not in d["prompt"] or "{output_path}" not in d["prompt"]:
             raise ValueError("البرومبت يجب أن يحتوي {transcript_path} و{output_path}.")
+        templates = d["opencode_templates"]
+        if not isinstance(templates, list) or len(templates) > 20:
+            raise ValueError("القوالب: القائمة يجب ألا تتجاوز 20 قالبًا.")
+        template_ids = set()
+        for template in templates:
+            if not isinstance(template, dict):
+                raise ValueError("القوالب: صيغة غير صالحة.")
+            ident = str(template.get("id", ""))
+            name = str(template.get("name", "")).strip()
+            text = str(template.get("text", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", ident) or ident in template_ids:
+                raise ValueError("القوالب: المعرّفات بحروف وأرقام وشرطات ويجب ألا تتكرر.")
+            template_ids.add(ident)
+            if not 1 <= len(name) <= 60:
+                raise ValueError("القوالب: لكل قالب اسم من 1 إلى 60 محرفًا.")
+            if "{transcript_path}" not in text or "{output_path}" not in text:
+                raise ValueError(f"القالب «{name}» يجب أن يحتوي {{transcript_path}} و{{output_path}}.")
         ids = set()
         for kind in ["deepgram_workers", "opencode_workers"]:
             if not 1 <= len(d[kind]) <= 16:

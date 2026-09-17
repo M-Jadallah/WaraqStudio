@@ -32,6 +32,7 @@ class Store:
               job_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL,
               worker TEXT DEFAULT '', progress REAL DEFAULT -1, error TEXT DEFAULT '',
               attempts INTEGER DEFAULT 0, updated REAL NOT NULL, next_retry REAL DEFAULT 0,
+              retries INTEGER DEFAULT 0,
               PRIMARY KEY(job_id,name)
             );
             CREATE TABLE IF NOT EXISTS events (
@@ -47,6 +48,9 @@ class Store:
             self.db.execute("ALTER TABLE jobs ADD COLUMN seq INTEGER DEFAULT 0")
             # rowid equals insertion order; timestamps can tie on coarse Windows timers.
             self.db.execute("UPDATE jobs SET seq=rowid")
+        stage_columns = {r[1] for r in self.db.execute("PRAGMA table_info(stages)")}
+        if "retries" not in stage_columns:
+            self.db.execute("ALTER TABLE stages ADD COLUMN retries INTEGER DEFAULT 0")
 
     def event(self, job_id, message, level="info"):
         with self.lock:
@@ -138,8 +142,25 @@ class Store:
 
     def set_stage(self, ident, stage, status, error="", progress=-1, next_retry=0):
         with self.lock:
-            self.db.execute("UPDATE stages SET status=?,error=?,progress=?,updated=?,next_retry=?,worker='' WHERE job_id=? AND name=?",
+            # Any explicit transition ends the consecutive-retry episode.
+            self.db.execute("UPDATE stages SET status=?,error=?,progress=?,updated=?,next_retry=?,retries=0,worker='' WHERE job_id=? AND name=?",
                             (status, str(error)[:2000], progress, time.time(), next_retry, ident, stage))
+
+    def defer_retry(self, ident, stage, error, delay):
+        """Reschedule a transient failure; returns the consecutive retry count used."""
+        with self.lock:
+            row = self.db.execute("SELECT retries FROM stages WHERE job_id=? AND name=?", (ident, stage)).fetchone()
+            used = (row["retries"] if row else 0) + 1
+            self.db.execute("UPDATE stages SET status='pending',error=?,progress=-1,updated=?,next_retry=?,retries=?,worker='' "
+                            "WHERE job_id=? AND name=?",
+                            (str(error)[:2000], time.time(), time.time() + delay, used, ident, stage))
+            return used
+
+    def queue_drained(self):
+        """True when nothing is runnable: no stage pending (even deferred) or running."""
+        with self.lock:
+            row = self.db.execute("SELECT COUNT(*) FROM stages WHERE status IN ('pending','running')").fetchone()
+            return row[0] == 0
 
     def progress(self, ident, stage, value):
         with self.lock:

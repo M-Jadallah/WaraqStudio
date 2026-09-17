@@ -26,6 +26,7 @@ class Bridge(QObject):
     notice = Signal(str, bool)
     sourceReady = Signal(str)
     backgroundError = Signal(str)
+    autoStopReached = Signal()
 
     def __init__(self, store, config, secrets, scheduler):
         super().__init__()
@@ -34,6 +35,9 @@ class Bridge(QObject):
         self._running = False
         self._source_title = ""
         self._busy = False
+        self._auto_stop = False
+        self._auto_stop_seen = False
+        self._auto_stop_fired = False
         self.discovery_cancel = threading.Event()
         self.sourceReady.connect(self._accept_source)
         self.backgroundError.connect(self._error)
@@ -69,6 +73,10 @@ class Bridge(QObject):
     @Property(str, constant=True)
     def version(self): return __version__
 
+    @Property("QVariantList", notify=settingsChanged)
+    def templates(self):
+        return [{"id": t["id"], "name": t["name"], "text": t["text"]} for t in self.config.snapshot()["opencode_templates"]]
+
     @Property("QVariantMap", notify=changed)
     def stats(self):
         return {"total": len(self._jobs), "active": sum(j["status"] == "running" for j in self._jobs),
@@ -90,6 +98,9 @@ class Bridge(QObject):
                 "status": state, "statusLabel": LABELS.get(state, state), "current": current,
                 "stageLabel": STAGE_LABELS[current], "error": stages[current]["error"],
                 "worker": stages[current]["worker"], "progress": stages[current]["progress"],
+                "retryAt": time.strftime("%H:%M", time.localtime(stages[current]["next_retry"]))
+                           if state == "pending" and stages[current]["next_retry"] > time.time() else "",
+                "template": j["config"].get("template_name", ""),
                 "steps": [{"name": name, "label": STAGE_LABELS[name], "status": stages[name]["status"]} for name in STAGES],
             })
         workers = self.scheduler.workers()
@@ -97,6 +108,15 @@ class Bridge(QObject):
             w["stageLabel"] = STAGE_LABELS[w["stage"]]
         logs = [{**r, "time": time.strftime("%H:%M:%S", time.localtime(r["ts"]))} for r in self.store.events(100)]
         running = self.scheduler.running
+        if self._auto_stop and not self._auto_stop_fired:
+            if self.store.queue_drained():
+                # Fire only after real work was seen, so arming on an empty queue never quits immediately.
+                if self._auto_stop_seen and running and not self._busy and self.scheduler.idle():
+                    self._auto_stop_fired = True
+                    self.store.event("", "اكتمل تنفيذ الطابور؛ سيُغلق التطبيق تلقائيًا.", "info")
+                    self.autoStopReached.emit()
+            else:
+                self._auto_stop_seen = True
         # The timer fires while idle too; republishing identical state would
         # make QML re-evaluate every binding for nothing.
         if result == self._jobs and workers == self._workers and logs == self._logs and running == self._running:
@@ -170,14 +190,18 @@ class Bridge(QObject):
             self._source[index], self._source[target] = self._source[target], self._source[index]
             self.sourceChanged.emit()
 
-    @Slot(str)
-    def enqueue(self, preset):
+    @Slot(str, str)
+    def enqueue(self, preset, template_id=""):
         try:
             cfg = self.config.snapshot()
             if preset != "custom":
                 cfg["download_enabled"] = True
                 cfg["deepgram_enabled"] = preset != "download"
                 cfg["opencode_enabled"] = preset == "full"
+            template = next((t for t in cfg["opencode_templates"] if t["id"] == template_id), None)
+            if template:
+                cfg["prompt"] = template["text"]
+                cfg["template_name"] = template["name"]
             selected = [dict(row) for row in self._source if row["selected"]]
             if not selected:
                 raise ValueError("حدد فيديو واحدًا على الأقل.")
@@ -228,6 +252,13 @@ class Bridge(QObject):
         else:
             self.scheduler.start()
         self.refresh()
+
+    @Slot(bool)
+    def setAutoStop(self, enabled):
+        """Session-only switch: when the queue fully drains, the app quits itself."""
+        self._auto_stop = bool(enabled)
+        if not enabled:
+            self._auto_stop_seen = self._auto_stop_fired = False
 
     @Slot(str, bool)
     def pauseStage(self, name, paused):

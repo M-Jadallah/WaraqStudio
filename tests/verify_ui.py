@@ -66,6 +66,34 @@ def main():
         assert [j["video_id"] for j in store.jobs()] == ["id3", "id2"]
         click("nav0")
         assert bridge.stats["total"] == 2
+        # Prompt templates are published, saved, and snapshotted into new jobs.
+        assert [t["name"] for t in bridge.templates] == ["افتراضي"]
+        tuned = config.snapshot()
+        tuned["opencode_templates"] = tuned["opencode_templates"] + [
+            {"id": "tplx", "name": "خطب", "text": "استخدم مهارة عربية للخطب\n{transcript_path}\n{output_path}"}]
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
+        assert [t["id"] for t in bridge.templates] == ["default", "tplx"]
+        bridge._accept_source(json.dumps({"title": "قوالب", "items": [
+            {"video_id": "id9", "position": 9, "title": "درس بقالب", "url": "https://www.youtube.com/watch?v=test",
+             "duration": 60, "available": True, "selected": True}]}, ensure_ascii=False))
+        bridge.enqueue("full", "tplx")
+        newest = [j for j in store.jobs() if j["video_id"] == "id9"][0]
+        assert newest["config"]["template_name"] == "خطب"
+        assert newest["config"]["prompt"].startswith("استخدم مهارة عربية للخطب")
+        # Auto-stop is a session-only switch wired straight to the bridge.
+        click("autoStopBox")
+        assert bridge._auto_stop
+        click("autoStopBox")
+        assert not bridge._auto_stop
+        # The prompt-template editor opens, lists every template and re-evaluates its bindings.
+        click("nav4")
+        click("templatesButton")
+        QTest.qWait(120)
+        editor = find(root.contentItem(), "templateEditorBox")
+        assert editor is not None and editor.property("count") == 2
+        QTest.keyClick(root, Qt.Key_Escape)
+        QTest.qWait(80)
+        click("nav0")
         # Pause controls exercised with no dispatch: stage-specific pause, worker controls, theme persistence.
         bridge.pauseStage("download", True)
         assert "download" in scheduler.paused_stages
@@ -100,7 +128,7 @@ def main():
         store.db.close()
     failures = [m for m in messages if any(s in m for s in ("Error", "Unable", "Cannot", "ReferenceError", "binding loop"))]
     assert not failures, failures
-    print("Native UI passed: 5 pages, range selection, reorder, enqueue, stage pause, themes, 1060x720, no QML errors.")
+    print("Native UI passed: 5 pages, range selection, reorder, enqueue, templates, auto-stop toggle, stage pause, themes, 1060x720, no QML errors.")
 
 
 if __name__ == "__main__":
