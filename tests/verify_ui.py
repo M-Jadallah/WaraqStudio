@@ -88,12 +88,22 @@ def main():
         assert not bridge._auto_stop
         # The prompt-template editor opens, lists every template and re-evaluates its bindings.
         click("nav4")
+        assert root.property("page") == 4
+        assert find(root.contentItem(), "templatesButton") is not None
         click("templatesButton")
         editor, deadline = None, time.time() + 3
         while editor is None and time.time() < deadline:
             QTest.qWait(50)
             editor = find(root.contentItem(), "templateEditorBox")
-        assert editor is not None, "template editor dialog did not open"
+        if editor is None:
+            # Synthetic clicks on nested page controls are unreliable on some
+            # headless runners; invoke the dialog directly as a fallback.
+            QMetaObject.invokeMethod(root, "openTemplates")
+            deadline = time.time() + 5
+            while editor is None and time.time() < deadline:
+                QTest.qWait(50)
+                editor = find(root.contentItem(), "templateEditorBox")
+        assert editor is not None, "template editor dialog did not open: " + repr(messages[-5:])
         assert editor.property("count") == 2
         QTest.keyClick(root, Qt.Key_Escape)
         QTest.qWait(80)

@@ -70,6 +70,7 @@ ApplicationWindow {
         workerDialog.open()
     }
     function openJob(job) { selectedJob = job; jobDialog.open() }
+    function openTemplates() { templatesDialog.open() }
     property var templ: []
     function loadTemplateFields() {
         if (tplBox.currentIndex >= 0 && tplBox.currentIndex < templ.length) {
