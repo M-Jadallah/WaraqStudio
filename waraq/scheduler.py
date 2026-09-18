@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from .config import PROVIDER_MAP, compose_model, credential_name, key_env_for, provider_of
+from .config import compose_model, credential_name, key_env_for, provider_info, provider_of
 from .library import Library
 from .services import Cancelled, Deepgram, OpenCode, ServiceError, Youtube
 from .store import STAGES
@@ -29,26 +29,33 @@ class Scheduler:
         self.disabled_workers = {}
         self.provider_override = ""
         self.provider_override_model = ""
+        self.provider_override_variant = ""
         self._keys = {}
         self.thread = None
 
-    def set_provider_override(self, provider, model=""):
-        """Session-only: force one provider (and model) on every OpenCode worker."""
+    def set_provider_override(self, provider, model="", variant=""):
+        """Session-only: force one provider, model and reasoning level on every OpenCode worker."""
         with self.lock:
-            self.provider_override = provider if provider in PROVIDER_MAP else ""
+            self.provider_override = provider if provider_info(provider, self.config.snapshot()) else ""
             self.provider_override_model = str(model or "")
+            self.provider_override_variant = str(variant or "")
             self.disabled_workers.clear()
 
-    def provider_of_worker(self, worker):
+    def provider_of_worker(self, worker, cfg):
         """Effective OpenCode provider: the queue override wins over the worker default."""
-        return self.provider_override or provider_of(worker)
+        return self.provider_override or provider_of(worker, cfg)
 
     def effective_worker(self, worker):
-        """Apply a queue-level override to one OpenCode worker."""
+        """Apply a queue-level override to one OpenCode worker.
+
+        An empty forced model keeps the worker's own model, composed with the forced
+        provider, so the list and the dispatch always agree on what will run.
+        """
         if not self.provider_override:
             return worker
-        return {**worker, "provider": self.provider_override, "variant": "",
-                "model": compose_model(self.provider_override, self.provider_override_model)}
+        model = compose_model(self.provider_override, self.provider_override_model or worker.get("model", ""))
+        return {**worker, "provider": self.provider_override, "variant": self.provider_override_variant,
+                "model": model}
 
     def key_state(self, stage, worker, provider=""):
         """Whether the OS store holds a credential for this worker; cached briefly.
@@ -132,10 +139,11 @@ class Scheduler:
                              "provider": "", "providerLabel": "", "keyEnv": "", "hasKey": False,
                              "modelResolved": w.get("model", "")}
                     if stage == "opencode":
-                        provider = self.provider_of_worker(w)
-                        entry.update({"provider": provider, "providerLabel": PROVIDER_MAP[provider]["name"],
-                                      "keyEnv": key_env_for(provider, w),
-                                      "modelResolved": compose_model(provider, w.get("model", "")),
+                        provider = self.provider_of_worker(w, cfg)
+                        model = (self.provider_override_model or w.get("model", "")) if self.provider_override else w.get("model", "")
+                        entry.update({"provider": provider, "providerLabel": provider_info(provider, cfg)["name"],
+                                      "keyEnv": key_env_for(provider, cfg),
+                                      "modelResolved": compose_model(provider, model),
                                       "hasKey": self.key_state(stage, w, provider)})
                     elif stage == "deepgram":
                         entry["hasKey"] = self.key_state(stage, w)
@@ -194,17 +202,12 @@ class Scheduler:
                             continue
                 secret = ""
                 if stage != "download":
-                    provider = self.provider_of_worker(worker) if stage == "opencode" else ""
+                    provider = self.provider_of_worker(worker, cfg) if stage == "opencode" else ""
                     # Login-based OpenCode workers use whatever OpenCode already holds.
-                    if stage == "deepgram" or key_env_for(provider, worker):
+                    if stage == "deepgram" or key_env_for(provider, cfg):
                         secret = self.secrets.get(credential_name(stage, wid, provider)) if self.secrets else ""
                         if not secret:
-                            if stage == "deepgram":
-                                label = "API"
-                            elif provider == "custom":
-                                label = key_env_for(provider, worker)
-                            else:
-                                label = PROVIDER_MAP[provider]["name"]
+                            label = "API" if stage == "deepgram" else provider_info(provider, cfg)["name"]
                             self.disabled_workers[wid] = f"أضف مفتاح {label} لهذا العامل"
                             continue
                 for job in jobs:

@@ -10,7 +10,8 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QFileDialog
 
 from . import __version__
-from .config import PROVIDER_MAP, PROVIDERS, credential_name, defaults, key_env_for, provider_of
+from .config import (BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
+                     provider_info, provider_of)
 from .services import resolve_opencode
 from .store import STAGES
 
@@ -85,9 +86,12 @@ class Bridge(QObject):
     def templates(self):
         return [{"id": t["id"], "name": t["name"], "text": t["text"]} for t in self.config.snapshot()["opencode_templates"]]
 
-    @Property("QVariantList", constant=True)
+    @Property("QVariantList", notify=settingsChanged)
     def providers(self):
-        return [{"id": p["id"], "name": p["name"], "keyEnv": p["key_env"], "isolated": p["isolated"]} for p in PROVIDERS]
+        """Built-in providers plus the ones the user added; only the added ones are editable."""
+        builtin = {item["id"] for item in BUILTIN_PROVIDERS}
+        return [{"id": p["id"], "name": p["name"], "keyEnv": p["key_env"], "isolated": p["isolated"],
+                 "builtin": p["id"] in builtin} for p in provider_catalog(self.config.snapshot())]
 
     @Property("QVariantList", notify=libraryChanged)
     def library(self): return self._library
@@ -354,7 +358,7 @@ class Bridge(QObject):
                 return "deepgram", ""
         for item in data["opencode_workers"]:
             if item["id"] == worker:
-                return "opencode", provider_of(item)
+                return "opencode", provider_of(item, data)
         raise ValueError("لم يُعثر على العامل.")
 
     @Slot(str, bool)
@@ -374,21 +378,59 @@ class Bridge(QObject):
                     return
         self.notice.emit("لم يُعثر على العامل.", True)
 
-    @Slot(str, str)
-    def setProviderOverride(self, provider, model):
-        """Session-only: run every OpenCode worker on one provider regardless of its own setup."""
-        self.scheduler.set_provider_override(provider, model)
+    @Slot(str, str, str)
+    def setProviderOverride(self, provider, model, variant):
+        """Session-only: run every OpenCode worker on one provider, model and reasoning level."""
+        data = self.config.snapshot()
+        self.scheduler.set_provider_override(provider, model, variant)
         if provider:
-            workers = self.config.snapshot()["opencode_workers"]
-            missing = [w["name"] for w in workers
-                       if key_env_for(provider, w) and not self.scheduler.key_state("opencode", w, provider)]
-            note = f"سيُفرض مزود {PROVIDER_MAP[provider]['name']} على عمال OpenCode."
+            note = f"سيُفرض مزود {provider_info(provider, data)['name']} على عمال OpenCode."
+            if variant:
+                note += f" مستوى التفكير: {variant}."
+            missing = [w["name"] for w in data["opencode_workers"]
+                       if key_env_for(provider, data) and not self.scheduler.key_state("opencode", w, provider)]
             if missing:
                 note += " بلا مفتاح حتى الآن: " + "، ".join(missing) + "."
             self.notice.emit(note, False)
         else:
-            self.notice.emit("أُلغي فرض المزود؛ كل عامل يعود إلى إعداده الخاص.", False)
+            self.notice.emit("أُلغي الفرض؛ كل عامل يعود إلى إعداده الخاص.", False)
         self.refresh()
+
+    @Slot(str, result=bool)
+    def saveProvider(self, raw):
+        """Add or update a user-defined provider; built-ins are never touched."""
+        try:
+            item = json.loads(raw)
+            data = self.config.snapshot()
+            entry = {"id": str(item.get("id", "")).strip(), "name": str(item.get("name", "")).strip() or str(item.get("id", "")).strip(),
+                     "key_env": str(item.get("keyEnv", "")).strip(), "isolated": bool(item.get("isolated", True))}
+            data["opencode_providers"] = [p for p in data["opencode_providers"] if p["id"] != entry["id"]] + [entry]
+            self.config.save(data)
+            self.scheduler.forget_keys()
+            self.settingsChanged.emit()
+            self.notice.emit("حُفظ المزود " + entry["name"] + ".", False)
+            self.refresh()
+            return True
+        except Exception as exc:
+            self.notice.emit(str(exc), True)
+            return False
+
+    @Slot(str)
+    def deleteProvider(self, provider):
+        try:
+            data = self.config.snapshot()
+            used = [w["name"] for w in data["opencode_workers"] if provider_of(w, data) == provider]
+            if used:
+                self.notice.emit("لا يمكن حذف مزود تستخدمه: " + "، ".join(used), True)
+                return
+            data["opencode_providers"] = [p for p in data["opencode_providers"] if p["id"] != provider]
+            self.config.save(data)
+            self.scheduler.forget_keys()
+            self.settingsChanged.emit()
+            self.notice.emit("حُذف المزود.", False)
+            self.refresh()
+        except Exception as exc:
+            self.notice.emit(str(exc), True)
 
     @Slot(str)
     def resetWorker(self, worker):

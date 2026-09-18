@@ -26,6 +26,7 @@
   "opencode_timeout": 3600,
   "opencode_context": "",
   "opencode_data_root": "C:/WaraqStudio/opencode-workers",
+  "opencode_providers": [],
   "prompt": "استخدم مهارة arabic-lesson-formatter-sequential لمعالجة ملف التفريغ الأصلي: {transcript_path}\nأنشئ مستند Word واحدًا واحفظه بالمسار: {output_path}\nعنوان الدرس: {title}\nرقم الدرس: {position}",
   "strict_order": false,
   "auto_retry_attempts": 3,
@@ -41,10 +42,8 @@
   "opencode_workers": [
     {"id": "oc1", "name": "OpenCode 01", "enabled": true, "provider": "login", "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},
     {"id": "oc2", "name": "OpenCode 02", "enabled": true, "provider": "login", "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},
-    {"id": "oc3", "name": "OpenRouter 01", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
-    {"id": "oc4", "name": "OpenRouter 02", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
-    {"id": "oc5", "name": "OpenRouter 03", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
-    {"id": "oc6", "name": "OpenRouter 04", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
-    {"id": "oc7", "name": "OpenRouter 05", "enabled": true, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"}
+    {"id": "oc3", "name": "OpenCode 03", "enabled": true, "provider": "login", "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},
+    {"id": "oc4", "name": "OpenCode 04", "enabled": true, "provider": "login", "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},
+    {"id": "oc5", "name": "OpenCode 05", "enabled": true, "provider": "login", "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"}
   ]
 }

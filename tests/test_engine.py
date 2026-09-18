@@ -214,7 +214,9 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
             break
         time.sleep(0.015)
     assert all(j["document"] for j in store.jobs())
-    assert peaks == {"download": 1, "deepgram": 2, "opencode": 2}
+    # One downloader, two keyed Deepgram workers, and an OpenCode pool no longer capped at two.
+    assert peaks["download"] == 1 and peaks["deepgram"] == 2
+    assert peaks["opencode"] >= 3, peaks
     assert downloads == list(range(1, 8))
     assert set(seen_keys) == {("dg1", "key-one"), ("dg2", "key-two")}
     for j in store.jobs():
@@ -676,35 +678,69 @@ def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises):
     assert exc.value.kind == "rate_limited"
 
 
-def test_default_pools_offer_five_deepgram_and_five_openrouter_workers(tmp_path):
+def test_default_pools_offer_five_workers_each_without_router_workers(tmp_path):
     cfg = Config(tmp_path)
     assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5"]
     assert len({w["project"] for w in cfg.data["deepgram_workers"]}) == 5
-    assert [w["provider"] for w in cfg.data["opencode_workers"]] == ["login", "login"] + ["openrouter"] * 5
-    assert all(w["variant"] == "" for w in cfg.data["opencode_workers"][2:])
+    assert [w["id"] for w in cfg.data["opencode_workers"]] == ["oc1", "oc2", "oc3", "oc4", "oc5"]
+    assert {w["provider"] for w in cfg.data["opencode_workers"]} == {"login"}
+    assert cfg.data["opencode_providers"] == []
     Config.validate(cfg.data)
 
 
-def test_worker_pool_migration_runs_once_and_keeps_saved_workers(tmp_path):
+def test_worker_pool_migration_tops_up_and_keeps_saved_workers(tmp_path):
     legacy = {"deepgram_workers": [{"id": "dg1", "name": "Deepgram 01", "enabled": False, "project": "default",
-                                    "model": "whisper-large", "language": "ar",
-                                    "endpoint": "https://api.deepgram.com", "diarize": False}],
-              "opencode_workers": [{"id": "oc1", "name": "OpenCode 01", "enabled": True,
-                                    "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"}]}
+                                    "model": "nova-3", "language": "ar",
+                                    "endpoint": "https://api.deepgram.com", "diarize": True}],
+              "opencode_workers": [{"id": "oc1", "name": "OpenCode 01", "enabled": True, "provider": "login",
+                                    "model": "openai/gpt-5.6-sol", "variant": "high", "agent": "build"}]}
     (tmp_path / "settings.json").write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
     cfg = Config(tmp_path)
     assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5"]
-    # A saved worker keeps every field the user chose; only missing defaults are appended.
+    assert [w["id"] for w in cfg.data["opencode_workers"]] == ["oc1", "oc2", "oc3", "oc4", "oc5"]
+    # The saved worker keeps every field the user chose; the clones inherit its settings.
     assert cfg.data["deepgram_workers"][0]["project"] == "default"
     assert cfg.data["deepgram_workers"][0]["enabled"] is False
-    assert len(cfg.data["opencode_workers"]) == 7
+    assert cfg.data["deepgram_workers"][1]["model"] == "nova-3" and cfg.data["deepgram_workers"][1]["diarize"] is True
+    assert cfg.data["deepgram_workers"][1]["project"] == "proj-2"
+    assert [w["model"] for w in cfg.data["opencode_workers"]] == ["openai/gpt-5.6-sol"] * 5
     assert cfg.migration_note
-    # Deleting a worker afterwards must not resurrect it on the next launch.
-    cfg.data["deepgram_workers"] = cfg.data["deepgram_workers"][:1]
+    # A worker the user deletes afterwards is never resurrected.
+    cfg.data["opencode_workers"] = cfg.data["opencode_workers"][:1]
     cfg.save({})
     again = Config(tmp_path)
-    assert [w["id"] for w in again.data["deepgram_workers"]] == ["dg1"]
+    assert [w["id"] for w in again.data["opencode_workers"]] == ["oc1"]
     assert again.migration_note == ""
+
+
+def test_migration_removes_automatically_created_router_workers(tmp_path):
+    settings = {
+        "workers_expanded": True,
+        "deepgram_workers": [{"id": "dg1", "name": "Deepgram 01", "enabled": True, "project": "default",
+                              "model": "whisper-large", "language": "ar",
+                              "endpoint": "https://api.deepgram.com", "diarize": False}],
+        "opencode_workers": [
+            {"id": "oc1", "name": "OpenCode 01", "enabled": True, "model": "openai/gpt-5.6-sol", "variant": "high", "agent": "build"},
+            {"id": "oc2", "name": "OpenCode 02", "enabled": True, "model": "openai/gpt-5.6-sol", "variant": "high", "agent": "build"},
+            {"id": "oc3", "name": "OpenRouter 01", "enabled": True, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
+            {"id": "oc4", "name": "OpenRouter 02", "enabled": True, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
+            {"id": "oc5", "name": "OpenRouter 03", "enabled": True, "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "variant": "", "agent": "build"},
+        ],
+    }
+    (tmp_path / "settings.json").write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+    cfg = Config(tmp_path)
+    assert "أُزيلت" in cfg.migration_note
+    # The five workers remain, but every one of them follows the user's own settings again.
+    assert [w["id"] for w in cfg.data["opencode_workers"]] == ["oc1", "oc2", "oc3", "oc4", "oc5"]
+    assert {w.get("provider", "login") for w in cfg.data["opencode_workers"]} == {"login"}
+    assert {w["model"] for w in cfg.data["opencode_workers"]} == {"openai/gpt-5.6-sol"}
+    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5"]
+    assert cfg.data["workers_normalised"] is True
+    # A hand-made worker that merely mentions a router provider is left alone.
+    cfg.data["opencode_workers"].append({"id": "ocmy1", "name": "عامل مزود خاص", "enabled": True,
+                                         "provider": "openrouter", "model": "x/y", "variant": "", "agent": "build"})
+    cfg.save({})
+    assert any(w["id"] == "ocmy1" for w in Config(tmp_path).data["opencode_workers"])
 
 
 def test_provider_validation(tmp_path):
@@ -713,16 +749,21 @@ def test_provider_validation(tmp_path):
     unknown["opencode_workers"][2]["provider"] = "nope"
     with pytest.raises(ValueError):
         Config.validate(unknown)
-    custom = cfg.snapshot()
-    custom["opencode_workers"][2].update({"provider": "custom", "key_env": "bad name"})
+    bad_id = cfg.snapshot()
+    bad_id["opencode_providers"] = [{"id": "Bad Id", "name": "x", "key_env": "X_API_KEY", "isolated": True}]
     with pytest.raises(ValueError):
-        Config.validate(custom)
-    partial = cfg.snapshot()
-    partial["opencode_workers"][2].update({"provider": "custom", "key_env": "ACME_API_KEY", "model": "acme-model"})
+        Config.validate(bad_id)
+    reserved = cfg.snapshot()
+    reserved["opencode_providers"] = [{"id": "openai", "name": "x", "key_env": "X_API_KEY", "isolated": True}]
     with pytest.raises(ValueError):
-        Config.validate(partial)
+        Config.validate(reserved)
+    bad_env = cfg.snapshot()
+    bad_env["opencode_providers"] = [{"id": "groq", "name": "Groq", "key_env": "groq key", "isolated": True}]
+    with pytest.raises(ValueError):
+        Config.validate(bad_env)
     ok = cfg.snapshot()
-    ok["opencode_workers"][2].update({"provider": "custom", "key_env": "ACME_API_KEY", "model": "acme/model-1"})
+    ok["opencode_providers"] = [{"id": "groq", "name": "Groq", "key_env": "GROQ_API_KEY", "isolated": True}]
+    ok["opencode_workers"][2]["provider"] = "groq"
     Config.validate(ok)
     library = cfg.snapshot()
     library["library_auto"] = "yes"
@@ -731,22 +772,25 @@ def test_provider_validation(tmp_path):
 
 
 def test_provider_model_ids_and_worker_environment(tmp_path):
+    cfg = Config(tmp_path)
+    cfg.data["opencode_providers"] = [{"id": "groq", "name": "Groq", "key_env": "GROQ_API_KEY", "isolated": True}]
     assert compose_model("login", "openai/gpt-6-astra") == "openai/gpt-6-astra"
     assert compose_model("openrouter", "deepseek/deepseek-v4.1-flash") == "openrouter/deepseek/deepseek-v4.1-flash"
     assert compose_model("openrouter", "openrouter/x/y") == "openrouter/x/y"
-    assert compose_model("custom", "acme/model-1") == "acme/model-1"
+    assert compose_model("groq", "llama-3.3-70b") == "groq/llama-3.3-70b"
     router = {"id": "oc3", "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash"}
-    env = worker_env(router, "openrouter", "sk-or-secret", str(tmp_path))
+    env = worker_env(router, "openrouter", "sk-or-secret", cfg.data)
     assert env["OPENROUTER_API_KEY"] == "sk-or-secret"
-    assert env["XDG_DATA_HOME"] == str(tmp_path / "oc3" / "data")
-    assert env["XDG_STATE_HOME"] == str(tmp_path / "oc3" / "state")
+    assert env["XDG_DATA_HOME"] == str(Path(cfg.data["opencode_data_root"]) / "oc3" / "data")
+    assert env["XDG_STATE_HOME"] == str(Path(cfg.data["opencode_data_root"]) / "oc3" / "state")
     assert env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
     # A login worker keeps OpenCode's own credentials and its shared directories.
     login = {"id": "oc1", "provider": "login", "model": "openai/gpt-6-astra"}
-    assert worker_env(login, "login", "sk-or-secret", str(tmp_path)) == {}
-    custom = {"id": "oc9", "provider": "custom", "model": "acme/model-1", "key_env": "ACME_API_KEY"}
-    assert worker_env(custom, "custom", "k", str(tmp_path))["ACME_API_KEY"] == "k"
-    assert credential_name("opencode", "oc3", "openrouter") == "oc3:openrouter"
+    assert worker_env(login, "login", "sk-or-secret", cfg.data) == {}
+    # A provider added by hand is fed the environment variable the user named.
+    added = {"id": "oc9", "provider": "groq", "model": "llama-3.3-70b"}
+    assert worker_env(added, "groq", "gsk-secret", cfg.data)["GROQ_API_KEY"] == "gsk-secret"
+    assert credential_name("opencode", "oc3", "groq") == "oc3:groq"
     assert credential_name("deepgram", "dg1") == "dg1"
 
 
@@ -789,12 +833,12 @@ def test_isolated_worker_without_key_is_skipped(env, tmp_path):
             calls.append((worker["id"], worker["provider"]))
             return make_docx(Path(job["folder"]) / "001-درس 1.docx")
     scheduler = Scheduler(store, cfg, None, opencode=FakeOC())
+    # The first worker stays on the OpenCode login; the rest need their own provider key.
+    cfg.data["opencode_workers"][2].update({"provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash"})
     ident = local_txt_job(store, cfg, tmp_path)
     pump(scheduler, store, ident, "opencode", {"completed"})
-    # The login worker runs; key-based workers wait with a clear message until a key exists.
     assert calls == [("oc1", "login")]
-    for worker in cfg.data["opencode_workers"][2:]:
-        assert "أضف مفتاح OpenRouter لهذا العامل" == scheduler.disabled_workers[worker["id"]]
+    assert scheduler.disabled_workers["oc3"] == "أضف مفتاح OpenRouter لهذا العامل"
 
 
 def test_provider_override_forces_every_worker(env, tmp_path):
@@ -807,13 +851,25 @@ def test_provider_override_forces_every_worker(env, tmp_path):
     class Keys:
         def get(self, worker): return "key-for-" + worker if worker.startswith("oc") else ""
     scheduler = Scheduler(store, cfg, Keys(), opencode=FakeOC())
-    scheduler.set_provider_override("openrouter", "deepseek/deepseek-v4.1-flash")
+    scheduler.set_provider_override("openrouter", "deepseek/deepseek-v4.1-flash", "high")
     ident = local_txt_job(store, cfg, tmp_path)
     pump(scheduler, store, ident, "opencode", {"completed"})
     # Even the login worker now runs on OpenRouter, with its own provider-scoped key.
-    assert seen == [("oc1", "openrouter", "openrouter/deepseek/deepseek-v4.1-flash", "", "key-for-oc1:openrouter")]
-    scheduler.set_provider_override("", "")
+    assert seen == [("oc1", "openrouter", "openrouter/deepseek/deepseek-v4.1-flash", "high", "key-for-oc1:openrouter")]
+    # Clearing the override restores each worker's own provider, model and reasoning level.
+    scheduler.set_provider_override("", "", "")
     assert scheduler.provider_override == ""
+    own = {"id": "oc1", "provider": "login", "model": "openai/gpt-5.6-sol", "variant": "low"}
+    assert scheduler.effective_worker(own) == own
+    # Forcing a provider without a model keeps the worker's model, composed with that provider.
+    cfg.data["opencode_providers"] = [{"id": "groq", "name": "Groq", "key_env": "GROQ_API_KEY", "isolated": True}]
+    scheduler.set_provider_override("groq", "", "max")
+    forced = scheduler.effective_worker(own)
+    assert forced["provider"] == "groq" and forced["model"] == "groq/openai/gpt-5.6-sol" and forced["variant"] == "max"
+    # An unknown provider is never forced, so a stale choice cannot silently misroute work.
+    scheduler.set_provider_override("nope", "x", "y")
+    assert scheduler.provider_override == ""
+    scheduler.set_provider_override("", "", "")
 
 
 def test_completed_stage_mirrors_into_library(env, tmp_path):

@@ -33,6 +33,9 @@ ApplicationWindow {
     property string fileSearch: ""
     property string fileKind: "all"
     property var pendingFile: ({})
+    property var pendingProvider: ({})
+    property var lastForce: ({provider: "", model: "", variant: ""})
+    property bool skipForceQuestion: false
     property var pageNames: ["مركز العمليات", "إضافة مصدر", "العمال والخدمات", "مكتبة النتائج", "الملفات", "الإعدادات"]
     color: bg
     palette.window: panel
@@ -66,26 +69,47 @@ ApplicationWindow {
         if (w.stage === "download") return ""
         if (w.stage === "deepgram") return w.hasKey ? "المفتاح محفوظ في مخزن الاعتماد" : "لا مفتاح محفوظ لهذا العامل"
         var parts = [w.providerLabel, w.modelResolved]
+        if ((w.variant || "").length > 0) parts.push("تفكير " + w.variant)
         parts.push(!w.keyEnv ? "تسجيل دخول OpenCode" : (w.hasKey ? "المفتاح محفوظ" : "لا مفتاح محفوظ"))
         return parts.join("  ·  ")
+    }
+    function providerName(id) {
+        var info = backend.providers.find(function(p) { return p.id === id })
+        return info ? info.name : id
+    }
+    function forceSummary() {
+        if (!lastForce.provider) return "بدون فرض على عمال OpenCode"
+        var text = "مفروض: " + win.providerName(lastForce.provider) + "  ·  " + win.resolvedModel(lastForce.provider, lastForce.model)
+        return lastForce.variant ? text + "  ·  تفكير " + lastForce.variant : text
+    }
+    function openForceDialog(starting) {
+        forceDialog.starting = starting
+        var ids = backend.providers.map(function(p) { return p.id })
+        var provider = lastForce.provider || (settings.opencode_workers[0] ? (settings.opencode_workers[0].provider || "login") : "login")
+        forceProvider.currentIndex = Math.max(0, ids.indexOf(provider))
+        var source = settings.opencode_workers.find(function(w) { return (w.provider || "login") === provider }) || settings.opencode_workers[0] || {}
+        forceModel.text = lastForce.provider ? lastForce.model : (source.model || "")
+        forceVariant.text = lastForce.provider ? lastForce.variant : (source.variant || "")
+        forceDialog.open()
+    }
+    function applyForce(force, start) {
+        var provider = force ? (forceProvider.currentValue || "") : ""
+        lastForce = force ? {provider: provider, model: forceModel.text, variant: forceVariant.text}
+                          : {provider: "", model: "", variant: ""}
+        backend.setProviderOverride(lastForce.provider, lastForce.model, lastForce.variant)
+        forceDialog.close()
+        if (start) backend.toggleRunning()
+    }
+    function runClicked() {
+        if (backend.running) { backend.toggleRunning(); return }
+        if (win.skipForceQuestion) { backend.toggleRunning(); return }
+        win.openForceDialog(true)
     }
     function kindLabel(kind) { return kind === "document" ? "Word" : kind === "transcript" ? "تفريغ" : "صوت" }
     function fileSize(bytes) {
         if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " م.ب"
         if (bytes >= 1024) return Math.round(bytes / 1024) + " ك.ب"
         return bytes + " بايت"
-    }
-    function applyProviderOverride() {
-        var provider = providerForce.currentValue || ""
-        if (provider) {
-            var first = settings.opencode_workers.find(function(w) { return (w.provider || "login") === provider })
-            forceModel.text = first ? (first.model || "") : ""
-        }
-        pushProviderOverride()
-    }
-    function pushProviderOverride() {
-        var provider = providerForce.currentValue || ""
-        backend.setProviderOverride(provider, provider ? forceModel.text : "")
     }
     function fillWorkerFields() {
         workerName.text = editingWorker.name
@@ -96,7 +120,6 @@ ApplicationWindow {
         diarize.checked = !!editingWorker.diarize
         var ids = backend.providers.map(function(p) { return p.id })
         workerProvider.currentIndex = Math.max(0, ids.indexOf(editingWorker.provider || "login"))
-        workerKeyEnv.text = editingWorker.key_env || ""
         workerEnabled.checked = editingWorker.enabled || false
         apiKey.text = ""
     }
@@ -192,7 +215,7 @@ ApplicationWindow {
                             objectName: "runButton"
                             text: backend.running ? "إيقاف بعد المهام الحالية" : "تشغيل الطابور"
                             primary: !backend.running
-                            onClicked: backend.toggleRunning()
+                            onClicked: win.runClicked()
                         }
                         Rectangle { width: 7; height: 7; radius: 4; color: backend.running ? win.accent : win.muted }
                         SubText { text: backend.running ? "المحرك يعمل" : "المحرك متوقف" }
@@ -211,31 +234,16 @@ ApplicationWindow {
                             SubText { text: "من الفيديو إلى مستند يستحق القراءة"; Layout.alignment: Qt.AlignRight }
                         }
                     }
-                    // Optional per-run provider: forcing one overrides every OpenCode worker.
+                    // Optional per-run settings: forcing one overrides every OpenCode worker.
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 10
-                        LabelText { text: "فرض مزود على عمال OpenCode" }
-                        ComboBox {
-                            id: providerForce
-                            objectName: "providerForceBox"
-                            model: [{id: "", name: "بدون فرض مزود"}].concat(backend.providers)
-                            textRole: "name"
-                            valueRole: "id"
-                            Layout.preferredWidth: 210
-                            onActivated: win.applyProviderOverride()
-                            Accessible.name: "فرض مزود على عمال OpenCode"
+                        AppButton {
+                            objectName: "forceButton"
+                            text: "فرض إعداد على عمال OpenCode"
+                            onClicked: win.openForceDialog(false)
                         }
-                        AppField {
-                            id: forceModel
-                            objectName: "forceModelField"
-                            visible: (providerForce.currentValue || "") !== ""
-                            Layout.preferredWidth: 320
-                            placeholderText: "معرّف النموذج"
-                            horizontalAlignment: Text.AlignRight
-                            onEditingFinished: win.pushProviderOverride()
-                            Accessible.name: "النموذج المفروض"
-                        }
+                        LabelText { objectName: "forceSummary"; text: win.forceSummary(); color: win.lastForce.provider ? win.accent : win.muted }
                         Item { Layout.fillWidth: true }
                     }
                 }
@@ -446,8 +454,8 @@ ApplicationWindow {
                     SubText { text: "كل عامل يعمل على مهمة واحدة. إيقاف الاستقبال يسمح للمهمة الحالية بالاكتمال."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                     RowLayout {
                         Layout.fillWidth: true
-                        AppButton { text: "إضافة عامل OpenCode"; onClicked: { var w = JSON.parse(JSON.stringify(settings.opencode_workers[0])); w.id = "oc" + Date.now(); w.name = "OpenCode " + (settings.opencode_workers.length + 1); w.provider = "login"; settings.opencode_workers.push(w); save() } }
-                        AppButton { text: "إضافة عامل OpenRouter"; onClicked: { var t = settings.opencode_workers.find(function(x){ return x.provider === "openrouter" }) || settings.opencode_workers[0]; var w = JSON.parse(JSON.stringify(t)); w.id = "or" + Date.now(); w.name = "OpenRouter " + (settings.opencode_workers.length + 1); w.provider = "openrouter"; w.variant = ""; settings.opencode_workers.push(w); save() } }
+                        AppButton { text: "إضافة عامل OpenCode"; onClicked: { var w = JSON.parse(JSON.stringify(settings.opencode_workers[0])); w.id = "oc" + Date.now(); w.name = "OpenCode " + (settings.opencode_workers.length + 1); w.provider = w.provider || "login"; settings.opencode_workers.push(w); save() } }
+                        AppButton { objectName: "providersButton"; text: "المزودون"; onClicked: { providersDialog.open() } }
                         AppButton { text: "إضافة عامل Deepgram"; onClicked: { var w = JSON.parse(JSON.stringify(settings.deepgram_workers[0])); w.id = "dg" + Date.now(); w.name = "Deepgram " + (settings.deepgram_workers.length + 1); w.project = "proj-" + (settings.deepgram_workers.length + 1); settings.deepgram_workers.push(w); save() } }
                         Item { Layout.fillWidth: true }
                         LabelText { text: "إدارة السعة"; font.pixelSize: 18 }
@@ -780,13 +788,8 @@ ApplicationWindow {
             AppField { id: workerModel; Layout.fillWidth: true }
             RowLayout {
                 visible: workerKind !== "deepgram"
-                ComboBox { id: workerProvider; Layout.fillWidth: true; model: backend.providers; textRole: "name"; valueRole: "id" }
+                ComboBox { id: workerProvider; objectName: "workerProviderBox"; Layout.fillWidth: true; model: backend.providers; textRole: "name"; valueRole: "id" }
                 LabelText { text: "مزود الخدمة" }
-            }
-            RowLayout {
-                visible: workerKind !== "deepgram" && workerProvider.currentValue === "custom"
-                AppField { id: workerKeyEnv; Layout.fillWidth: true; placeholderText: "MY_PROVIDER_API_KEY" }
-                LabelText { text: "متغير المفتاح" }
             }
             SubText {
                 visible: workerKind !== "deepgram"
@@ -797,7 +800,7 @@ ApplicationWindow {
             }
             RowLayout {
                 AppField { id: workerExtra; Layout.fillWidth: true }
-                LabelText { text: workerKind === "deepgram" ? "اللغة: ar أو auto" : "درجة التفكير (اتركها فارغة للمزودين بلا درجات)" }
+                LabelText { text: workerKind === "deepgram" ? "اللغة: ar أو auto" : "مستوى التفكير (فارغ = بلا درجة)" }
             }
             RowLayout {
                 AppField { id: workerProject; Layout.fillWidth: true }
@@ -827,7 +830,6 @@ ApplicationWindow {
             } else {
                 editingWorker.variant = workerExtra.text; editingWorker.agent = workerProject.text
                 editingWorker.provider = workerProvider.currentValue || "login"
-                editingWorker.key_env = editingWorker.provider === "custom" ? workerKeyEnv.text.trim() : ""
                 settings.opencode_workers[workerIndex] = editingWorker
             }
             var needsKey = workerKind === "deepgram" || editingWorker.provider !== "login"
@@ -835,6 +837,144 @@ ApplicationWindow {
             apiKey.text = ""
         }
         onRejected: apiKey.text = ""
+    }
+    Dialog {
+        id: forceDialog
+        property bool starting: true
+        anchors.centerIn: parent; width: 640; height: 460; modal: true
+        title: "فرض إعداد على عمال OpenCode"
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: ColumnLayout {
+            spacing: 12
+            LabelText {
+                objectName: "forceQuestion"
+                Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 17
+                text: forceDialog.starting
+                      ? "قبل تشغيل الطابور: هل تفرض مزودًا ونموذجًا ومستوى تفكير على كل عمال OpenCode، أم يبقى كل عامل على إعداده؟"
+                      : "اختر الإعداد المفروض على كل عمال OpenCode، أو ألغِ الفرض ليعود كل عامل إلى إعداده."
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                ComboBox { id: forceProvider; objectName: "forceProviderBox"; Layout.fillWidth: true; model: backend.providers; textRole: "name"; valueRole: "id" }
+                LabelText { text: "المزود" }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                AppField { id: forceModel; objectName: "forceModelField"; Layout.fillWidth: true; horizontalAlignment: Text.AlignRight; placeholderText: "معرّف النموذج" }
+                LabelText { text: "النموذج" }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                AppField { id: forceVariant; objectName: "forceVariantField"; Layout.fillWidth: true; horizontalAlignment: Text.AlignRight; placeholderText: "high أو max أو اتركه فارغًا" }
+                LabelText { text: "مستوى التفكير" }
+            }
+            SubText {
+                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                text: "الفرض لجلسة واحدة ولا يُحفظ. عامل بلا مفتاح للمزود المفروض يُتخطى برسالة واضحة في صفحة العمال."
+            }
+            CheckBox { id: skipForceBox; objectName: "skipForceBox"; text: "تخطَّ هذا السؤال في هذه الجلسة"; palette.windowText: win.ink; Layout.alignment: Qt.AlignRight }
+            Item { Layout.fillHeight: true }
+            RowLayout {
+                Layout.fillWidth: true; spacing: 10
+                AppButton {
+                    objectName: "forceDefaultButton"
+                    text: forceDialog.starting ? "تشغيل بالإعداد الافتراضي للعمال" : "إلغاء الفرض"
+                    onClicked: { win.skipForceQuestion = skipForceBox.checked; win.applyForce(false, forceDialog.starting) }
+                }
+                AppButton {
+                    objectName: "forceApplyButton"
+                    text: forceDialog.starting ? "تشغيل بالإعداد المفروض" : "تطبيق الفرض"
+                    primary: true
+                    onClicked: { win.skipForceQuestion = skipForceBox.checked; win.applyForce(true, forceDialog.starting) }
+                }
+                Item { Layout.fillWidth: true }
+                AppButton { text: "رجوع"; onClicked: forceDialog.close() }
+            }
+        }
+    }
+    Dialog {
+        id: providersDialog
+        anchors.centerIn: parent; width: 780; height: 620; modal: true
+        title: "مزودو الخدمة"
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: ColumnLayout {
+            spacing: 12
+            SubText {
+                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                text: "المزودون المدمجون ثابتون. أضف مزودك بمعرّفه كما يستخدمه OpenCode ومتغير المفتاح الذي يقرأ منه، واترك العزل مفعّلًا ليأخذ كل عامل مجلد بيانات مستقلًا."
+            }
+            ListView {
+                id: providerList
+                objectName: "providerList"
+                Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
+                model: backend.providers
+                ScrollBar.vertical: ScrollBar {}
+                delegate: Box {
+                    required property var modelData
+                    width: providerList.width; height: 68
+                    RowLayout {
+                        anchors.fill: parent; anchors.margins: 14; spacing: 10
+                        AppButton { text: "حذف"; danger: true; visible: !modelData.builtin; onClicked: { win.pendingProvider = modelData; deleteProviderDialog.open() } }
+                        AppButton {
+                            text: "تعديل"; visible: !modelData.builtin
+                            onClicked: { provId.text = modelData.id; provName.text = modelData.name; provEnv.text = modelData.keyEnv; provIsolated.checked = modelData.isolated }
+                        }
+                        Item { Layout.fillWidth: true }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            LabelText { text: modelData.name; font.pixelSize: 16; Layout.fillWidth: true }
+                            SubText { text: modelData.id + (modelData.keyEnv ? "  ·  " + modelData.keyEnv : "  ·  بلا مفتاح (تسجيل دخول)") + (modelData.builtin ? "  ·  مدمج" : "  ·  مضاف يدويًا") }
+                        }
+                    }
+                }
+            }
+            Box {
+                Layout.fillWidth: true; implicitHeight: provForm.implicitHeight + 36
+                ColumnLayout {
+                    id: provForm; anchors.fill: parent; anchors.margins: 18; spacing: 10
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppField { id: provId; objectName: "providerIdField"; Layout.fillWidth: true; placeholderText: "groq" }
+                        LabelText { text: "المعرّف" }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppField { id: provName; Layout.fillWidth: true; placeholderText: "Groq" }
+                        LabelText { text: "الاسم المعروض" }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppField { id: provEnv; objectName: "providerEnvField"; Layout.fillWidth: true; placeholderText: "GROQ_API_KEY" }
+                        LabelText { text: "متغير المفتاح" }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 10
+                        CheckBox { id: provIsolated; text: "عزل ملفات العامل (مستحسن)"; checked: true; palette.windowText: win.ink }
+                        Item { Layout.fillWidth: true }
+                        AppButton {
+                            objectName: "providerSaveButton"
+                            text: "حفظ المزود"; primary: true
+                            onClicked: {
+                                var raw = JSON.stringify({id: provId.text.trim(), name: provName.text.trim(), keyEnv: provEnv.text.trim(), isolated: provIsolated.checked})
+                                if (backend.saveProvider(raw)) { provId.text = ""; provName.text = ""; provEnv.text = ""; provIsolated.checked = true }
+                            }
+                        }
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                AppButton { text: "إغلاق"; onClicked: providersDialog.close() }
+            }
+        }
+    }
+    Dialog {
+        id: deleteProviderDialog; anchors.centerIn: parent; width: 500; modal: true; title: "حذف مزود"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Ok).text = "حذف"; standardButton(Dialog.Cancel).text = "إلغاء" }
+        Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُحذف المزود «" + win.pendingProvider.name + "» من القائمة. يمكنك إضافته مجددًا في أي وقت، ولا يُحذف أي عامل يستخدمه." }
+        onAccepted: backend.deleteProvider(win.pendingProvider.id)
     }
     Dialog {
         id: deleteFileDialog; anchors.centerIn: parent; width: 520; modal: true; title: "حذف من المكتبة"

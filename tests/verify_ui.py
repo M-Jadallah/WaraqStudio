@@ -107,26 +107,55 @@ def main():
         assert editor.property("count") == 2
         QTest.keyClick(root, Qt.Key_Escape)
         QTest.qWait(80)
-        # Worker list: direct enable toggle, queue-wide provider override, per-provider keys.
+        # Worker list: direct enable toggle, provider management, and the queue override.
         click("nav2")
         assert find(root.contentItem(), "workerEnableBox") is not None
-        assert find(root.contentItem(), "providerForceBox") is not None
-        oc3 = [w for w in scheduler.workers() if w["id"] == "oc3"][0]
-        assert oc3["provider"] == "openrouter" and oc3["modelResolved"] == "openrouter/deepseek/deepseek-v4.1-flash"
-        assert not oc3["hasKey"]
+        assert find(root.contentItem(), "providersButton") is not None
+        assert [w["id"] for w in scheduler.workers() if w["stage"] == "opencode"] == ["oc1", "oc2", "oc3", "oc4", "oc5"]
+        oc1 = [w for w in scheduler.workers() if w["id"] == "oc1"][0]
+        assert oc1["provider"] == "login" and oc1["modelResolved"] == "openai/gpt-6-astra"
         bridge.setWorkerEnabled("oc3", False)
         assert not [w for w in scheduler.workers() if w["id"] == "oc3"][0]["enabled"]
         bridge.setWorkerEnabled("oc3", True)
         assert [w for w in scheduler.workers() if w["id"] == "oc3"][0]["enabled"]
-        bridge.setProviderOverride("login", "")
-        assert scheduler.provider_override == "login"
-        assert [w for w in scheduler.workers() if w["id"] == "oc3"][0]["provider"] == "login"
-        bridge.setProviderOverride("", "")
+        # A provider added by hand joins the catalog and can back a worker.
+        assert bridge.saveProvider(json.dumps({"id": "groq", "name": "Groq", "keyEnv": "GROQ_API_KEY", "isolated": True}))
+        assert bridge.providers[-1]["id"] == "groq" and bridge.providers[-1]["builtin"] is False
+        assert not bridge.saveProvider(json.dumps({"id": "bad id", "name": "x", "keyEnv": "GROQ_API_KEY", "isolated": True}))
+        assert not bridge.saveProvider(json.dumps({"id": "openai", "name": "x", "keyEnv": "X_API_KEY", "isolated": True}))
+        tuned = config.snapshot()
+        tuned["opencode_workers"][2].update({"provider": "groq", "model": "llama-3.3-70b"})
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
+        oc3 = [w for w in scheduler.workers() if w["id"] == "oc3"][0]
+        assert oc3["provider"] == "groq" and oc3["modelResolved"] == "groq/llama-3.3-70b"
+        assert oc3["keyEnv"] == "GROQ_API_KEY" and not oc3["hasKey"]
+        # The queue override replaces provider, model and reasoning level for every worker.
+        bridge.setProviderOverride("groq", "llama-3.3-70b", "high")
+        assert scheduler.provider_override == "groq" and scheduler.provider_override_variant == "high"
+        forced = [w for w in scheduler.workers() if w["id"] == "oc1"][0]
+        assert forced["provider"] == "groq" and forced["modelResolved"] == "groq/llama-3.3-70b"
+        bridge.setProviderOverride("", "", "")
         assert scheduler.provider_override == ""
+        # Credentials are scoped to the worker and its provider.
         saved = {}
         keys.set = lambda worker, value: saved.update({worker: value})
-        bridge.saveKey("oc3", "sk-or-test")
-        assert saved == {"oc3:openrouter": "sk-or-test"}, saved
+        bridge.saveKey("oc3", "gsk-test")
+        assert saved == {"oc3:groq": "gsk-test"}, saved
+        bridge.deleteProvider("groq")
+        assert any(p["id"] == "groq" for p in bridge.providers), "a provider in use must not be deleted"
+        # Starting the queue asks about the override first, and both answers start it.
+        click("nav0")
+        assert find(root.contentItem(), "forceButton") is not None
+        click("runButton")
+        assert find(root.contentItem(), "forceQuestion") is not None, "the force question must precede a start"
+        assert not scheduler.running
+        click("forceApplyButton")
+        assert scheduler.running, "the forced-start button must start the queue"
+        # The dialog prefilled from the first worker, so that is what got forced.
+        assert scheduler.provider_override == "login" and scheduler.provider_override_variant == "high"
+        click("runButton")
+        assert not scheduler.running
+        bridge.setProviderOverride("", "", "")
         # Library: organise a finished artifact into its type folder, list it, then delete it.
         library_root = Path(temp) / "library"
         tuned = config.snapshot()
@@ -177,10 +206,19 @@ def main():
             root.grabWindow().save(str(evidence / "worker-dialog.png"))
             QTest.keyClick(root, Qt.Key_Escape)
             QTest.qWait(80)
-            router = [w for w in config.data["opencode_workers"] if w.get("provider") == "openrouter"][0]
-            QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", router), Q_ARG("QVariant", "opencode"))
-            QTest.qWait(120)
+            QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", config.data["opencode_workers"][0]), Q_ARG("QVariant", "opencode"))
+            QTest.qWait(150)
             root.grabWindow().save(str(evidence / "worker-dialog-opencode.png"))
+            QTest.keyClick(root, Qt.Key_Escape)
+            QTest.qWait(80)
+            QMetaObject.invokeMethod(root, "openForceDialog", Q_ARG("QVariant", True))
+            QTest.qWait(150)
+            root.grabWindow().save(str(evidence / "force-dialog.png"))
+            QTest.keyClick(root, Qt.Key_Escape)
+            QTest.qWait(80)
+            click("providersButton")
+            QTest.qWait(200)
+            root.grabWindow().save(str(evidence / "providers-dialog.png"))
         root.close()
         scheduler.shutdown()
         bridge.timer.stop()

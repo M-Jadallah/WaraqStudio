@@ -56,7 +56,7 @@ def safe_title(text):
 LIMIT_MESSAGE = "بلغ OpenCode حد استخدام اشتراك ChatGPT (نافذة الخمس ساعات)، ولم يُنتج الملف بعد."
 
 
-def worker_env(worker, provider, secret, data_root):
+def worker_env(worker, provider, secret, cfg):
     """Environment overrides for one OpenCode worker.
 
     A worker that authenticates with a key also gets its own OpenCode data and state
@@ -64,13 +64,13 @@ def worker_env(worker, provider, secret, data_root):
     login directory must stay untouched so a subscription session is never lost.
     """
     env = {}
-    if provider_isolated(provider) and data_root:
-        base = Path(data_root) / worker["id"]
+    if provider_isolated(provider, cfg) and cfg.get("opencode_data_root"):
+        base = Path(cfg["opencode_data_root"]) / worker["id"]
         env["XDG_DATA_HOME"] = str(base / "data")
         env["XDG_STATE_HOME"] = str(base / "state")
         # Parallel workers must not race an auto-update over one shared binary.
         env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
-    name = key_env_for(provider, worker)
+    name = key_env_for(provider, cfg)
     if name and secret:
         env[name] = secret
     return env
@@ -508,9 +508,9 @@ class OpenCode:
         env = os.environ.copy()
         if module_paths:
             env["NODE_PATH"] = os.pathsep.join(module_paths + ([env["NODE_PATH"]] if env.get("NODE_PATH") else []))
-        provider = provider_of(worker)
+        provider = provider_of(worker, cfg)
         model = compose_model(provider, worker["model"])
-        env.update(worker_env(worker, provider, secret, cfg.get("opencode_data_root", "")))
+        env.update(worker_env(worker, provider, secret, cfg))
         log(f"المزود: {provider} · النموذج: {model}")
         command = [str(resolve_opencode(cfg["opencode_executable"])), "run", "--model", model]
         if str(worker.get("variant", "")).strip():
