@@ -474,7 +474,7 @@ ApplicationWindow {
                                     Layout.fillWidth: true; spacing: 12
                                     AppButton { text: "إعدادات"; visible: modelData.stage !== "download"; onClicked: win.editWorker(modelData, modelData.stage) }
                                     AppButton { text: modelData.paused ? "استئناف الخدمة" : "إيقاف الخدمة"; onClicked: backend.pauseStage(modelData.stage, !modelData.paused) }
-                                    AppButton { text: "إعادة فحص العامل"; visible: !!modelData.error; onClicked: backend.resetWorker(modelData.id) }
+                                    AppButton { text: "إعادة فحص العامل"; visible: !!modelData.error; onClicked: modelData.stage === "download" ? backend.recheckStage(modelData.stage) : backend.resetWorker(modelData.id) }
                                     CheckBox {
                                         objectName: "workerEnableBox"
                                         text: "يستقبل مهامًا"
@@ -488,7 +488,14 @@ ApplicationWindow {
                                     ColumnLayout {
                                         Layout.alignment: Qt.AlignRight
                                         LabelText { text: modelData.name; font.pixelSize: 17; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
-                                        SubText { text: modelData.job_id ? "يعالج " + modelData.job_id + "  ·  " + modelData.elapsed + " ثانية" : (!modelData.enabled ? "معطل" : modelData.paused ? "الاستقبال متوقف" : modelData.stageLabel + "  ·  جاهز لاستقبال مهمة"); Layout.alignment: Qt.AlignRight }
+                                        SubText {
+                                            Layout.alignment: Qt.AlignRight
+                                            text: modelData.job_id ? "يعالج " + modelData.job_id + "  ·  " + modelData.elapsed + " ثانية"
+                                                : (!modelData.enabled ? "معطل"
+                                                : modelData.paused ? "الاستقبال متوقف"
+                                                : modelData.cooldownSeconds > 0 ? "تهدئة تقييد YouTube — يستأنف التنزيل تلقائيًا بعد " + Math.ceil(modelData.cooldownSeconds / 60) + " دقيقة"
+                                                : modelData.stageLabel + "  ·  جاهز لاستقبال مهمة")
+                                        }
                                         SubText { text: win.workerLine(modelData); visible: text.length > 0; Layout.alignment: Qt.AlignRight }
                                     }
                                     Rectangle { width: 10; height: 10; radius: 5; color: modelData.error ? "#f4b880" : modelData.job_id ? win.accent : win.muted }
@@ -634,7 +641,7 @@ ApplicationWindow {
                                     id: limitsColumn; anchors.fill: parent; anchors.margins: 20; spacing: 12
                                     LabelText { text: "السعة والترتيب"; font.pixelSize: 18; Layout.alignment: Qt.AlignRight }
                                     Repeater {
-                                        model: [{key:"project_concurrency",label:"حد تزامن Deepgram لكل مشروع"},{key:"max_pending_audio",label:"أقصى ملفات صوت بانتظار التفريغ"},{key:"youtube_sleep_min",label:"أقل انتظار بين التنزيلات — ثانية"},{key:"youtube_sleep_max",label:"أقصى انتظار بين التنزيلات — ثانية"},{key:"chunk_seconds",label:"طول الجزء الصوتي — ثانية"},{key:"opencode_timeout",label:"مهلة OpenCode — ثانية"}]
+                                        model: [{key:"project_concurrency",label:"حد تزامن Deepgram لكل مشروع"},{key:"max_pending_audio",label:"أقصى ملفات صوت بانتظار التفريغ"},{key:"youtube_sleep_min",label:"أقل انتظار بين التنزيلات — ثانية"},{key:"youtube_sleep_max",label:"أقصى انتظار بين التنزيلات — ثانية"},{key:"youtube_request_delay",label:"الفاصل بين طلبات YouTube — ثانية"},{key:"youtube_cooldown",label:"تهدئة تقييد YouTube — ثانية"},{key:"chunk_seconds",label:"طول الجزء الصوتي — ثانية"},{key:"opencode_timeout",label:"مهلة OpenCode — ثانية"}]
                                         delegate: RowLayout {
                                             required property var modelData
                                             Layout.fillWidth: true
@@ -642,6 +649,12 @@ ApplicationWindow {
                                             Item { Layout.fillWidth: true }
                                             LabelText { text: modelData.label }
                                         }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        AppField { Layout.preferredWidth: 160; text: String(settings.youtube_retry_attempts); validator: IntValidator {bottom:0;top:6} onEditingFinished: settings.youtube_retry_attempts = Number(text); Accessible.name: "عدد إعادات تنزيل YouTube التلقائية" }
+                                        Item { Layout.fillWidth: true }
+                                        LabelText { text: "إعادات تنزيل YouTube التلقائية (0 = بدون إعادة)" }
                                     }
                                     CheckBox { text: "ترتيب صارم: تنتظر المهمة عبور المهام السابقة من المرحلة نفسها"; checked: settings.strict_order; onClicked: settings.strict_order = checked; palette.windowText: win.ink; Layout.alignment: Qt.AlignRight }
                                     RowLayout {
@@ -737,7 +750,7 @@ ApplicationWindow {
             spacing: 14
             LabelText { text: selectedJob.title || ""; font.pixelSize: 20; Layout.fillWidth: true }
             SubText { text: (selectedJob.statusLabel || "") + "  ·  " + (selectedJob.stageLabel || ""); Layout.fillWidth: true }
-            SubText { text: selectedJob.retryAt ? "أُعيدت الجدولة تلقائيًا — المحاولة القادمة الساعة " + selectedJob.retryAt : ""; visible: !!selectedJob.retryAt; color: win.dark ? "#87b7ff" : "#215cc4"; Layout.fillWidth: true }
+            SubText { text: selectedJob.retryAt ? "أُعيدت الجدولة تلقائيًا — المحاولة القادمة " + selectedJob.retryAt : ""; visible: !!selectedJob.retryAt; color: win.dark ? "#87b7ff" : "#215cc4"; Layout.fillWidth: true }
             SubText { text: selectedJob.template ? "قالب البرومبت: " + selectedJob.template : ""; visible: !!selectedJob.template; Layout.fillWidth: true }
             SubText { text: selectedJob.error || ""; visible: !!selectedJob.error; color: win.dark ? "#ffbc88" : "#98450b"; wrapMode: Text.WordWrap; Layout.fillWidth: true }
             ProgressBar { Layout.fillWidth: true; from: 0; to: 100; value: selectedJob.progress || 0; indeterminate: selectedJob.status === "running" && selectedJob.progress < 0; visible: selectedJob.status === "running" }
@@ -766,7 +779,10 @@ ApplicationWindow {
     Dialog {
         id: retryWarning; anchors.centerIn: parent; width: 500; modal: true; title: "إعادة المحاولة"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "إعادة المحاولة"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        Label { width: parent.width; wrapMode: Text.WordWrap; text: selectedJob.status === "uncertain" ? "الطلب السابق لدى Deepgram قد يكون اكتمل. إعادة الإرسال قد تسبب تكلفة إضافية. هل تريد المحاولة؟" : "ستُستأنف المرحلة باستخدام الملفات المكتملة المحفوظة." }
+        Label { width: parent.width; wrapMode: Text.WordWrap; text: selectedJob.status === "uncertain" ? "الطلب السابق لدى Deepgram قد يكون اكتمل. إعادة الإرسال قد تسبب تكلفة إضافية. هل تريد المحاولة؟"
+                : (selectedJob.current === "download" && selectedJob.status === "blocked") ? "توقف التنزيل لأن YouTube رفض الوصول أو لنقص المساحة. أصلح السبب أولًا (الكوكيز أو المساحة) ثم أعد المحاولة؛ سيُرفع التوقف الآلي عن خدمة التنزيل ويُعاد العمل دون المساس بالإيقاف اليدوي."
+                : (selectedJob.status === "pending" && selectedJob.retryAt) ? "المهمة مجدولة تلقائيًا حتى المحاولة القادمة. الإعادة اليدوية تعيدها إلى الطابور لكنها لا تتجاوز تهدئة تقييد YouTube."
+                : "ستُستأنف المرحلة باستخدام الملفات المكتملة المحفوظة." }
         onAccepted: { backend.retry(selectedJob.id, selectedJob.current, false); jobDialog.close() }
     }
     Dialog {

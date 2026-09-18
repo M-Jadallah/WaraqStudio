@@ -120,7 +120,7 @@ class Bridge(QObject):
                 "status": state, "statusLabel": LABELS.get(state, state), "current": current,
                 "stageLabel": STAGE_LABELS[current], "error": stages[current]["error"],
                 "worker": stages[current]["worker"], "progress": stages[current]["progress"],
-                "retryAt": time.strftime("%H:%M", time.localtime(stages[current]["next_retry"]))
+                "retryAt": self.retry_at(stages[current]["next_retry"])
                            if state == "pending" and stages[current]["next_retry"] > time.time() else "",
                 "template": j["config"].get("template_name", ""),
                 "steps": [{"name": name, "label": STAGE_LABELS[name], "status": stages[name]["status"]} for name in STAGES],
@@ -145,6 +145,11 @@ class Bridge(QObject):
             return
         self._jobs, self._workers, self._logs, self._running = result, workers, logs, running
         self.changed.emit()
+
+    @staticmethod
+    def retry_at(timestamp):
+        fmt = "%H:%M" if time.localtime(timestamp)[:3] == time.localtime()[:3] else "%Y-%m-%d %H:%M"
+        return time.strftime(fmt, time.localtime(timestamp))
 
     @Slot(str)
     def _accept_source(self, raw):
@@ -288,6 +293,19 @@ class Bridge(QObject):
         self.refresh()
 
     @Slot(str)
+    def recheckStage(self, stage):
+        """Re-check a service after its automatic block was fixed: lift the block
+        and requeue the jobs the block had parked."""
+        self.scheduler.unblock_stage(stage)
+        for job in self.store.jobs():
+            record = job["stages"].get(stage)
+            if record and record["status"] == "blocked":
+                self.store.set_stage(job["id"], stage, "pending")
+                self.store.event(job["id"], "أُعيد فحص الخدمة فأُعيدت المهمة إلى الطابور.")
+        self.notice.emit("أُعيد فحص الخدمة؛ ستُتابع المهام العمل تلقائيًا إذا كان الطابور يعمل.", False)
+        self.refresh()
+
+    @Slot(str)
     def cancelJob(self, ident):
         self.scheduler.cancel_job(ident)
         self.refresh()
@@ -301,7 +319,20 @@ class Bridge(QObject):
                 for name in STAGES[STAGES.index(stage) + 1:]:
                     if job["stages"][name]["status"] == "cancelled":
                         self.store.set_stage(ident, name, "pending")
-            self.notice.emit("المهمة جاهزة للمحاولة. شغّل الطابور إذا كان متوقفًا.", False)
+            # Retrying a download lifts the automatic block (cookies, disk) but
+            # never the user's manual pause and never the 429 cooldown.
+            manual = stage == "download" and stage in self.scheduler.manual_paused_stages
+            if stage == "download":
+                self.scheduler.unblock_stage(stage)
+            remaining = max(0, int(self.scheduler.youtube.cooldown_until - time.time()))
+            if stage == "download" and remaining > 0:
+                self.notice.emit(f"أُعيدت المهمة إلى الطابور وستبدأ تلقائيًا بعد انتهاء تهدئة YouTube ({self.scheduler.human_delay(remaining)}).", False)
+            elif manual:
+                self.notice.emit("أُعيدت المهمة إلى الطابور، لكن خدمة التنزيل موقوفة يدويًا من صفحة العمال.", False)
+            elif not self.scheduler.running:
+                self.notice.emit("أُعيدت المهمة إلى الطابور. شغّل الطابور للبدء.", False)
+            else:
+                self.notice.emit("أُعيدت المهمة إلى الطابور وسيبدأ المنظم بتنفيذها.", False)
             self.refresh()
         except Exception as exc:
             self.notice.emit(str(exc), True)

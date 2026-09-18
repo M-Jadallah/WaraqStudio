@@ -39,6 +39,7 @@ class Store:
               id INTEGER PRIMARY KEY, ts REAL NOT NULL, job_id TEXT, level TEXT, message TEXT
             );
             CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, created REAL);
+            CREATE TABLE IF NOT EXISTS runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated REAL NOT NULL);
         ''')
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}
         if "queue_order" not in columns:
@@ -201,6 +202,21 @@ class Store:
     def cache_put(self, key, value):
         with self.lock:
             self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?)", (key, json.dumps(value, ensure_ascii=False), time.time()))
+
+    def state_get(self, key, default=None):
+        """Operational state that must survive a restart, e.g. the YouTube cooldown."""
+        with self.lock:
+            row = self.db.execute("SELECT value FROM runtime_state WHERE key=?", (key,)).fetchone()
+            return json.loads(row["value"]) if row else default
+
+    def state_put(self, key, value):
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO runtime_state VALUES(?,?,?)",
+                            (key, json.dumps(value, ensure_ascii=False), time.time()))
+
+    def state_clear(self, key):
+        with self.lock:
+            self.db.execute("DELETE FROM runtime_state WHERE key=?", (key,))
 
 
 def fingerprint(value):

@@ -25,7 +25,10 @@ class Scheduler:
         self.stop_event = threading.Event()
         self.active = {}
         self.lock = threading.RLock()
-        self.paused_stages = set()
+        # Manual pauses come only from the user's service button; automatic
+        # stage blocks (cookies, disk space) are lifted by retry/re-check.
+        self.manual_paused_stages = set()
+        self.automatic_stage_blocks = {}
         self.disabled_workers = {}
         self.provider_override = ""
         self.provider_override_model = ""
@@ -88,11 +91,21 @@ class Scheduler:
         self.running = False
 
     def pause_stage(self, stage, pause):
+        """User-driven service pause; never mixed with automatic failure blocks."""
         with self.lock:
             if pause:
-                self.paused_stages.add(stage)
+                self.manual_paused_stages.add(stage)
             else:
-                self.paused_stages.discard(stage)
+                self.manual_paused_stages.discard(stage)
+
+    def block_stage(self, stage, reason):
+        """Automatic guard (cookies, disk space) that a retry or re-check can lift."""
+        with self.lock:
+            self.automatic_stage_blocks[stage] = reason
+
+    def unblock_stage(self, stage):
+        with self.lock:
+            self.automatic_stage_blocks.pop(stage, None)
 
     def cancel_job(self, ident):
         with self.lock:
@@ -132,10 +145,15 @@ class Scheduler:
                                    ("deepgram", cfg["deepgram_workers"]), ("opencode", cfg["opencode_workers"])]:
                 for w in workers:
                     active = self.active.get(w["id"], {})
+                    blocked_reason = self.automatic_stage_blocks.get(stage, "")
                     entry = {**w, "stage": stage, "job_id": active.get("job_id", ""),
                              "elapsed": round(time.time() - active["started"]) if active else 0,
-                             "paused": stage in self.paused_stages,
-                             "error": self.disabled_workers.get(w["id"], ""),
+                             "paused": stage in self.manual_paused_stages,
+                             "autoBlocked": bool(blocked_reason),
+                             "cooldownSeconds": max(0, int(self.youtube.cooldown_until - time.time())) if stage == "download" else 0,
+                             # Download has no per-worker enable state, so the automatic
+                             # block reason surfaces through the standard error slot.
+                             "error": self.disabled_workers.get(w["id"], "") or blocked_reason,
                              "provider": "", "providerLabel": "", "keyEnv": "", "hasKey": False,
                              "modelResolved": w.get("model", "")}
                     if stage == "opencode":
@@ -187,7 +205,7 @@ class Scheduler:
         pending_audio = sum(bool(j["audio"]) and j["stages"]["deepgram"]["status"] not in ("completed", "skipped", "cancelled") for j in jobs)
         for stage, pool in [("download", [{"id": "yt1", "enabled": True}]),
                             ("deepgram", cfg["deepgram_workers"]), ("opencode", cfg["opencode_workers"])]:
-            if stage in self.paused_stages:
+            if stage in self.manual_paused_stages or stage in self.automatic_stage_blocks:
                 continue
             if stage == "download" and (pending_audio >= cfg["max_pending_audio"] or time.time() < self.youtube.cooldown_until):
                 continue
@@ -217,8 +235,9 @@ class Scheduler:
                         root = Path(job["config"]["output_root"])
                         root.mkdir(parents=True, exist_ok=True)
                         if shutil.disk_usage(root).free < cfg["min_free_gb"] * 1024 ** 3:
-                            self.store.set_stage(job["id"], stage, "blocked", "المساحة الحرة أقل من الحد المحدد.")
-                            self.pause_stage(stage, True)
+                            message = "المساحة الحرة أقل من الحد المحدد."
+                            self.store.set_stage(job["id"], stage, "blocked", message)
+                            self.block_stage(stage, message)
                             break
                     if not self.store.claim(job["id"], stage, wid):
                         continue
@@ -263,25 +282,36 @@ class Scheduler:
         except ServiceError as exc:
             kind = exc.kind
             used = int(job["stages"][stage].get("retries", 0))
-            # Jobs snapshotted before these settings existed keep sane defaults.
-            budget = cfg.get("opencode_limit_retries", 5) if kind == "rate_limited" else cfg.get("auto_retry_attempts", 3)
-            retryable = (kind == "rate_limited" and stage == "opencode") or \
-                        (kind == "failed" and stage in ("download", "opencode"))
-            if retryable and used < budget:
-                delay = self.limit_retry_delay if kind == "rate_limited" else self.retry_delays[min(used, len(self.retry_delays) - 1)]
+            # One central retry decision per (stage, kind); jobs snapshotted
+            # before a setting existed keep its sane default.
+            if kind == "rate_limited" and stage == "opencode":
+                budget, delay = cfg.get("opencode_limit_retries", 5), self.limit_retry_delay
+            elif kind == "rate_limited" and stage == "download":
+                budget = cfg.get("youtube_retry_attempts", 3)
+                # A throttled download is never retried sooner than the shared cooldown.
+                delay = max(float(exc.retry_after or 0), max(0.0, self.youtube.cooldown_until - time.time()))
+            elif kind == "failed" and stage in ("download", "opencode"):
+                budget = cfg.get("youtube_retry_attempts", 3) if stage == "download" else cfg.get("auto_retry_attempts", 3)
+                delay = self.retry_delays[min(used, len(self.retry_delays) - 1)]
+            else:
+                budget, delay = 0, 0
+            if budget and used < budget:
                 count = self.store.defer_retry(ident, stage, str(exc), delay)
                 self.store.event(ident, f"أُعيدت الجدولة بعد {self.human_delay(delay)} "
                                         f"(محاولة {count}/{budget}): {str(exc)[:300]}")
             elif kind == "rate_limited":
-                message = f"استُنفدت محاولات الانتظار ({budget}) وظل حد استخدام OpenCode ممتلئًا — غالبًا الحد الأسبوعي. أعد المحاولة يدويًا لاحقًا."
+                message = (f"استُنفدت محاولات الانتظار ({budget}) وظل حد استخدام OpenCode ممتلئًا — غالبًا الحد الأسبوعي. أعد المحاولة يدويًا لاحقًا."
+                           if stage == "opencode" else
+                           f"استُنفدت إعادات تنزيل YouTube التلقائية ({budget}) بعد تقييد الطلبات. أعد المحاولة يدويًا لاحقًا.")
                 self.store.set_stage(ident, stage, "failed", message)
                 self.store.event(ident, message, "error")
             else:
-                self.store.set_stage(ident, stage, kind if kind != "split" else "failed", str(exc))
+                status = kind if kind in ("blocked", "uncertain", "cancelled") else "failed"
+                self.store.set_stage(ident, stage, status, str(exc))
                 self.store.event(ident, str(exc), "error")
                 if kind == "blocked":
                     if stage == "download":
-                        self.pause_stage(stage, True)
+                        self.block_stage(stage, str(exc))
                     else:
                         self.disabled_workers[wid] = str(exc)
         except Exception as exc:

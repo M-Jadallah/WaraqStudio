@@ -9,6 +9,7 @@
   "youtube_sleep_max": 15,
   "youtube_client": "",
   "youtube_cooldown": 900,
+  "youtube_retry_attempts": 3,
   "download_enabled": true,
   "deepgram_enabled": true,
   "opencode_enabled": true,

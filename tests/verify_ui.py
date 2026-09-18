@@ -180,8 +180,19 @@ def main():
         click("nav0")
         # Pause controls exercised with no dispatch: stage-specific pause, worker controls, theme persistence.
         bridge.pauseStage("download", True)
-        assert "download" in scheduler.paused_stages
+        assert "download" in scheduler.manual_paused_stages
+        assert "download" not in scheduler.automatic_stage_blocks
         bridge.pauseStage("download", False)
+        # An automatic download block shows on the worker row and a re-check
+        # lifts it and requeues the parked job.
+        scheduler.block_stage("download", "YouTube رفض الوصول.")
+        store.set_stage(store.jobs()[0]["id"], "download", "blocked", "YouTube رفض الوصول.")
+        bridge.refresh()
+        download_worker = next(w for w in bridge.workers if w["stage"] == "download")
+        assert download_worker["autoBlocked"] and download_worker["error"]
+        bridge.recheckStage("download")
+        assert "download" not in scheduler.automatic_stage_blocks
+        assert store.get(store.jobs()[0]["id"])["stages"]["download"]["status"] == "pending"
         for theme in ("light", "dark"):
             data = config.snapshot()
             data["theme"] = theme

@@ -106,7 +106,7 @@ def defaults(home: Path):
         "output_root": str(home / "results"),
         "cookies_file": "", "youtube_request_delay": 3.0,
         "youtube_sleep_min": 8, "youtube_sleep_max": 15,
-        "youtube_client": "", "youtube_cooldown": 900,
+        "youtube_client": "", "youtube_cooldown": 900, "youtube_retry_attempts": 3,
         "download_enabled": True, "deepgram_enabled": True, "opencode_enabled": True,
         "project_concurrency": 2, "max_pending_audio": 12, "min_free_gb": 2,
         "audio_bitrate": 64, "audio_rate": 16000, "audio_channels": 1,
@@ -150,6 +150,9 @@ class Config:
         if self.path.exists():
             saved = json.loads(self.path.read_text(encoding="utf-8"))
             self.data.update(saved)
+            # Existing users keep their current retry policy when this key first appears.
+            if "youtube_retry_attempts" not in saved:
+                self.data["youtube_retry_attempts"] = saved.get("auto_retry_attempts", self.data["youtube_retry_attempts"])
         self.migrate()
 
     def migrate(self):
@@ -242,7 +245,7 @@ class Config:
             ("split_after_minutes", 5, 600), ("min_free_gb", 0.1, 1000),
             ("audio_bitrate", 32, 192), ("http_timeout", 30, 7200),
             ("max_retries", 1, 6), ("opencode_timeout", 60, 43200),
-            ("youtube_cooldown", 60, 86400),
+            ("youtube_cooldown", 60, 86400), ("youtube_retry_attempts", 0, 6),
             ("auto_retry_attempts", 0, 6), ("opencode_limit_retries", 0, 12),
         ]:
             if not isinstance(d[k], (int, float)) or isinstance(d[k], bool):
@@ -253,7 +256,7 @@ class Config:
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
         for k in ("project_concurrency", "max_pending_audio", "chunk_seconds", "audio_bitrate", "audio_rate", "audio_channels", "max_retries",
-                  "auto_retry_attempts", "opencode_limit_retries"):
+                  "youtube_retry_attempts", "auto_retry_attempts", "opencode_limit_retries"):
             if not isinstance(d[k], int) or isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون عددًا صحيحًا.")
         if int(d["youtube_sleep_max"]) < int(d["youtube_sleep_min"]):

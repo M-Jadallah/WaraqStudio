@@ -5,6 +5,7 @@ Windows/
 *.sqlite3*
 settings.json
 cookies.txt
+.verify/
 
 # Excluded from indexing (non-app code, build artifacts, environments)
 legacy_reference/

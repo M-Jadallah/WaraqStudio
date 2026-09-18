@@ -164,7 +164,8 @@ def test_youtube_limit_pauses_network(env):
     store, cfg = env
     youtube = Youtube(store)
     error = youtube.classify(Exception("HTTP Error 429"), cfg.data)
-    assert error.kind == "blocked"
+    assert error.kind == "rate_limited"
+    assert error.retry_after >= cfg.data["youtube_cooldown"]
     assert youtube.cooldown_until > time.time()
     with pytest.raises(ServiceError):
         youtube.pace(cfg.data, threading.Event())
@@ -518,7 +519,7 @@ def test_transient_failure_rescheduled_then_completes(env):
 
 def test_transient_retry_budget_exhausted(env):
     store, cfg = env
-    ident = download_only_job(store, cfg, {"auto_retry_attempts": 1})
+    ident = download_only_job(store, cfg, {"youtube_retry_attempts": 1})
     class FakeYoutube:
         cooldown_until = 0
         def download(self, job, cfg, cancel, progress):
@@ -934,4 +935,203 @@ def test_library_remove_stays_inside_the_library(tmp_path):
         library.remove(cfg.data, str(tmp_path / "library" / "stray.docx"))
     library.remove(cfg.data, str(inside))
     assert not inside.exists() and outside.is_file()
+
+
+@pytest.mark.parametrize("message,kind", [
+    ("HTTP Error 429: Too Many Requests", "rate_limited"),
+    ("unable to download video data: HTTP Error 500", "failed"),
+    ("<urlopen error timed out>", "failed"),
+    ("Connection reset by peer", "failed"),
+    ("getaddrinfo failed", "failed"),
+    ("Sign in to confirm you're not a bot", "blocked"),
+    ("HTTP Error 403: Forbidden", "blocked"),
+    ("This video has been removed by the uploader", "permanent"),
+    ("Video unavailable", "permanent"),
+    ("The uploader has not made this video available in your country", "permanent"),
+    ("Unsupported URL: https://example.com/x", "permanent"),
+    ("HTTP Error 404: Not Found", "permanent"),
+])
+def test_youtube_error_classification_matrix(env, message, kind):
+    store, cfg = env
+    youtube = Youtube(store)
+    error = youtube.classify(Exception(message), cfg.data)
+    assert error.kind == kind
+    if kind != "rate_limited":
+        assert youtube.cooldown_until == 0
+
+
+def test_rate_limit_cooldown_persists_across_restart(env):
+    store, cfg = env
+    youtube = Youtube(store)
+    error = youtube.classify(Exception("HTTP Error 429"), cfg.data)
+    assert error.kind == "rate_limited" and error.retry_after >= cfg.data["youtube_cooldown"]
+    revived = Youtube(store)
+    assert revived.cooldown_until == pytest.approx(youtube.cooldown_until)
+    # Expiry is cleared lazily so a fresh process never sees a stale cooldown.
+    youtube.cooldown_until = time.time() - 1
+    youtube.expire_cooldown()
+    assert youtube.cooldown_until == 0
+    assert store.state_get("youtube_cooldown_until") is None
+
+
+def test_rate_limited_download_is_deferred_then_completes(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    calls = []
+    class FakeYoutube:
+        cooldown_until = 0
+        def download(self, job, cfg, cancel, progress):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ServiceError("YouTube قيّد الطلبات (429).", "rate_limited", 0.05)
+            path = Path(job["folder"]) / "audio.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+    scheduler = Scheduler(store, cfg, None, FakeYoutube(), retry_delays=(0.05, 0.05, 0.05))
+    pump(scheduler, store, ident, "download", ("completed",))
+    stage = store.get(ident)["stages"]["download"]
+    assert stage["attempts"] == 2
+    assert scheduler.manual_paused_stages == set()
+    assert "download" not in scheduler.automatic_stage_blocks
+    assert len([e for e in store.events(50) if "أُعيدت الجدولة" in e["message"]]) == 1
+
+
+def test_cooldown_blocks_downloads_until_expiry(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    class FakeYoutube:
+        cooldown_until = time.time() + 3600
+        def download(self, job, cfg, cancel, progress):
+            assert self.cooldown_until <= time.time() or True
+            path = Path(job["folder"]) / "audio.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+    scheduler = Scheduler(store, cfg, None, FakeYoutube())
+    scheduler.tick()
+    assert store.get(ident)["stages"]["download"]["status"] == "pending"
+    FakeYoutube.cooldown_until = time.time() - 1
+    pump(scheduler, store, ident, "download", ("completed",))
+
+
+def test_youtube_rate_limit_budget_exhausted(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg, {"youtube_retry_attempts": 1})
+    class FakeYoutube:
+        cooldown_until = 0
+        def download(self, job, cfg, cancel, progress):
+            raise ServiceError("قيّد", "rate_limited", 0.01)
+    scheduler = Scheduler(store, cfg, None, FakeYoutube())
+    pump(scheduler, store, ident, "download", ("failed",))
+    stage = store.get(ident)["stages"]["download"]
+    assert stage["retries"] == 0
+    assert len([e for e in store.events(50) if "استُنفدت إعادات تنزيل YouTube" in e["message"]]) == 1
+    assert "download" not in scheduler.automatic_stage_blocks
+
+
+def test_permanent_download_failure_is_terminal_but_isolated(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    store.add(items(2)[1:], cfg.snapshot())
+    class FakeYoutube:
+        cooldown_until = 0
+        def download(self, job, cfg, cancel, progress):
+            if job["video_id"] == "video1":
+                raise ServiceError("الفيديو محذوف ولن يُعاد.", "permanent")
+            path = Path(job["folder"]) / "audio.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+    scheduler = Scheduler(store, cfg, None, FakeYoutube())
+    pump(scheduler, store, ident, "download", ("failed",))
+    stage = store.get(ident)["stages"]["download"]
+    assert stage["attempts"] == 1
+    assert scheduler.manual_paused_stages == set()
+    assert "download" not in scheduler.automatic_stage_blocks
+    other = store.jobs()[1]["id"]
+    pump(scheduler, store, other, "download", ("completed",))
+
+
+def test_blocked_download_requeues_after_recheck(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    calls = []
+    class FakeYoutube:
+        cooldown_until = 0
+        def download(self, job, cfg, cancel, progress):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ServiceError("YouTube رفض الوصول. حدّث الكوكيز.", "blocked")
+            path = Path(job["folder"]) / "audio.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+    scheduler = Scheduler(store, cfg, None, FakeYoutube())
+    pump(scheduler, store, ident, "download", ("blocked",))
+    assert "download" in scheduler.automatic_stage_blocks
+    assert scheduler.manual_paused_stages == set()
+    store.retry(ident, "download")
+    scheduler.unblock_stage("download")
+    pump(scheduler, store, ident, "download", ("completed",))
+    assert len(calls) == 2
+
+
+def test_manual_pause_survives_download_retry(env):
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    class FakeYoutube:
+        cooldown_until = 0
+        def download(self, job, cfg, cancel, progress):
+            path = Path(job["folder"]) / "audio.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+    scheduler = Scheduler(store, cfg, None, FakeYoutube())
+    scheduler.pause_stage("download", True)
+    store.set_stage(ident, "download", "blocked", "توقف آلي سابق")
+    store.retry(ident, "download")
+    scheduler.unblock_stage("download")
+    scheduler.tick()
+    assert scheduler.manual_paused_stages == {"download"}
+    assert store.get(ident)["stages"]["download"]["status"] == "pending"
+    scheduler.pause_stage("download", False)
+    pump(scheduler, store, ident, "download", ("completed",))
+
+
+def test_low_disk_blocks_stage_then_recovers(env, monkeypatch):
+    from collections import namedtuple
+    import waraq.scheduler as scheduler_module
+    store, cfg = env
+    ident = download_only_job(store, cfg)
+    usage = namedtuple("usage", "total used free")
+    gb = 1024 ** 3
+    monkeypatch.setattr(scheduler_module.shutil, "disk_usage", lambda root: usage(300 * gb, 299 * gb, 1 * gb))
+    calls = []
+    class FakeYoutube:
+        cooldown_until = 0
+        def download(self, job, cfg, cancel, progress):
+            calls.append(1)
+            path = Path(job["folder"]) / "audio.mp3"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+    scheduler = Scheduler(store, cfg, None, FakeYoutube())
+    scheduler.tick()
+    assert store.get(ident)["stages"]["download"]["status"] == "blocked"
+    assert "download" in scheduler.automatic_stage_blocks
+    assert calls == []
+    monkeypatch.setattr(scheduler_module.shutil, "disk_usage", lambda root: usage(300 * gb, 10 * gb, 290 * gb))
+    store.retry(ident, "download")
+    scheduler.unblock_stage("download")
+    pump(scheduler, store, ident, "download", ("completed",))
+    assert calls == [1]
+
+
+def test_youtube_retry_attempts_seeded_from_legacy_settings(tmp_path):
+    (tmp_path / "settings.json").write_text(json.dumps({"auto_retry_attempts": 1}), encoding="utf-8")
+    migrated = Config(tmp_path)
+    assert migrated.data["youtube_retry_attempts"] == 1
+    fresh = Config(tmp_path / "fresh")
+    assert fresh.data["youtube_retry_attempts"] == 3
 

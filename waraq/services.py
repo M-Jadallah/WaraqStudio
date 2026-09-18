@@ -167,8 +167,58 @@ class Youtube:
     def __init__(self, store):
         self.store = store
         self.gate = threading.Lock()
-        self.cooldown_until = 0
+        # YouTube throttles per network/IP, so the cooldown must outlive a restart.
+        self.cooldown_until = float((store.state_get("youtube_cooldown_until") if store else None) or 0)
         self.last_request = 0
+
+    def remember_cooldown(self, until):
+        self.cooldown_until = max(self.cooldown_until, until)
+        if self.store:
+            self.store.state_put("youtube_cooldown_until", self.cooldown_until)
+
+    def expire_cooldown(self):
+        if self.cooldown_until and time.time() >= self.cooldown_until:
+            self.cooldown_until = 0
+            if self.store:
+                self.store.state_clear("youtube_cooldown_until")
+
+    @staticmethod
+    def _retry_after(exc):
+        for name in ("retry_after", "retryAfter"):
+            value = getattr(exc, name, None)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                return int(value)
+        headers = getattr(exc, "headers", None) or getattr(getattr(exc, "resp", None), "headers", None)
+        try:
+            return max(0, int(float(headers.get("Retry-After"))))
+        except Exception:
+            return 0
+
+    def classify(self, exc, cfg):
+        """Map a yt-dlp/network failure onto the retry policy: rate_limited waits
+        out a persisted cooldown, failed retries a limited number of times, blocked
+        needs the user to fix cookies/access, permanent never retries."""
+        text = str(exc)
+        low = text.lower()
+        if "429" in text or "too many requests" in low:
+            wait = max(int(cfg.get("youtube_cooldown", 900)), self._retry_after(exc))
+            self.remember_cooldown(time.time() + wait)
+            return ServiceError("YouTube قيّد الطلبات (429). تُهدأ الطلبات تلقائيًا ثم يُستأنف التنزيل دون تدخل.", "rate_limited", wait)
+        if any(s in low for s in ("video unavailable", "removed by the uploader", "private video", "terminated",
+                                  "copyright", "available in your country", "geo-restrict", "geo restrict",
+                                  "unsupported url", "404", "does not exist")):
+            return ServiceError("فشل دائم خاص بهذا الفيديو (محذوف أو خاص أو مقيّد) ولن يُعاد تلقائيًا: " + text[-300:], "permanent")
+        if any(s in low for s in ("sign in", "not a bot", "login required", "confirm your age", "age-restrict", "cookies", "403")):
+            return ServiceError("YouTube رفض الوصول. حدّث ملف الكوكيز وتوافق أدوات التنزيل ثم أعد المحاولة يدويًا.", "blocked")
+        return ServiceError("تعذر التنزيل: " + text[-300:], "failed")
+
+    def pace(self, cfg, cancel):
+        self.expire_cooldown()
+        if time.time() < self.cooldown_until:
+            raise ServiceError("طلبات YouTube معلقة مؤقتًا بسبب التقييد حتى انتهاء التهدئة.",
+                               "rate_limited", int(self.cooldown_until - time.time()))
+        wait_cancel(cancel, max(0, self.last_request + cfg["youtube_request_delay"] - time.time()))
+        self.last_request = time.time()
 
     def check_url(self, url):
         p = urlparse(url.strip())
@@ -219,21 +269,6 @@ class Youtube:
         copy = Path(tempdir) / "cookies.txt"
         shutil.copyfile(source, copy)
         return copy
-
-    def classify(self, exc, cfg):
-        text = str(exc)
-        if "429" in text or "too many requests" in text.lower():
-            self.cooldown_until = time.time() + cfg["youtube_cooldown"]
-            return ServiceError("YouTube قيّد الطلبات. عُلّق الاتصال حتى انتهاء فترة التهدئة.", "blocked")
-        if any(s in text.lower() for s in ("sign in", "not a bot", "login required", "confirm your age", "403")):
-            return ServiceError("YouTube رفض الوصول. راجع الكوكيز وتوافق أدوات التنزيل قبل إعادة المحاولة.", "blocked")
-        return ServiceError(text[-1500:])
-
-    def pace(self, cfg, cancel):
-        if time.time() < self.cooldown_until:
-            raise ServiceError("طلبات YouTube معلقة مؤقتًا بسبب التقييد.", "blocked")
-        wait_cancel(cancel, max(0, self.last_request + cfg["youtube_request_delay"] - time.time()))
-        self.last_request = time.time()
 
     def discover(self, url, cfg, cancel, refresh=False):
         import tempfile

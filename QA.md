@@ -1,8 +1,8 @@
-# Verification — 2026-09-17 · تحديث المزودين والمكتبة
+# Verification — 2026-09-19 · منطق إعادة تنزيل YouTube
 
 ## Local automated tests
 
-51 engine/service tests passed, covering:
+72 engine/service tests passed (run three times to rule out timing flakes), covering:
 
 - Atomic task claims under competing workers.
 - Crash recovery and uncertain paid requests.
@@ -37,7 +37,20 @@
 - Completed stages mirror into the library; `library_auto` off leaves the mirror untouched.
 - Library publish is idempotent, collision-safe for equal titles, refreshes a regenerated artifact, copies audio only when enabled, and deletion refuses paths outside the library folders.
 
-Native UI interaction checks passed for all six screens, range selection, custom ordering, queue insertion, template publication/save/enqueue snapshotting, the auto-stop toggle wiring, direct worker enable toggles, provider management (adding one, rejecting a bad id and a reserved id, refusing to delete one in use), the pre-start override question starting the queue on both answers, library organise/list/delete, service pause/resume, theme persistence and a 1060 × 720 window. No QML errors were reported. Screenshots were inspected at 1380 × 900 and 1060 × 720 for Arabic shaping, reading order, contrast, spacing, modal readability and overflow. The interface is a native Qt application, so verification used Qt Test and QQuickWindow screenshots rather than a web browser.
+YouTube retry rework (this round):
+
+- A parametrised classification matrix maps yt-dlp/network failures to the policy kinds: 429 → `rate_limited`, network timeouts/DNS/resets and HTTP 5xx → `failed`, sign-in/cookies/403 → `blocked`, and deleted/private/geo/copyright/404/unsupported URLs → `permanent` (never retried).
+- A 429 sets a persisted cooldown (honouring `Retry-After` when present), the cooldown survives constructing a fresh `Youtube` on the same store, and expiry is cleared lazily.
+- A rate-limited download is deferred past the shared cooldown without any service pause or automatic block, then completes on the scheduled retry; other downloads stay gated until the cooldown expires and resume automatically afterwards.
+- Exhausting `youtube_retry_attempts` ends in a named terminal failure without stopping the service; a permanent video failure fails once, leaves the stage guards untouched, and the next download in the queue runs normally.
+- A cookies/403 block sets an automatic download-stage block (manual pause set stays empty); manual retry plus `unblock_stage()` requeues the job and it completes.
+- The user's manual service pause survives a download retry and keeps the job parked until resumed.
+- Low free disk space blocks the stage automatically with a visible reason; after space is freed the retry/re-check path requeues the job and the download proceeds.
+- `youtube_retry_attempts` is seeded once from `auto_retry_attempts` for existing settings files and defaults to 3 for fresh installs; validation bounds (0–6) apply.
+
+Upgrade rehearsal on copies of the real settings and task database: the `runtime_state` table is created non-destructively, all 22 jobs and 66 stages are preserved, the five OpenCode workers and seven Deepgram workers stay as saved, and the smoke run exits 0.
+
+Native UI interaction checks passed for all six screens, range selection, custom ordering, queue insertion, template publication/save/enqueue snapshotting, the auto-stop toggle wiring, direct worker enable toggles, provider management (adding one, rejecting a bad id and a reserved id, refusing to delete one in use), the pre-start override question starting the queue on both answers, library organise/list/delete, service pause/resume, the new automatic-download-block flow (block reason visible on the YouTube worker row, re-check lifts it and requeues the parked job), theme persistence and a 1060 × 720 window. No QML errors were reported. Screenshots were inspected at 1060 × 720 for Arabic shaping, reading order, contrast, spacing, modal readability and overflow. The interface is a native Qt application, so verification used Qt Test and QQuickWindow screenshots rather than a web browser.
 
 The source environment resolves FFmpeg, yt-dlp, EJS, Requests, OpenPyXL, Windows Credential Manager, Node.js and the installed OpenCode executable.
 
