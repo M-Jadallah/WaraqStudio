@@ -29,8 +29,6 @@ ApplicationWindow {
     property string filter: "all"
     property string search: ""
     property string sourceSearch: ""
-    property string librarySearch: ""
-    property string fileSearch: ""
     property string fileKind: "all"
     property var pendingFile: ({})
     property var pendingProvider: ({})
@@ -39,8 +37,12 @@ ApplicationWindow {
     property var pageNames: ["مركز العمليات", "إضافة مصدر", "العمال والخدمات", "مكتبة النتائج", "الملفات", "الإعدادات"]
     property var pageIcons: ["🏠", "➕", "🖥", "📚", "🗂", "⚙"]
     readonly property real uiScale: backend.uiScale
+    // List density: rows, paddings and gaps shrink together; fonts stay on fs().
+    readonly property real density: settings.ui_compact === true ? 0.72 : 1.0
     property bool railOpen: settings.ui_rail_collapsed !== true
     function fs(n) { return Math.max(9, Math.round(n * uiScale)) }
+    function rh(n) { return Math.max(20, Math.round(n * uiScale * density)) }
+    function rs(n) { return Math.max(2, Math.round(n * density)) }
     color: bg
     palette.window: panel
     palette.windowText: ink
@@ -134,7 +136,28 @@ ApplicationWindow {
         editingWorker = JSON.parse(JSON.stringify(arr[workerIndex]))
         workerDialog.open()
     }
-    function openJob(job) { selectedJob = job; jobDialog.open() }
+    function openJob(jobId) {
+        selectedJob = backend.jobById(String(jobId))
+        jobDialog.open()
+        Qt.callLater(win.updateJobLog)
+    }
+    // Set imperatively instead of a binding: backend ticks append at the end,
+    // and rewriting the bound text used to reset the log view to the top.
+    function updateJobLog() {
+        if (!jobDialog.opened)
+            return
+        var text = backend.logs.filter(function(e){return e.job_id === selectedJob.id})
+            .map(function(e){return e.time + "  " + e.message}).join("\n\n")
+        if (text === jobLog.text)
+            return
+        var bar = logScroll.ScrollBar.vertical
+        var atEnd = !bar || bar.position >= bar.positionMaximum - bar.size - 0.01
+        var pos = bar ? bar.position : 0
+        jobLog.text = text
+        if (bar)
+            bar.position = atEnd ? Math.max(0, bar.positionMaximum - bar.size)
+                                 : Math.min(pos, Math.max(0, bar.positionMaximum - bar.size))
+    }
     function openTemplates() { templatesDialog.open() }
     property var templ: []
     function loadTemplateFields() {
@@ -169,8 +192,9 @@ ApplicationWindow {
         }
         function onChanged() {
             if (jobDialog.opened && selectedJob.id) {
-                var currentJob = backend.jobs.find(function(j){return j.id === selectedJob.id})
-                if(currentJob) selectedJob = currentJob
+                var currentJob = backend.jobById(String(selectedJob.id))
+                if (currentJob.id) selectedJob = currentJob
+                win.updateJobLog()
             }
         }
     }
@@ -324,30 +348,29 @@ ApplicationWindow {
                                 objectName: "jobsList"
                                 Layout.fillWidth: true; Layout.fillHeight: true
                                 clip: true
-                                model: backend.jobs
+                                model: backend.jobsModel
                                 ScrollBar.vertical: ScrollBar {}
                                 delegate: Rectangle {
-                                    required property var modelData
                                     width: jobsList.width
-                                    height: win.matches(modelData) ? Math.round(70 * win.uiScale) : 0
+                                    height: win.matches(row) ? win.rh(70) : 0
                                     visible: height > 0
                                     color: rowMouse.containsMouse ? (win.dark ? "#1a293d" : "#f3f7fb") : "transparent"
-                                    MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.openJob(modelData); cursorShape: Qt.PointingHandCursor }
+                                    MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.openJob(row.id); cursorShape: Qt.PointingHandCursor }
                                     RowLayout {
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                        AppButton { text: "عرض"; implicitWidth: 64; implicitHeight: 28; onClicked: win.openJob(modelData) }
+                                        anchors.fill: parent; anchors.leftMargin: win.rs(12); anchors.rightMargin: win.rs(12); spacing: win.rs(10)
+                                        AppButton { text: "عرض"; implicitWidth: 64; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: win.openJob(row.id) }
                                         ColumnLayout {
                                             Layout.preferredWidth: 140
-                                            LabelText { text: modelData.statusLabel; color: win.stateColor(modelData.status); Layout.alignment: Qt.AlignRight }
-                                            SubText { text: modelData.retryAt ? "محاولة قادمة " + modelData.retryAt : (modelData.worker || modelData.stageLabel); Layout.alignment: Qt.AlignRight }
+                                            LabelText { text: row.statusLabel; color: win.stateColor(row.status); Layout.alignment: Qt.AlignRight }
+                                            SubText { text: row.retryAt ? "محاولة قادمة " + row.retryAt : (row.worker || row.stageLabel); Layout.alignment: Qt.AlignRight }
                                         }
                                         RowLayout {
                                             Layout.preferredWidth: 220; spacing: 6
                                             Repeater {
-                                                model: modelData.steps.slice().reverse()
+                                                model: row.steps.slice().reverse()
                                                 delegate: Rectangle {
                                                     required property var modelData
-                                                    Layout.fillWidth: true; height: Math.round(26 * win.uiScale); radius: 5
+                                                    Layout.fillWidth: true; height: Math.max(18, win.rh(26)); radius: 5
                                                     color: modelData.status === "completed" ? (win.dark ? "#163b35" : "#e0f5ed") : (win.dark ? "#202d42" : "#eaf0f6")
                                                     border.color: modelData.status === "running" ? "#639ff2" : "transparent"
                                                     LabelText { anchors.centerIn: parent; text: modelData.label; font.pixelSize: win.fs(11); color: win.stateColor(modelData.status) }
@@ -356,14 +379,14 @@ ApplicationWindow {
                                         }
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            LabelText { text: modelData.title; Layout.fillWidth: true; font.weight: Font.DemiBold }
-                                            SubText { text: "#" + String(modelData.position).padStart(3,"0") + "   ·   " + modelData.video_id; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
+                                            LabelText { text: row.title; Layout.fillWidth: true; font.weight: Font.DemiBold }
+                                            SubText { text: "#" + String(row.position).padStart(3,"0") + "   ·   " + row.video_id; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
                                         }
                                     }
                                     Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
                                 }
                                 ColumnLayout {
-                                    anchors.centerIn: parent; spacing: 14; visible: backend.jobs.length === 0
+                                    anchors.centerIn: parent; spacing: 14; visible: jobsList.count === 0
                                     Rectangle {
                                         Layout.alignment: Qt.AlignHCenter; width: 66; height: 76; radius: 12; color: win.dark ? "#1d3c3d" : "#dcf4ed"
                                         Column { anchors.centerIn: parent; spacing: 7; Repeater { model: 3; Rectangle { width: 30; height: 3; radius: 2; color: "#42b99f" } } }
@@ -419,31 +442,29 @@ ApplicationWindow {
                         Layout.fillWidth: true; Layout.fillHeight: true
                         PinList {
                             id: sourceList
-                            anchors.fill: parent; anchors.margins: 8; clip: true
-                            model: backend.source
+                            anchors.fill: parent; anchors.margins: win.rs(8); clip: true
+                            model: backend.sourceModel
                             ScrollBar.vertical: ScrollBar {}
                             delegate: Item {
-                                required property var modelData
-                                required property int index
-                                width: sourceList.width; height: win.sourceSearch === "" || modelData.title.indexOf(win.sourceSearch) >= 0 ? Math.round(54 * win.uiScale) : 0
+                                width: sourceList.width; height: win.sourceSearch === "" || row.title.indexOf(win.sourceSearch) >= 0 ? win.rh(54) : 0
                                 visible: height > 0
                                 RowLayout {
-                                    anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
-                                    AppButton { text: "للأسفل"; implicitWidth: 60; implicitHeight: 28; enabled: index < backend.source.length - 1; onClicked: backend.moveSource(index, 1) }
-                                    AppButton { text: "للأعلى"; implicitWidth: 60; implicitHeight: 28; enabled: index > 0; onClicked: backend.moveSource(index, -1) }
-                                    SubText { text: modelData.available ? (modelData.duration ? Math.round(modelData.duration / 60) + " دقيقة" : "") : "غير متاح"; Layout.preferredWidth: 85 }
-                                    LabelText { text: modelData.title; Layout.fillWidth: true }
-                                    SubText { text: "#" + modelData.position }
-                                    CheckBox { checked: modelData.selected; enabled: modelData.available; onClicked: backend.selectSource(index, checked); Accessible.name: "تحديد " + modelData.title }
+                                    anchors.fill: parent; anchors.leftMargin: win.rs(8); anchors.rightMargin: win.rs(8); spacing: win.rs(8)
+                                    AppButton { text: "للأسفل"; implicitWidth: 60; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: index < sourceList.count - 1; onClicked: backend.moveSource(index, 1) }
+                                    AppButton { text: "للأعلى"; implicitWidth: 60; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: index > 0; onClicked: backend.moveSource(index, -1) }
+                                    SubText { text: row.available ? (row.duration ? Math.round(row.duration / 60) + " دقيقة" : "") : "غير متاح"; Layout.preferredWidth: 85 }
+                                    LabelText { text: row.title; Layout.fillWidth: true }
+                                    SubText { text: "#" + row.position }
+                                    CheckBox { checked: row.selected; enabled: row.available; onClicked: backend.selectSource(index, checked); Accessible.name: "تحديد " + row.title }
                                 }
                                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
                             }
-                            SubText { anchors.centerIn: parent; text: backend.busy ? "تُقرأ المعلومات مع مراعاة فواصل طلبات YouTube…" : "ستظهر قائمة الفيديوهات هنا"; visible: backend.source.length === 0 }
+                            SubText { anchors.centerIn: parent; text: backend.busy ? "تُقرأ المعلومات مع مراعاة فواصل طلبات YouTube…" : "ستظهر قائمة الفيديوهات هنا"; visible: sourceList.count === 0 }
                         }
                     }
                     RowLayout {
                         Layout.fillWidth: true
-                        AppButton { text: "إضافة إلى الطابور"; primary: true; enabled: backend.source.some(function(x){return x.selected}); onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex], backend.templates.length > 0 ? templateBox.currentValue : ""); win.page = 0 } }
+                        AppButton { text: "إضافة إلى الطابور"; primary: true; enabled: backend.hasSourceSelection; onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex], backend.templates.length > 0 ? templateBox.currentValue : ""); win.page = 0 } }
                         Item { Layout.fillWidth: true }
                         ComboBox { id: templateBox; objectName: "templateBox"; visible: backend.templates.length > 0; model: backend.templates; textRole: "name"; valueRole: "id"; Layout.preferredWidth: 200; Accessible.name: "قالب البرومبت" }
                         LabelText { text: "قالب البرومبت"; visible: templateBox.visible }
@@ -466,45 +487,44 @@ ApplicationWindow {
                     }
                     PinList {
                         id: workerList
-                        Layout.fillWidth: true; Layout.fillHeight: true; spacing: 8; clip: true
-                        model: backend.workers
+                        Layout.fillWidth: true; Layout.fillHeight: true; spacing: win.rs(8); clip: true
+                        model: backend.workersModel
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
-                            required property var modelData
-                            width: workerList.width; height: modelData.error ? Math.round(120 * win.uiScale) : Math.round(96 * win.uiScale)
+                            width: workerList.width; height: row.error ? win.rh(120) : win.rh(96)
                             ColumnLayout {
-                                anchors.fill: parent; anchors.margins: 12; spacing: 5
+                                anchors.fill: parent; anchors.margins: win.rs(12); spacing: win.rs(5)
                                 RowLayout {
-                                    Layout.fillWidth: true; spacing: 12
-                                    AppButton { text: "إعدادات"; visible: modelData.stage !== "download"; onClicked: win.editWorker(modelData, modelData.stage) }
-                                    AppButton { text: modelData.paused ? "استئناف الخدمة" : "إيقاف الخدمة"; onClicked: backend.pauseStage(modelData.stage, !modelData.paused) }
-                                    AppButton { text: "إعادة فحص العامل"; visible: !!modelData.error; onClicked: modelData.stage === "download" ? backend.recheckStage(modelData.stage) : backend.resetWorker(modelData.id) }
+                                    Layout.fillWidth: true; spacing: win.rs(12)
+                                    AppButton { text: "إعدادات"; implicitHeight: Math.max(22, Math.round(28 * win.density)); visible: row.stage !== "download"; onClicked: win.editWorker({id: row.id}, row.stage) }
+                                    AppButton { text: row.paused ? "استئناف الخدمة" : "إيقاف الخدمة"; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: backend.pauseStage(row.stage, !row.paused) }
+                                    AppButton { text: "إعادة فحص العامل"; implicitHeight: Math.max(22, Math.round(28 * win.density)); visible: !!row.error; onClicked: row.stage === "download" ? backend.recheckStage(row.stage) : backend.resetWorker(row.id) }
                                     CheckBox {
                                         objectName: "workerEnableBox"
                                         text: "يستقبل مهامًا"
-                                        visible: modelData.stage !== "download"
-                                        checked: !!modelData.enabled
+                                        visible: row.stage !== "download"
+                                        checked: !!row.enabled
                                         palette.windowText: win.muted
-                                        onClicked: backend.setWorkerEnabled(modelData.id, checked)
-                                        Accessible.name: "تفعيل العامل " + modelData.name
+                                        onClicked: backend.setWorkerEnabled(row.id, checked)
+                                        Accessible.name: "تفعيل العامل " + row.name
                                     }
                                     Item { Layout.fillWidth: true }
                                     ColumnLayout {
                                         Layout.alignment: Qt.AlignRight
-                                        LabelText { text: modelData.name; font.pixelSize: win.fs(17); font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
+                                        LabelText { text: row.name; font.pixelSize: win.fs(17); font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
                                         SubText {
                                             Layout.alignment: Qt.AlignRight
-                                            text: modelData.job_id ? "يعالج " + modelData.job_id + "  ·  " + modelData.elapsed + " ثانية"
-                                                : (!modelData.enabled ? "معطل"
-                                                : modelData.paused ? "الاستقبال متوقف"
-                                                : modelData.cooldownSeconds > 0 ? "تهدئة تقييد YouTube — يستأنف التنزيل تلقائيًا بعد " + Math.ceil(modelData.cooldownSeconds / 60) + " دقيقة"
-                                                : modelData.stageLabel + "  ·  جاهز لاستقبال مهمة")
+                                            text: row.job_id ? "يعالج " + row.job_id + "  ·  " + row.elapsed + " ثانية"
+                                                : (!row.enabled ? "معطل"
+                                                : row.paused ? "الاستقبال متوقف"
+                                                : row.cooldownSeconds > 0 ? "تهدئة تقييد YouTube — يستأنف التنزيل تلقائيًا بعد " + Math.ceil(row.cooldownSeconds / 60) + " دقيقة"
+                                                : row.stageLabel + "  ·  جاهز لاستقبال مهمة")
                                         }
-                                        SubText { text: win.workerLine(modelData); visible: text.length > 0; Layout.alignment: Qt.AlignRight }
+                                        SubText { text: win.workerLine(row); visible: text.length > 0; Layout.alignment: Qt.AlignRight }
                                     }
-                                    Rectangle { width: 10; height: 10; radius: 5; color: modelData.error ? "#f4b880" : modelData.job_id ? win.accent : win.muted }
+                                    Rectangle { width: 10; height: 10; radius: 5; color: row.error ? "#f4b880" : row.job_id ? win.accent : win.muted }
                                 }
-                                SubText { text: modelData.error || ""; color: win.dark ? "#f4b880" : "#9a4409"; visible: !!modelData.error; Layout.fillWidth: true }
+                                SubText { text: row.error || ""; color: win.dark ? "#f4b880" : "#9a4409"; visible: !!row.error; Layout.fillWidth: true }
                             }
                         }
                     }
@@ -523,25 +543,24 @@ ApplicationWindow {
                         Item { Layout.fillWidth: true }
                         LabelText { text: backend.stats.documents + " مستند Word"; font.pixelSize: win.fs(20) }
                     }
-                    AppField { Layout.fillWidth: true; placeholderText: "بحث في عناوين النتائج"; horizontalAlignment: Text.AlignRight; onTextChanged: win.librarySearch = text; Accessible.name: "بحث في النتائج" }
+                    AppField { Layout.fillWidth: true; placeholderText: "بحث في عناوين النتائج"; horizontalAlignment: Text.AlignRight; onTextChanged: backend.setResultsQuery(text); Accessible.name: "بحث في النتائج" }
                     PinList {
                         id: libraryList
-                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
-                        model: backend.jobs.filter(function(j){return (j.document || j.transcript || j.audio) && (win.librarySearch === "" || j.title.indexOf(win.librarySearch) >= 0)})
+                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: win.rs(8)
+                        model: backend.resultsModel
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
-                            required property var modelData
-                            width: libraryList.width; height: Math.round(72 * win.uiScale)
+                            width: libraryList.width; height: win.rh(72)
                             RowLayout {
-                                anchors.fill: parent; anchors.margins: 10; spacing: 8
-                                AppButton { text: "فتح Word"; primary: true; enabled: !!modelData.document; onClicked: backend.openPath(modelData.document) }
-                                AppButton { text: "التفريغ"; enabled: !!modelData.transcript; onClicked: backend.openPath(modelData.transcript) }
-                                AppButton { text: "الصوت"; enabled: !!modelData.audio; onClicked: backend.openPath(modelData.audio) }
-                                AppButton { text: "التفاصيل"; onClicked: win.openJob(modelData) }
+                                anchors.fill: parent; anchors.margins: win.rs(10); spacing: win.rs(8)
+                                AppButton { text: "فتح Word"; primary: true; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: !!row.document; onClicked: backend.openPath(row.document) }
+                                AppButton { text: "التفريغ"; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: !!row.transcript; onClicked: backend.openPath(row.transcript) }
+                                AppButton { text: "الصوت"; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: !!row.audio; onClicked: backend.openPath(row.audio) }
+                                AppButton { text: "التفاصيل"; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: win.openJob(row.id) }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    LabelText { text: modelData.title; font.pixelSize: win.fs(15); Layout.fillWidth: true }
-                                    SubText { text: modelData.document ? "DOCX · تم التحقق من بنية المستند والنص" : "نتائج وسيطة محفوظة"; Layout.fillWidth: true }
+                                    LabelText { text: row.title; font.pixelSize: win.fs(14); Layout.fillWidth: true }
+                                    SubText { text: row.document ? "DOCX · تم التحقق من بنية المستند والنص" : "نتائج وسيطة محفوظة"; Layout.fillWidth: true }
                                 }
                             }
                         }
@@ -559,11 +578,11 @@ ApplicationWindow {
                         AppButton { text: "فتح مجلد المكتبة"; onClicked: backend.openPath(settings.library_root) }
                         AppButton { text: "فتح ملف من الجهاز"; onClicked: { var path = backend.choosePath("file"); if (path) backend.openPath(path) } }
                         Item { Layout.fillWidth: true }
-                        LabelText { text: backend.library.length + " ملف في المكتبة"; font.pixelSize: win.fs(20) }
+                        LabelText { text: backend.libraryCount + " ملف في المكتبة"; font.pixelSize: win.fs(20) }
                     }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 14
-                        AppField { Layout.fillWidth: true; placeholderText: "بحث في أسماء الملفات"; horizontalAlignment: Text.AlignRight; onTextChanged: win.fileSearch = text; Accessible.name: "بحث في الملفات" }
+                        AppField { Layout.fillWidth: true; placeholderText: "بحث في أسماء الملفات"; horizontalAlignment: Text.AlignRight; onTextChanged: backend.setFilesQuery(text); Accessible.name: "بحث في الملفات" }
                         Repeater {
                             model: [{id: "all", label: "الكل"}, {id: "document", label: "Word"}, {id: "transcript", label: "التفريغات"}, {id: "audio", label: "الصوت"}]
                             delegate: CheckBox {
@@ -572,29 +591,28 @@ ApplicationWindow {
                                 text: modelData.label
                                 checked: win.fileKind === modelData.id
                                 palette.windowText: win.ink
-                                onClicked: win.fileKind = modelData.id
+                                onClicked: { win.fileKind = modelData.id; backend.setFilesKind(modelData.id) }
                             }
                         }
                     }
                     PinList {
                         id: fileList
                         objectName: "fileList"
-                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6
-                        model: backend.library.filter(function(f){ return (win.fileKind === "all" || f.kind === win.fileKind) && (win.fileSearch === "" || f.name.toLowerCase().indexOf(win.fileSearch.toLowerCase()) >= 0) })
+                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: win.rs(6)
+                        model: backend.filesModel
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
-                            required property var modelData
-                            width: fileList.width; height: Math.round(62 * win.uiScale)
+                            width: fileList.width; height: win.rh(62)
                             RowLayout {
-                                anchors.fill: parent; anchors.margins: 10; spacing: 8
-                                AppButton { text: "فتح"; primary: true; onClicked: backend.openPath(modelData.path) }
-                                AppButton { text: "فتح المجلد"; onClicked: backend.openPath(modelData.folder) }
-                                AppButton { text: "نسخ المسار"; onClicked: backend.copyText(modelData.path) }
-                                AppButton { text: "حذف"; danger: true; onClicked: { win.pendingFile = modelData; deleteFileDialog.open() } }
+                                anchors.fill: parent; anchors.margins: win.rs(10); spacing: win.rs(8)
+                                AppButton { text: "فتح"; primary: true; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: backend.openPath(row.path) }
+                                AppButton { text: "فتح المجلد"; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: backend.openPath(row.folder) }
+                                AppButton { text: "نسخ المسار"; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: backend.copyText(row.path) }
+                                AppButton { text: "حذف"; danger: true; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: { win.pendingFile = {path: row.path, name: row.name}; deleteFileDialog.open() } }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    LabelText { text: modelData.name; font.pixelSize: win.fs(14); Layout.fillWidth: true }
-                                    SubText { text: win.kindLabel(modelData.kind) + "  ·  " + win.fileSize(modelData.size) + "  ·  " + Qt.formatDateTime(new Date(modelData.modified * 1000), "yyyy-MM-dd HH:mm") }
+                                    LabelText { text: row.name; font.pixelSize: win.fs(14); Layout.fillWidth: true }
+                                    SubText { text: win.kindLabel(row.kind) + "  ·  " + win.fileSize(row.size) + "  ·  " + Qt.formatDateTime(new Date(row.modified * 1000), "yyyy-MM-dd HH:mm") }
                                 }
                             }
                         }
@@ -636,6 +654,13 @@ ApplicationWindow {
                                     onMoved: { settings.ui_scale = Math.round(value) / 100; save() }
                                     Accessible.name: "حجم خطوط وعناصر الواجهة"
                                 }
+                            }
+                            CheckBox {
+                                text: "قوائم مضغوطة — صفوف أكثر وأقل فراغًا في كل القوائم"
+                                checked: settings.ui_compact === true
+                                palette.windowText: win.ink
+                                onClicked: { settings.ui_compact = checked; save() }
+                                Accessible.name: "تفعيل العرض المضغوط للقوائم"
                             }
                             SubText { text: "يُطبَّق فورًا على الخطوط والأزرار والصفوف في كل الصفحات، ويُحفظ مع بقية الإعدادات."; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                         }
@@ -760,7 +785,7 @@ ApplicationWindow {
                         required property string modelData
                         required property int index
                         objectName: "nav" + index
-                        Layout.fillWidth: true; implicitHeight: Math.round(42 * win.uiScale)
+                        Layout.fillWidth: true; implicitHeight: win.rh(42)
                         onClicked: win.page = index
                         Accessible.name: modelData
                         ToolTip.visible: !railOpen && hovered
@@ -825,9 +850,10 @@ ApplicationWindow {
             }
             LabelText { text: "سجل التنفيذ"; Layout.alignment: Qt.AlignRight }
             ScrollView {
+                id: logScroll
                 Layout.fillWidth: true; Layout.fillHeight: true
                 TextArea {
-                    text: backend.logs.filter(function(e){return e.job_id === selectedJob.id}).map(function(e){return e.time + "  " + e.message}).join("\n\n")
+                    id: jobLog
                     readOnly: true; selectByMouse: true; color: win.muted; wrapMode: TextEdit.Wrap; font.pixelSize: win.fs(12)
                     background: Rectangle { color: win.bg; radius: 8 }
                 }
@@ -980,24 +1006,23 @@ ApplicationWindow {
             PinList {
                 id: providerList
                 objectName: "providerList"
-                Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
-                model: backend.providers
+                Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: win.rs(8)
+                model: backend.providersModel
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Box {
-                    required property var modelData
-                    width: providerList.width; height: Math.round(56 * win.uiScale)
+                    width: providerList.width; height: win.rh(56)
                     RowLayout {
-                        anchors.fill: parent; anchors.margins: 10; spacing: 8
-                        AppButton { text: "حذف"; danger: true; visible: !modelData.builtin; onClicked: { win.pendingProvider = modelData; deleteProviderDialog.open() } }
+                        anchors.fill: parent; anchors.margins: win.rs(10); spacing: win.rs(8)
+                        AppButton { text: "حذف"; danger: true; implicitHeight: Math.max(22, Math.round(28 * win.density)); visible: !row.builtin; onClicked: { win.pendingProvider = {id: row.id, name: row.name}; deleteProviderDialog.open() } }
                         AppButton {
-                            text: "تعديل"; visible: !modelData.builtin
-                            onClicked: { provId.text = modelData.id; provName.text = modelData.name; provEnv.text = modelData.keyEnv; provIsolated.checked = modelData.isolated }
+                            text: "تعديل"; implicitHeight: Math.max(22, Math.round(28 * win.density)); visible: !row.builtin
+                            onClicked: { provId.text = row.id; provName.text = row.name; provEnv.text = row.keyEnv; provIsolated.checked = row.isolated }
                         }
                         Item { Layout.fillWidth: true }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            LabelText { text: modelData.name; font.pixelSize: win.fs(16); Layout.fillWidth: true }
-                            SubText { text: modelData.id + (modelData.keyEnv ? "  ·  " + modelData.keyEnv : "  ·  بلا مفتاح (تسجيل دخول)") + (modelData.builtin ? "  ·  مدمج" : "  ·  مضاف يدويًا") }
+                            LabelText { text: row.name; font.pixelSize: win.fs(16); Layout.fillWidth: true }
+                            SubText { text: row.id + (row.keyEnv ? "  ·  " + row.keyEnv : "  ·  بلا مفتاح (تسجيل دخول)") + (row.builtin ? "  ·  مدمج" : "  ·  مضاف يدويًا") }
                         }
                     }
                 }

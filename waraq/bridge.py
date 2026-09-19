@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QFileDialog
 from . import __version__
 from .config import (BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
                      provider_info, provider_of)
+from .models import DictListModel
 from .services import resolve_opencode
 from .store import STAGES
 
@@ -42,6 +43,23 @@ class Bridge(QObject):
         self._auto_stop_fired = False
         self._library = []
         self._library_busy = False
+        # QML ListViews bind to these instead of the QVariantList properties:
+        # rows are updated in place (dataChanged) so scroll position survives
+        # every refresh tick, unlike a republished JS array which resets the view.
+        self._jobs_model = DictListModel(parent=self)
+        self._workers_model = DictListModel(parent=self)
+        self._source_model = DictListModel(parent=self)
+        self._results_model = DictListModel(parent=self)
+        self._files_model = DictListModel(parent=self)
+        self._providers_model = DictListModel(parent=self)
+        self._results_query = ""
+        self._files_query = ""
+        self._files_kind = "all"
+        # refreshLibrary() may run on a worker thread (after organizing); the
+        # queued connection applies the scan result to the model on the GUI thread.
+        self.libraryChanged.connect(self._publish_files)
+        self.settingsChanged.connect(self._publish_providers)
+        self._publish_providers()
         self.discovery_cancel = threading.Event()
         self.sourceReady.connect(self._accept_source)
         self.backgroundError.connect(self._error)
@@ -63,6 +81,30 @@ class Bridge(QObject):
 
     @Property("QVariantList", notify=changed)
     def logs(self): return self._logs
+
+    @Property(QObject, constant=True)
+    def jobsModel(self): return self._jobs_model
+
+    @Property(QObject, constant=True)
+    def workersModel(self): return self._workers_model
+
+    @Property(QObject, constant=True)
+    def sourceModel(self): return self._source_model
+
+    @Property(QObject, constant=True)
+    def resultsModel(self): return self._results_model
+
+    @Property(QObject, constant=True)
+    def filesModel(self): return self._files_model
+
+    @Property(QObject, constant=True)
+    def providersModel(self): return self._providers_model
+
+    @Property(bool, notify=sourceChanged)
+    def hasSourceSelection(self): return any(row.get("selected") for row in self._source)
+
+    @Property(int, notify=libraryChanged)
+    def libraryCount(self): return len(self._library)
 
     @Property("QVariantList", notify=sourceChanged)
     def source(self): return self._source
@@ -91,10 +133,8 @@ class Bridge(QObject):
 
     @Property("QVariantList", notify=settingsChanged)
     def providers(self):
-        """Built-in providers plus the ones the user added; only the added ones are editable."""
-        builtin = {item["id"] for item in BUILTIN_PROVIDERS}
-        return [{"id": p["id"], "name": p["name"], "keyEnv": p["key_env"], "isolated": p["isolated"],
-                 "builtin": p["id"] in builtin} for p in provider_catalog(self.config.snapshot())]
+        """Mirror of providersModel for ComboBoxes and Python-side checks."""
+        return self._provider_rows()
 
     @Property("QVariantList", notify=libraryChanged)
     def library(self): return self._library
@@ -147,6 +187,9 @@ class Bridge(QObject):
         if result == self._jobs and workers == self._workers and logs == self._logs and running == self._running:
             return
         self._jobs, self._workers, self._logs, self._running = result, workers, logs, running
+        self._jobs_model.update_items(result)
+        self._workers_model.update_items(workers)
+        self._publish_results()
         self.changed.emit()
 
     @staticmethod
@@ -154,12 +197,65 @@ class Bridge(QObject):
         fmt = "%H:%M" if time.localtime(timestamp)[:3] == time.localtime()[:3] else "%Y-%m-%d %H:%M"
         return time.strftime(fmt, time.localtime(timestamp))
 
+    @Slot(str, result="QVariantMap")
+    def jobById(self, ident):
+        return next((j for j in self._jobs if j["id"] == ident), {})
+
+    def _publish_results(self):
+        query = self._results_query.lower()
+        rows = [j for j in self._jobs
+                if (j["document"] or j["transcript"] or j["audio"])
+                and (not query or query in str(j["title"]).lower())]
+        self._results_model.update_items(rows)
+
+    @Slot(str)
+    def setResultsQuery(self, text):
+        text = str(text)
+        if text == self._results_query:
+            return
+        self._results_query = text
+        self._publish_results()
+
+    def _publish_files(self):
+        query = self._files_query.lower()
+        rows = [f for f in self._library
+                if (self._files_kind == "all" or f["kind"] == self._files_kind)
+                and (not query or query in str(f["name"]).lower())]
+        self._files_model.update_items(rows)
+
+    @Slot(str)
+    def setFilesQuery(self, text):
+        text = str(text)
+        if text == self._files_query:
+            return
+        self._files_query = text
+        self._publish_files()
+
+    @Slot(str)
+    def setFilesKind(self, kind):
+        kind = str(kind)
+        if kind == self._files_kind:
+            return
+        self._files_kind = kind
+        self._publish_files()
+
+    def _provider_rows(self):
+        """Built-in providers plus the ones the user added; only the added ones are editable."""
+        builtin = {item["id"] for item in BUILTIN_PROVIDERS}
+        return [{"id": p["id"], "name": p["name"], "keyEnv": p["key_env"], "isolated": p["isolated"],
+                 "builtin": p["id"] in builtin} for p in provider_catalog(self.config.snapshot())]
+
+    @Slot()
+    def _publish_providers(self):
+        self._providers_model.update_items(self._provider_rows())
+
     @Slot(str)
     def _accept_source(self, raw):
         data = json.loads(raw)
         self._source = data["items"]
         self._source_title = data["title"]
         self._busy = False
+        self._source_model.update_items(self._source)
         self.sourceChanged.emit()
 
     @Slot(str)
@@ -192,6 +288,7 @@ class Bridge(QObject):
     def selectSource(self, index, selected):
         if 0 <= index < len(self._source):
             self._source[index]["selected"] = selected and self._source[index]["available"]
+            self._source_model.update_items(self._source)
             self.sourceChanged.emit()
 
     @Slot(str)
@@ -209,6 +306,7 @@ class Bridge(QObject):
                         raise ValueError()
             for row in self._source:
                 row["selected"] = row["available"] and (spec == "all" or row["position"] in wanted)
+            self._source_model.update_items(self._source)
             self.sourceChanged.emit()
         except ValueError:
             self.notice.emit("اكتب نطاقًا مثل 1-10,15,20-25", True)
@@ -218,6 +316,9 @@ class Bridge(QObject):
         target = index + direction
         if 0 <= target < len(self._source):
             self._source[index], self._source[target] = self._source[target], self._source[index]
+            # Same length, so this lands as a dataChanged on two rows: the rows
+            # swap content in place and the view neither jumps nor flickers.
+            self._source_model.update_items(self._source)
             self.sourceChanged.emit()
 
     @Slot(str, str)

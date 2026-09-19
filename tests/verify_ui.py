@@ -178,20 +178,25 @@ def main():
         bridge.deleteLibraryFile(str(target))
         assert not target.exists() and bridge.library == []
         click("nav0")
-        # Scroll pinning: a backend republish must not throw the user back to the top.
+        # Scroll preservation: real model updates while scrolled down (new queue
+        # row, new log line) must never throw the user back to the top.
         bulk = [{"video_id": f"bulk{i}", "title": f"مهمة إضافية {i}", "position": 100 + i,
                  "url": "https://www.youtube.com/watch?v=bulk"} for i in range(1, 41)]
         store.add(bulk, config.snapshot())
         bridge.refresh()
-        QTest.qWait(200)  # let the first repopulation settle
+        QTest.qWait(200)  # let the initial population settle
         jobs_view = find(root.contentItem(), "jobsList")
         assert jobs_view is not None
         assert jobs_view.property("contentHeight") > jobs_view.property("height")
         jobs_view.setProperty("contentY", 260)
-        QTest.qWait(250)  # let the PinList sampler capture the scrolled position
+        QTest.qWait(150)
+        store.add([{"video_id": "bulk-late", "title": "مهمة متأخرة", "position": 200,
+                    "url": "https://www.youtube.com/watch?v=bulk"}], config.snapshot())
+        store.event("", "سطر سجل جديد أثناء التمرير.")
         bridge.refresh()
         QTest.qWait(300)
         assert jobs_view.property("contentY") > 200, jobs_view.property("contentY")
+        assert jobs_view.property("count") == len(store.jobs())
         # Pause controls exercised with no dispatch: stage-specific pause, worker controls, theme persistence.
         bridge.pauseStage("download", True)
         assert "download" in scheduler.manual_paused_stages

@@ -120,7 +120,7 @@ def defaults(home: Path):
         "opencode_providers": [],
         "library_root": str(home / "library"),
         "library_auto": True, "library_copy_audio": False,
-        "theme": "dark", "ui_scale": 1.0, "ui_rail_collapsed": False,
+        "theme": "dark", "ui_scale": 1.0, "ui_rail_collapsed": False, "ui_compact": True,
         "deepgram_workers": default_deepgram_workers(),
         "opencode_workers": default_opencode_workers(),
     }
@@ -235,7 +235,7 @@ class Config:
         for key, label in (("opencode_data_root", "بيانات عمال OpenCode"), ("library_root", "مكتبة الملفات")):
             if not Path(d[key]).is_absolute():
                 raise ValueError(f"اختر مسار {label} مسارًا مطلقًا.")
-        for k in ("library_auto", "library_copy_audio", "ui_rail_collapsed"):
+        for k in ("library_auto", "library_copy_audio", "ui_rail_collapsed", "ui_compact"):
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
         for k, low, high in [
