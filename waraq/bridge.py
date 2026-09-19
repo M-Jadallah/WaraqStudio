@@ -82,6 +82,9 @@ class Bridge(QObject):
     @Property(str, constant=True)
     def version(self): return __version__
 
+    @Property(float, notify=settingsChanged)
+    def uiScale(self): return float(self.config.snapshot().get("ui_scale", 1.0))
+
     @Property("QVariantList", notify=settingsChanged)
     def templates(self):
         return [{"id": t["id"], "name": t["name"], "text": t["text"]} for t in self.config.snapshot()["opencode_templates"]]

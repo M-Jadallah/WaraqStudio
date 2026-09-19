@@ -5,15 +5,16 @@ TextField {
     id: control
     property color fieldBackground: "#0f192a"
     property color fieldText: "#e5edf8"
-    implicitHeight: 44
+    property real uiScale: 1.0
+    implicitHeight: Math.round(38 * uiScale)
     font.family: "Segoe UI"
-    font.pixelSize: 15
+    font.pixelSize: Math.round(15 * uiScale)
     color: fieldText
     placeholderTextColor: "#8698b0"
     selectionColor: "#218b7b"
     selectByMouse: true
-    leftPadding: 12
-    rightPadding: 12
+    leftPadding: Math.round(12 * uiScale)
+    rightPadding: Math.round(12 * uiScale)
     background: Rectangle {
         color: control.fieldBackground
         radius: 8

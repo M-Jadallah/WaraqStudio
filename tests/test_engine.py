@@ -1135,3 +1135,21 @@ def test_youtube_retry_attempts_seeded_from_legacy_settings(tmp_path):
     fresh = Config(tmp_path / "fresh")
     assert fresh.data["youtube_retry_attempts"] == 3
 
+
+def test_ui_appearance_settings_validation(env):
+    store, cfg = env
+    data = cfg.snapshot()
+    assert data["ui_scale"] == 1.0 and data["ui_rail_collapsed"] is False
+    data.update({"ui_scale": 1.2, "ui_rail_collapsed": True})
+    cfg.save(data)
+    assert cfg.data["ui_scale"] == 1.2 and cfg.data["ui_rail_collapsed"] is True
+    for bad in (0.5, 1.5, "كبير", True):
+        data = cfg.snapshot()
+        data["ui_scale"] = bad
+        with pytest.raises(ValueError):
+            cfg.save(data)
+    data = cfg.snapshot()
+    data["ui_rail_collapsed"] = "نعم"
+    with pytest.raises(ValueError):
+        cfg.save(data)
+

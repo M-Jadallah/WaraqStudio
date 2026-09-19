@@ -33,6 +33,8 @@
   "auto_retry_attempts": 3,
   "opencode_limit_retries": 5,
   "theme": "dark",
+  "ui_scale": 1.0,
+  "ui_rail_collapsed": false,
   "deepgram_workers": [
     {"id": "dg1", "name": "Deepgram 01", "enabled": true, "project": "proj-1", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
     {"id": "dg2", "name": "Deepgram 02", "enabled": true, "project": "proj-2", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},

@@ -5,12 +5,13 @@ Button {
     id: control
     property bool primary: false
     property bool danger: false
+    property real uiScale: 1.0
     property color foreground: "#dce6f4"
     property color surface: "#1c2a40"
-    implicitHeight: 42
-    implicitWidth: Math.max(88, contentItem.implicitWidth + 30)
+    implicitHeight: Math.round(36 * uiScale)
+    implicitWidth: Math.max(Math.round(76 * uiScale), contentItem.implicitWidth + Math.round(22 * uiScale))
     font.family: "Segoe UI"
-    font.pixelSize: 14
+    font.pixelSize: Math.round(14 * uiScale)
     font.weight: Font.DemiBold
     focusPolicy: Qt.StrongFocus
     Accessible.name: text

@@ -37,6 +37,10 @@ ApplicationWindow {
     property var lastForce: ({provider: "", model: "", variant: ""})
     property bool skipForceQuestion: false
     property var pageNames: ["مركز العمليات", "إضافة مصدر", "العمال والخدمات", "مكتبة النتائج", "الملفات", "الإعدادات"]
+    property var pageIcons: ["🏠", "➕", "🖥", "📚", "🗂", "⚙"]
+    readonly property real uiScale: backend.uiScale
+    property bool railOpen: settings.ui_rail_collapsed !== true
+    function fs(n) { return Math.max(9, Math.round(n * uiScale)) }
     color: bg
     palette.window: panel
     palette.windowText: ink
@@ -48,7 +52,7 @@ ApplicationWindow {
     palette.highlightedText: "#ffffff"
     onClosing: function(close) { close.accepted = backend.prepareClose() }
     font.family: "Segoe UI"
-    font.pixelSize: 14
+    font.pixelSize: win.fs(14)
 
     function matches(job) {
         return (filter === "all" || job.status === filter || (filter === "attention" && ["blocked", "failed", "uncertain"].indexOf(job.status) >= 0))
@@ -181,14 +185,14 @@ ApplicationWindow {
     component LabelText: Text {
         color: win.ink
         font.family: "Segoe UI"
-        font.pixelSize: 14
+        font.pixelSize: win.fs(14)
         horizontalAlignment: Text.AlignRight
         elide: Text.ElideRight
     }
-    component SubText: LabelText { color: win.muted; font.pixelSize: 13 }
+    component SubText: LabelText { color: win.muted; font.pixelSize: win.fs(13) }
     component Box: Rectangle { color: win.panel; radius: 12; border.color: win.line }
-    component AppButton: WButton { foreground: win.ink; surface: win.dark ? "#1c2a40" : "#eaf0f7" }
-    component AppField: Field { fieldBackground: win.dark ? "#0f192a" : "#f7f9fc"; fieldText: win.ink }
+    component AppButton: WButton { uiScale: win.uiScale; foreground: win.ink; surface: win.dark ? "#1c2a40" : "#eaf0f7" }
+    component AppField: Field { uiScale: win.uiScale; fieldBackground: win.dark ? "#0f192a" : "#f7f9fc"; fieldText: win.ink }
 
     RowLayout {
         anchors.fill: parent
@@ -199,15 +203,15 @@ ApplicationWindow {
             spacing: 0
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 140
+                Layout.preferredHeight: Math.round(112 * win.uiScale)
                 color: win.bg
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 32
                     anchors.rightMargin: 32
-                    anchors.topMargin: 12
-                    anchors.bottomMargin: 12
-                    spacing: 10
+                    anchors.topMargin: 8
+                    anchors.bottomMargin: 8
+                    spacing: 8
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 12
@@ -230,7 +234,7 @@ ApplicationWindow {
                         ColumnLayout {
                             Layout.alignment: Qt.AlignRight
                             spacing: 3
-                            LabelText { text: win.pageNames[win.page]; font.pixelSize: 26; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
+                            LabelText { text: win.pageNames[win.page]; font.pixelSize: win.fs(21); font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
                             SubText { text: "من الفيديو إلى مستند يستحق القراءة"; Layout.alignment: Qt.AlignRight }
                         }
                     }
@@ -253,15 +257,15 @@ ApplicationWindow {
             StackLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.margins: 28
+                Layout.margins: 16
                 currentIndex: win.page
 
                 // Operations
                 ColumnLayout {
-                    spacing: 22
+                    spacing: 12
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 14
+                        spacing: 10
                         Repeater {
                             model: [
                                 {label: "تحتاج انتباهك", value: backend.stats.attention, color: "#f4b880"},
@@ -272,11 +276,11 @@ ApplicationWindow {
                             delegate: Box {
                                 required property var modelData
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 104
+                                Layout.preferredHeight: Math.round(76 * win.uiScale)
                                 ColumnLayout {
-                                    anchors.fill: parent; anchors.margins: 18; spacing: 6
+                                    anchors.fill: parent; anchors.margins: 12; spacing: 3
                                     SubText { text: modelData.label; Layout.alignment: Qt.AlignRight }
-                                    LabelText { text: modelData.value; font.pixelSize: 30; color: win.dark ? modelData.color : win.ink; Layout.alignment: Qt.AlignRight }
+                                    LabelText { text: modelData.value; font.pixelSize: win.fs(24); color: win.dark ? modelData.color : win.ink; Layout.alignment: Qt.AlignRight }
                                 }
                             }
                         }
@@ -287,7 +291,7 @@ ApplicationWindow {
                         AppButton { text: "تقرير Excel"; onClicked: backend.exportReport() }
                         Item { Layout.fillWidth: true }
                         AppField { Layout.preferredWidth: 240; placeholderText: "بحث في المهام"; horizontalAlignment: Text.AlignRight; onTextChanged: win.search = text; Accessible.name: "بحث في المهام" }
-                        LabelText { text: "طابور المعالجة"; font.pixelSize: 18; font.weight: Font.DemiBold }
+                        LabelText { text: "طابور المعالجة"; font.pixelSize: win.fs(18); font.weight: Font.DemiBold }
                     }
                     RowLayout {
                         Layout.alignment: Qt.AlignRight
@@ -297,7 +301,7 @@ ApplicationWindow {
                             delegate: AppButton {
                                 required property var modelData
                                 text: modelData.label; primary: win.filter === modelData.id
-                                implicitHeight: 34
+                                implicitHeight: 30
                                 onClicked: win.filter = modelData.id
                             }
                         }
@@ -308,14 +312,14 @@ ApplicationWindow {
                         ColumnLayout {
                             anchors.fill: parent; spacing: 0
                             RowLayout {
-                                Layout.fillWidth: true; Layout.preferredHeight: 48; Layout.leftMargin: 20; Layout.rightMargin: 20
+                                Layout.fillWidth: true; Layout.preferredHeight: 38; Layout.leftMargin: 14; Layout.rightMargin: 14
                                 SubText { text: "التفاصيل"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignLeft }
                                 SubText { text: "الحالة"; Layout.preferredWidth: 160 }
                                 SubText { text: "مراحل المعالجة"; Layout.preferredWidth: 230 }
                                 SubText { text: "الفيديو / الملف"; Layout.fillWidth: true }
                             }
                             Rectangle { Layout.fillWidth: true; height: 1; color: win.line }
-                            ListView {
+                            PinList {
                                 id: jobsList
                                 objectName: "jobsList"
                                 Layout.fillWidth: true; Layout.fillHeight: true
@@ -325,35 +329,35 @@ ApplicationWindow {
                                 delegate: Rectangle {
                                     required property var modelData
                                     width: jobsList.width
-                                    height: win.matches(modelData) ? 89 : 0
+                                    height: win.matches(modelData) ? Math.round(70 * win.uiScale) : 0
                                     visible: height > 0
                                     color: rowMouse.containsMouse ? (win.dark ? "#1a293d" : "#f3f7fb") : "transparent"
                                     MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.openJob(modelData); cursorShape: Qt.PointingHandCursor }
                                     RowLayout {
-                                        anchors.fill: parent; anchors.leftMargin: 20; anchors.rightMargin: 20; spacing: 14
-                                        AppButton { text: "عرض"; implicitWidth: 76; implicitHeight: 34; onClicked: win.openJob(modelData) }
+                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                        AppButton { text: "عرض"; implicitWidth: 64; implicitHeight: 28; onClicked: win.openJob(modelData) }
                                         ColumnLayout {
-                                            Layout.preferredWidth: 155
+                                            Layout.preferredWidth: 140
                                             LabelText { text: modelData.statusLabel; color: win.stateColor(modelData.status); Layout.alignment: Qt.AlignRight }
                                             SubText { text: modelData.retryAt ? "محاولة قادمة " + modelData.retryAt : (modelData.worker || modelData.stageLabel); Layout.alignment: Qt.AlignRight }
                                         }
                                         RowLayout {
-                                            Layout.preferredWidth: 230; spacing: 6
+                                            Layout.preferredWidth: 220; spacing: 6
                                             Repeater {
                                                 model: modelData.steps.slice().reverse()
                                                 delegate: Rectangle {
                                                     required property var modelData
-                                                    Layout.fillWidth: true; height: 30; radius: 6
+                                                    Layout.fillWidth: true; height: Math.round(26 * win.uiScale); radius: 5
                                                     color: modelData.status === "completed" ? (win.dark ? "#163b35" : "#e0f5ed") : (win.dark ? "#202d42" : "#eaf0f6")
                                                     border.color: modelData.status === "running" ? "#639ff2" : "transparent"
-                                                    LabelText { anchors.centerIn: parent; text: modelData.label; font.pixelSize: 11; color: win.stateColor(modelData.status) }
+                                                    LabelText { anchors.centerIn: parent; text: modelData.label; font.pixelSize: win.fs(11); color: win.stateColor(modelData.status) }
                                                 }
                                             }
                                         }
                                         ColumnLayout {
                                             Layout.fillWidth: true
                                             LabelText { text: modelData.title; Layout.fillWidth: true; font.weight: Font.DemiBold }
-                                            SubText { text: "#" + String(modelData.position).padStart(3,"0") + "   ·   " + modelData.video_id; Layout.fillWidth: true; font.pixelSize: 11 }
+                                            SubText { text: "#" + String(modelData.position).padStart(3,"0") + "   ·   " + modelData.video_id; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
                                         }
                                     }
                                     Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
@@ -364,7 +368,7 @@ ApplicationWindow {
                                         Layout.alignment: Qt.AlignHCenter; width: 66; height: 76; radius: 12; color: win.dark ? "#1d3c3d" : "#dcf4ed"
                                         Column { anchors.centerIn: parent; spacing: 7; Repeater { model: 3; Rectangle { width: 30; height: 3; radius: 2; color: "#42b99f" } } }
                                     }
-                                    LabelText { text: "مساحة عملك جاهزة"; font.pixelSize: 22; Layout.alignment: Qt.AlignHCenter }
+                                    LabelText { text: "مساحة عملك جاهزة"; font.pixelSize: win.fs(22); Layout.alignment: Qt.AlignHCenter }
                                     SubText { text: "أضف فيديو أو قائمة تشغيل، وحدد الدروس التي تريد تحويلها إلى Word."; Layout.alignment: Qt.AlignHCenter }
                                     AppButton { text: "إضافة المصدر الأول"; primary: true; Layout.alignment: Qt.AlignHCenter; onClicked: win.page = 1 }
                                 }
@@ -373,20 +377,20 @@ ApplicationWindow {
                     }
                     RowLayout {
                         Layout.fillWidth: true
-                        SubText { text: "Word (.docx)  /  TXT  /  JSON  /  MP3"; font.pixelSize: 12 }
+                        SubText { text: "Word (.docx)  /  TXT  /  JSON  /  MP3"; font.pixelSize: win.fs(12) }
                         Item { Layout.fillWidth: true }
-                        SubText { text: "تنزيل واحد  ·  تفريغ متوازٍ  ·  مستند مستقل لكل مهمة"; font.pixelSize: 12 }
+                        SubText { text: "تنزيل واحد  ·  تفريغ متوازٍ  ·  مستند مستقل لكل مهمة"; font.pixelSize: win.fs(12) }
                     }
                 }
 
                 // Source selection
                 ColumnLayout {
-                    spacing: 18
+                    spacing: 12
                     Box {
-                        Layout.fillWidth: true; Layout.preferredHeight: 188
+                        Layout.fillWidth: true; Layout.preferredHeight: Math.round(150 * win.uiScale)
                         ColumnLayout {
-                            anchors.fill: parent; anchors.margins: 22; spacing: 12
-                            LabelText { text: "ما الذي تريد تحويله اليوم؟"; font.pixelSize: 21; Layout.alignment: Qt.AlignRight }
+                            anchors.fill: parent; anchors.margins: 14; spacing: 8
+                            LabelText { text: "ما الذي تريد تحويله اليوم؟"; font.pixelSize: win.fs(18); Layout.alignment: Qt.AlignRight }
                             SubText { text: "رابط فيديو واحد أو قائمة تشغيل. ستختار الفيديوهات قبل إضافتها إلى الطابور."; Layout.alignment: Qt.AlignRight }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 10
@@ -408,12 +412,12 @@ ApplicationWindow {
                         AppButton { text: "إلغاء التحديد"; onClicked: backend.selectRange("none") }
                         AppButton { text: "تحديد الكل"; onClicked: backend.selectRange("all") }
                         Item { Layout.fillWidth: true }
-                        LabelText { text: backend.sourceTitle || "الفيديوهات المختارة"; Layout.maximumWidth: 280; font.pixelSize: 18 }
+                        LabelText { text: backend.sourceTitle || "الفيديوهات المختارة"; Layout.maximumWidth: 280; font.pixelSize: win.fs(18) }
                     }
                     AppField { Layout.fillWidth: true; placeholderText: "بحث في أسماء فيديوهات القائمة"; horizontalAlignment: Text.AlignRight; onTextChanged: win.sourceSearch = text; Accessible.name: "بحث في القائمة" }
                     Box {
                         Layout.fillWidth: true; Layout.fillHeight: true
-                        ListView {
+                        PinList {
                             id: sourceList
                             anchors.fill: parent; anchors.margins: 8; clip: true
                             model: backend.source
@@ -421,12 +425,12 @@ ApplicationWindow {
                             delegate: Item {
                                 required property var modelData
                                 required property int index
-                                width: sourceList.width; height: win.sourceSearch === "" || modelData.title.indexOf(win.sourceSearch) >= 0 ? 64 : 0
+                                width: sourceList.width; height: win.sourceSearch === "" || modelData.title.indexOf(win.sourceSearch) >= 0 ? Math.round(54 * win.uiScale) : 0
                                 visible: height > 0
                                 RowLayout {
-                                    anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 12
-                                    AppButton { text: "للأسفل"; implicitWidth: 68; implicitHeight: 32; enabled: index < backend.source.length - 1; onClicked: backend.moveSource(index, 1) }
-                                    AppButton { text: "للأعلى"; implicitWidth: 68; implicitHeight: 32; enabled: index > 0; onClicked: backend.moveSource(index, -1) }
+                                    anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
+                                    AppButton { text: "للأسفل"; implicitWidth: 60; implicitHeight: 28; enabled: index < backend.source.length - 1; onClicked: backend.moveSource(index, 1) }
+                                    AppButton { text: "للأعلى"; implicitWidth: 60; implicitHeight: 28; enabled: index > 0; onClicked: backend.moveSource(index, -1) }
                                     SubText { text: modelData.available ? (modelData.duration ? Math.round(modelData.duration / 60) + " دقيقة" : "") : "غير متاح"; Layout.preferredWidth: 85 }
                                     LabelText { text: modelData.title; Layout.fillWidth: true }
                                     SubText { text: "#" + modelData.position }
@@ -450,7 +454,7 @@ ApplicationWindow {
 
                 // Workers
                 ColumnLayout {
-                    spacing: 18
+                    spacing: 12
                     SubText { text: "كل عامل يعمل على مهمة واحدة. إيقاف الاستقبال يسمح للمهمة الحالية بالاكتمال."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                     RowLayout {
                         Layout.fillWidth: true
@@ -458,18 +462,18 @@ ApplicationWindow {
                         AppButton { objectName: "providersButton"; text: "المزودون"; onClicked: { providersDialog.open() } }
                         AppButton { text: "إضافة عامل Deepgram"; onClicked: { var w = JSON.parse(JSON.stringify(settings.deepgram_workers[0])); w.id = "dg" + Date.now(); w.name = "Deepgram " + (settings.deepgram_workers.length + 1); w.project = "proj-" + (settings.deepgram_workers.length + 1); settings.deepgram_workers.push(w); save() } }
                         Item { Layout.fillWidth: true }
-                        LabelText { text: "إدارة السعة"; font.pixelSize: 18 }
+                        LabelText { text: "إدارة السعة"; font.pixelSize: win.fs(18) }
                     }
-                    ListView {
+                    PinList {
                         id: workerList
-                        Layout.fillWidth: true; Layout.fillHeight: true; spacing: 12; clip: true
+                        Layout.fillWidth: true; Layout.fillHeight: true; spacing: 8; clip: true
                         model: backend.workers
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
                             required property var modelData
-                            width: workerList.width; height: modelData.error ? 150 : 126
+                            width: workerList.width; height: modelData.error ? Math.round(120 * win.uiScale) : Math.round(96 * win.uiScale)
                             ColumnLayout {
-                                anchors.fill: parent; anchors.margins: 18; spacing: 8
+                                anchors.fill: parent; anchors.margins: 12; spacing: 5
                                 RowLayout {
                                     Layout.fillWidth: true; spacing: 12
                                     AppButton { text: "إعدادات"; visible: modelData.stage !== "download"; onClicked: win.editWorker(modelData, modelData.stage) }
@@ -487,7 +491,7 @@ ApplicationWindow {
                                     Item { Layout.fillWidth: true }
                                     ColumnLayout {
                                         Layout.alignment: Qt.AlignRight
-                                        LabelText { text: modelData.name; font.pixelSize: 17; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
+                                        LabelText { text: modelData.name; font.pixelSize: win.fs(17); font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
                                         SubText {
                                             Layout.alignment: Qt.AlignRight
                                             text: modelData.job_id ? "يعالج " + modelData.job_id + "  ·  " + modelData.elapsed + " ثانية"
@@ -505,38 +509,38 @@ ApplicationWindow {
                         }
                     }
                     Box {
-                        Layout.fillWidth: true; Layout.preferredHeight: 96
-                        SubText { anchors.fill: parent; anchors.margins: 18; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; text: "مفاتيح Deepgram و OpenRouter محفوظة في Windows Credential Manager، مفتاح مستقل لكل عامل. عمال Deepgram ذوو معرّف المشروع نفسه يتقاسمون حد التزامن؛ اجعل المعرّف مطابقًا لمشروع المفتاح. عامل OpenCode بمزود غير «تسجيل الدخول» يعمل في مجلد بيانات مستقل فلا تتعارض العمليات المتوازية." }
+                        Layout.fillWidth: true; Layout.preferredHeight: Math.round(78 * win.uiScale)
+                        SubText { anchors.fill: parent; anchors.margins: 12; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; text: "مفاتيح Deepgram و OpenRouter محفوظة في Windows Credential Manager، مفتاح مستقل لكل عامل. عمال Deepgram ذوو معرّف المشروع نفسه يتقاسمون حد التزامن؛ اجعل المعرّف مطابقًا لمشروع المفتاح. عامل OpenCode بمزود غير «تسجيل الدخول» يعمل في مجلد بيانات مستقل فلا تتعارض العمليات المتوازية." }
                     }
                 }
 
                 // Library
                 ColumnLayout {
-                    spacing: 16
+                    spacing: 12
                     RowLayout {
                         AppButton { text: "فتح مجلد النتائج"; onClicked: backend.openPath(settings.output_root) }
                         AppButton { text: "تقرير Excel"; onClicked: backend.exportReport() }
                         Item { Layout.fillWidth: true }
-                        LabelText { text: backend.stats.documents + " مستند Word"; font.pixelSize: 20 }
+                        LabelText { text: backend.stats.documents + " مستند Word"; font.pixelSize: win.fs(20) }
                     }
                     AppField { Layout.fillWidth: true; placeholderText: "بحث في عناوين النتائج"; horizontalAlignment: Text.AlignRight; onTextChanged: win.librarySearch = text; Accessible.name: "بحث في النتائج" }
-                    ListView {
+                    PinList {
                         id: libraryList
-                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 12
+                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
                         model: backend.jobs.filter(function(j){return (j.document || j.transcript || j.audio) && (win.librarySearch === "" || j.title.indexOf(win.librarySearch) >= 0)})
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
                             required property var modelData
-                            width: libraryList.width; height: 100
+                            width: libraryList.width; height: Math.round(72 * win.uiScale)
                             RowLayout {
-                                anchors.fill: parent; anchors.margins: 18; spacing: 12
+                                anchors.fill: parent; anchors.margins: 10; spacing: 8
                                 AppButton { text: "فتح Word"; primary: true; enabled: !!modelData.document; onClicked: backend.openPath(modelData.document) }
                                 AppButton { text: "التفريغ"; enabled: !!modelData.transcript; onClicked: backend.openPath(modelData.transcript) }
                                 AppButton { text: "الصوت"; enabled: !!modelData.audio; onClicked: backend.openPath(modelData.audio) }
                                 AppButton { text: "التفاصيل"; onClicked: win.openJob(modelData) }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    LabelText { text: modelData.title; font.pixelSize: 17; Layout.fillWidth: true }
+                                    LabelText { text: modelData.title; font.pixelSize: win.fs(15); Layout.fillWidth: true }
                                     SubText { text: modelData.document ? "DOCX · تم التحقق من بنية المستند والنص" : "نتائج وسيطة محفوظة"; Layout.fillWidth: true }
                                 }
                             }
@@ -547,7 +551,7 @@ ApplicationWindow {
 
                 // Files
                 ColumnLayout {
-                    spacing: 16
+                    spacing: 12
                     RowLayout {
                         Layout.fillWidth: true
                         AppButton { objectName: "organizeButton"; text: "تنظيم الآن"; primary: true; enabled: !backend.libraryBusy; onClicked: backend.organizeLibrary() }
@@ -555,7 +559,7 @@ ApplicationWindow {
                         AppButton { text: "فتح مجلد المكتبة"; onClicked: backend.openPath(settings.library_root) }
                         AppButton { text: "فتح ملف من الجهاز"; onClicked: { var path = backend.choosePath("file"); if (path) backend.openPath(path) } }
                         Item { Layout.fillWidth: true }
-                        LabelText { text: backend.library.length + " ملف في المكتبة"; font.pixelSize: 20 }
+                        LabelText { text: backend.library.length + " ملف في المكتبة"; font.pixelSize: win.fs(20) }
                     }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 14
@@ -572,24 +576,24 @@ ApplicationWindow {
                             }
                         }
                     }
-                    ListView {
+                    PinList {
                         id: fileList
                         objectName: "fileList"
-                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 10
+                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6
                         model: backend.library.filter(function(f){ return (win.fileKind === "all" || f.kind === win.fileKind) && (win.fileSearch === "" || f.name.toLowerCase().indexOf(win.fileSearch.toLowerCase()) >= 0) })
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
                             required property var modelData
-                            width: fileList.width; height: 78
+                            width: fileList.width; height: Math.round(62 * win.uiScale)
                             RowLayout {
-                                anchors.fill: parent; anchors.margins: 16; spacing: 12
+                                anchors.fill: parent; anchors.margins: 10; spacing: 8
                                 AppButton { text: "فتح"; primary: true; onClicked: backend.openPath(modelData.path) }
                                 AppButton { text: "فتح المجلد"; onClicked: backend.openPath(modelData.folder) }
                                 AppButton { text: "نسخ المسار"; onClicked: backend.copyText(modelData.path) }
                                 AppButton { text: "حذف"; danger: true; onClicked: { win.pendingFile = modelData; deleteFileDialog.open() } }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    LabelText { text: modelData.name; font.pixelSize: 16; Layout.fillWidth: true }
+                                    LabelText { text: modelData.name; font.pixelSize: win.fs(14); Layout.fillWidth: true }
                                     SubText { text: win.kindLabel(modelData.kind) + "  ·  " + win.fileSize(modelData.size) + "  ·  " + Qt.formatDateTime(new Date(modelData.modified * 1000), "yyyy-MM-dd HH:mm") }
                                 }
                             }
@@ -604,7 +608,7 @@ ApplicationWindow {
 
                 // Settings
                 ColumnLayout {
-                    spacing: 16
+                    spacing: 12
                     RowLayout {
                         AppButton { text: "حفظ الإعدادات"; primary: true; onClicked: { settings.prompt = promptField.text; save() } }
                         AppButton { objectName: "templatesButton"; text: "قوالب البرومبت"; onClicked: templatesDialog.open() }
@@ -613,22 +617,45 @@ ApplicationWindow {
                         Item { Layout.fillWidth: true }
                         AppButton { text: win.dark ? "المظهر الفاتح" : "المظهر الداكن"; onClicked: { settings.theme = win.dark ? "light" : "dark"; save() } }
                     }
+                    Box {
+                        Layout.fillWidth: true; implicitHeight: uiScaleColumn.implicitHeight + 28
+                        ColumnLayout {
+                            id: uiScaleColumn; anchors.fill: parent; anchors.margins: 14; spacing: 8
+                            LabelText { text: "حجم الواجهة"; font.pixelSize: win.fs(18); Layout.alignment: Qt.AlignRight }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 12
+                                AppButton { objectName: "uiScaleReset"; text: "افتراضي"; implicitHeight: 30; enabled: Math.round(win.uiScale * 100) !== 100; onClicked: { settings.ui_scale = 1.0; save() } }
+                                Item { Layout.fillWidth: true }
+                                LabelText { objectName: "uiScaleValue"; text: Math.round(win.uiScale * 100) + "٪"; font.pixelSize: win.fs(15) }
+                                Slider {
+                                    id: uiScaleSlider
+                                    objectName: "uiScaleSlider"
+                                    Layout.preferredWidth: 260
+                                    from: 80; to: 140; stepSize: 5
+                                    value: Math.round(win.uiScale * 100)
+                                    onMoved: { settings.ui_scale = Math.round(value) / 100; save() }
+                                    Accessible.name: "حجم خطوط وعناصر الواجهة"
+                                }
+                            }
+                            SubText { text: "يُطبَّق فورًا على الخطوط والأزرار والصفوف في كل الصفحات، ويُحفظ مع بقية الإعدادات."; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                        }
+                    }
                     ScrollView {
                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                         contentWidth: availableWidth
                         ColumnLayout {
-                            width: parent.width; spacing: 18
+                            width: parent.width; spacing: 12
                             Box {
                                 Layout.fillWidth: true; implicitHeight: storageColumn.implicitHeight + 40
                                 ColumnLayout {
-                                    id: storageColumn; anchors.fill: parent; anchors.margins: 20; spacing: 12
-                                    LabelText { text: "الملفات والأدوات"; font.pixelSize: 18; Layout.alignment: Qt.AlignRight }
+                                    id: storageColumn; anchors.fill: parent; anchors.margins: 14; spacing: 10
+                                    LabelText { text: "الملفات والأدوات"; font.pixelSize: win.fs(18); Layout.alignment: Qt.AlignRight }
                                     Repeater {
                                         model: [{key:"output_root",label:"مجلد النتائج",kind:"folder"},{key:"library_root",label:"مجلد المكتبة",kind:"folder"},{key:"cookies_file",label:"ملف كوكيز Netscape",kind:"file"},{key:"opencode_executable",label:"ملف OpenCode التنفيذي",kind:"file"},{key:"opencode_context",label:"مجلد المشروع السابق",kind:"folder"},{key:"opencode_data_root",label:"مجلد بيانات عمال OpenCode",kind:"folder"}]
                                         delegate: RowLayout {
                                             required property var modelData
                                             Layout.fillWidth: true
-                                            AppButton { text: "اختيار"; implicitHeight: 40; onClicked: { var path = backend.choosePath(modelData.kind); if(path) { settings[modelData.key] = path; pathField.text = path } } }
+                                            AppButton { text: "اختيار"; implicitHeight: 34; onClicked: { var path = backend.choosePath(modelData.kind); if(path) { settings[modelData.key] = path; pathField.text = path } } }
                                             AppField { id: pathField; Layout.fillWidth: true; text: settings[modelData.key]; onEditingFinished: settings[modelData.key] = text; Accessible.name: modelData.label }
                                             LabelText { text: modelData.label; Layout.preferredWidth: 185 }
                                         }
@@ -638,8 +665,8 @@ ApplicationWindow {
                             Box {
                                 Layout.fillWidth: true; implicitHeight: limitsColumn.implicitHeight + 40
                                 ColumnLayout {
-                                    id: limitsColumn; anchors.fill: parent; anchors.margins: 20; spacing: 12
-                                    LabelText { text: "السعة والترتيب"; font.pixelSize: 18; Layout.alignment: Qt.AlignRight }
+                                    id: limitsColumn; anchors.fill: parent; anchors.margins: 14; spacing: 10
+                                    LabelText { text: "السعة والترتيب"; font.pixelSize: win.fs(18); Layout.alignment: Qt.AlignRight }
                                     Repeater {
                                         model: [{key:"project_concurrency",label:"حد تزامن Deepgram لكل مشروع"},{key:"max_pending_audio",label:"أقصى ملفات صوت بانتظار التفريغ"},{key:"youtube_sleep_min",label:"أقل انتظار بين التنزيلات — ثانية"},{key:"youtube_sleep_max",label:"أقصى انتظار بين التنزيلات — ثانية"},{key:"youtube_request_delay",label:"الفاصل بين طلبات YouTube — ثانية"},{key:"youtube_cooldown",label:"تهدئة تقييد YouTube — ثانية"},{key:"chunk_seconds",label:"طول الجزء الصوتي — ثانية"},{key:"opencode_timeout",label:"مهلة OpenCode — ثانية"}]
                                         delegate: RowLayout {
@@ -669,22 +696,22 @@ ApplicationWindow {
                             Box {
                                 Layout.fillWidth: true; implicitHeight: libraryColumn.implicitHeight + 40
                                 ColumnLayout {
-                                    id: libraryColumn; anchors.fill: parent; anchors.margins: 20; spacing: 12
-                                    LabelText { text: "مكتبة الملفات"; font.pixelSize: 18; Layout.alignment: Qt.AlignRight }
+                                    id: libraryColumn; anchors.fill: parent; anchors.margins: 14; spacing: 10
+                                    LabelText { text: "مكتبة الملفات"; font.pixelSize: win.fs(18); Layout.alignment: Qt.AlignRight }
                                     SubText { text: "نسخة منظّمة من النتائج داخل مجلدات Word والتفريغات والصوت لسهولة الوصول من خارج التطبيق. المهمة تُعاد معالجتها فتُحدَّث نسختها في المكتبة."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                                     CheckBox { text: "تنظيم تلقائي بعد اكتمال كل مرحلة"; checked: settings.library_auto; onClicked: settings.library_auto = checked; palette.windowText: win.ink; Layout.alignment: Qt.AlignRight }
                                     CheckBox { text: "انسخ الصوت أيضًا إلى المكتبة (يضاعف المساحة)"; checked: settings.library_copy_audio; onClicked: settings.library_copy_audio = checked; palette.windowText: win.ink; Layout.alignment: Qt.AlignRight }
                                 }
                             }
                             Box {
-                                Layout.fillWidth: true; implicitHeight: 310
+                                Layout.fillWidth: true; implicitHeight: 250
                                 ColumnLayout {
-                                    anchors.fill: parent; anchors.margins: 20; spacing: 10
-                                    LabelText { text: "تعليمات إنتاج مستند Word"; font.pixelSize: 18; Layout.alignment: Qt.AlignRight }
+                                    anchors.fill: parent; anchors.margins: 14; spacing: 8
+                                    LabelText { text: "تعليمات إنتاج مستند Word"; font.pixelSize: win.fs(18); Layout.alignment: Qt.AlignRight }
                                     SubText { text: "المتغيرات: {transcript_path}   {output_path}   {title}   {position}"; Layout.fillWidth: true }
                                     ScrollView {
                                         Layout.fillWidth: true; Layout.fillHeight: true
-                                        TextArea { id: promptField; text: settings.prompt; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: 14; horizontalAlignment: Text.AlignRight; background: Rectangle { color: win.dark ? "#0f192a" : "#f7f9fc"; radius: 8; border.color: win.line } }
+                                        TextArea { id: promptField; text: settings.prompt; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: win.fs(14); horizontalAlignment: Text.AlignRight; background: Rectangle { color: win.dark ? "#0f192a" : "#f7f9fc"; radius: 8; border.color: win.line } }
                                     }
                                 }
                             }
@@ -696,17 +723,36 @@ ApplicationWindow {
             }
         }
 
-        // Right navigation rail
+        // Right navigation rail (collapsible; state persists in ui_rail_collapsed)
         Rectangle {
-            Layout.preferredWidth: 220
+            id: navRail
+            objectName: "navRail"
+            Layout.preferredWidth: railOpen ? 220 : 64
             Layout.fillHeight: true
             color: "#111d30"
+            Behavior on Layout.preferredWidth { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
             ColumnLayout {
-                anchors.fill: parent; anchors.margins: 20; spacing: 8
-                ColumnLayout {
-                    Layout.fillWidth: true; Layout.topMargin: 14; Layout.bottomMargin: 34; spacing: 0
-                    Text { text: "وَرَق"; color: "#e9f2fb"; font.family: "Segoe UI"; font.pixelSize: 40; font.weight: Font.Bold; Layout.alignment: Qt.AlignRight }
-                    Text { text: "WARAQ STUDIO"; color: "#71d9c1"; font.pixelSize: 11; font.letterSpacing: 2; Layout.alignment: Qt.AlignRight }
+                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+                anchors.topMargin: 12; anchors.bottomMargin: 12; spacing: 6
+                RowLayout {
+                    Layout.fillWidth: true; Layout.bottomMargin: 14; spacing: 4
+                    AppButton {
+                        objectName: "railToggle"
+                        text: railOpen ? "»" : "«"
+                        implicitWidth: 32; implicitHeight: 32
+                        onClicked: { settings.ui_rail_collapsed = railOpen; save() }
+                        Accessible.name: railOpen ? "طي القائمة الجانبية" : "توسيع القائمة الجانبية"
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: Accessible.name
+                    }
+                    Item { Layout.fillWidth: true }
+                    ColumnLayout {
+                        visible: railOpen; spacing: 0
+                        Text { text: "وَرَق"; color: "#e9f2fb"; font.family: "Segoe UI"; font.pixelSize: win.fs(28); font.weight: Font.Bold; Layout.alignment: Qt.AlignRight }
+                        Text { text: "WARAQ STUDIO"; color: "#71d9c1"; font.pixelSize: win.fs(10); font.letterSpacing: 2; Layout.alignment: Qt.AlignRight }
+                    }
+                    Text { visible: !railOpen; text: "و"; color: "#71d9c1"; font.pixelSize: win.fs(24); font.weight: Font.Bold }
                 }
                 Repeater {
                     model: win.pageNames
@@ -714,17 +760,29 @@ ApplicationWindow {
                         required property string modelData
                         required property int index
                         objectName: "nav" + index
-                        Layout.fillWidth: true; implicitHeight: 48
+                        Layout.fillWidth: true; implicitHeight: Math.round(42 * win.uiScale)
                         onClicked: win.page = index
                         Accessible.name: modelData
+                        ToolTip.visible: !railOpen && hovered
+                        ToolTip.delay: 400
+                        ToolTip.text: modelData
                         background: Rectangle { radius: 8; color: win.page === index ? "#203b48" : (parent.hovered ? "#1b2b42" : "transparent"); border.color: parent.activeFocus ? "#42d9b6" : "transparent" }
-                        contentItem: Text { text: modelData; color: win.page === index ? "#80ecd0" : "#b5c3d6"; font.pixelSize: 15; font.weight: win.page === index ? Font.DemiBold : Font.Normal; horizontalAlignment: Text.AlignRight; verticalAlignment: Text.AlignVCenter; rightPadding: 14 }
+                        contentItem: Text {
+                            text: railOpen ? win.pageIcons[index] + "  " + modelData : win.pageIcons[index]
+                            color: win.page === index ? "#80ecd0" : "#b5c3d6"
+                            font.pixelSize: win.fs(14)
+                            font.weight: win.page === index ? Font.DemiBold : Font.Normal
+                            horizontalAlignment: Text.AlignRight
+                            verticalAlignment: Text.AlignVCenter
+                            rightPadding: 10
+                            elide: Text.ElideRight
+                        }
                     }
                 }
                 Item { Layout.fillHeight: true }
-                Rectangle { Layout.fillWidth: true; height: 1; color: "#29384b" }
-                Text { text: "سير عملك، تحت سيطرتك"; color: "#a5b6cd"; font.pixelSize: 13; Layout.alignment: Qt.AlignRight; Layout.topMargin: 14 }
-                Text { text: "نسخة محلية  ·  " + backend.version; color: "#91a3bc"; font.pixelSize: 11; Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 8 }
+                Rectangle { Layout.fillWidth: true; height: 1; color: "#29384b"; visible: railOpen }
+                Text { visible: railOpen; text: "سير عملك، تحت سيطرتك"; color: "#a5b6cd"; font.pixelSize: win.fs(12); Layout.alignment: Qt.AlignRight; Layout.topMargin: 10 }
+                Text { visible: railOpen; text: "نسخة محلية  ·  " + backend.version; color: "#91a3bc"; font.pixelSize: win.fs(11); Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 4 }
             }
         }
     }
@@ -735,7 +793,7 @@ ApplicationWindow {
         anchors.top: parent.top; anchors.topMargin: 100; anchors.horizontalCenter: parent.horizontalCenter
         width: Math.min(850, win.width - 100); height: toastLabel.implicitHeight + 36
         radius: 10; color: win.toastError ? "#432e25" : "#173b35"; border.color: win.toastError ? "#9b6847" : "#377f70"
-        Text { id: toastLabel; anchors.fill: parent; anchors.margins: 18; color: "#f1f5f9"; text: win.toastText; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight; font.pixelSize: 14 }
+        Text { id: toastLabel; anchors.fill: parent; anchors.margins: 18; color: "#f1f5f9"; text: win.toastText; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight; font.pixelSize: win.fs(14) }
         TapHandler { onTapped: win.toastText = "" }
     }
 
@@ -748,7 +806,7 @@ ApplicationWindow {
         background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
         contentItem: ColumnLayout {
             spacing: 14
-            LabelText { text: selectedJob.title || ""; font.pixelSize: 20; Layout.fillWidth: true }
+            LabelText { text: selectedJob.title || ""; font.pixelSize: win.fs(20); Layout.fillWidth: true }
             SubText { text: (selectedJob.statusLabel || "") + "  ·  " + (selectedJob.stageLabel || ""); Layout.fillWidth: true }
             SubText { text: selectedJob.retryAt ? "أُعيدت الجدولة تلقائيًا — المحاولة القادمة " + selectedJob.retryAt : ""; visible: !!selectedJob.retryAt; color: win.dark ? "#87b7ff" : "#215cc4"; Layout.fillWidth: true }
             SubText { text: selectedJob.template ? "قالب البرومبت: " + selectedJob.template : ""; visible: !!selectedJob.template; Layout.fillWidth: true }
@@ -770,7 +828,7 @@ ApplicationWindow {
                 Layout.fillWidth: true; Layout.fillHeight: true
                 TextArea {
                     text: backend.logs.filter(function(e){return e.job_id === selectedJob.id}).map(function(e){return e.time + "  " + e.message}).join("\n\n")
-                    readOnly: true; selectByMouse: true; color: win.muted; wrapMode: TextEdit.Wrap; font.pixelSize: 12
+                    readOnly: true; selectByMouse: true; color: win.muted; wrapMode: TextEdit.Wrap; font.pixelSize: win.fs(12)
                     background: Rectangle { color: win.bg; radius: 8 }
                 }
             }
@@ -864,7 +922,7 @@ ApplicationWindow {
             spacing: 12
             LabelText {
                 objectName: "forceQuestion"
-                Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 17
+                Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: win.fs(17)
                 text: forceDialog.starting
                       ? "قبل تشغيل الطابور: هل تفرض مزودًا ونموذجًا ومستوى تفكير على كل عمال OpenCode، أم يبقى كل عامل على إعداده؟"
                       : "اختر الإعداد المفروض على كل عمال OpenCode، أو ألغِ الفرض ليعود كل عامل إلى إعداده."
@@ -919,7 +977,7 @@ ApplicationWindow {
                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                 text: "المزودون المدمجون ثابتون. أضف مزودك بمعرّفه كما يستخدمه OpenCode ومتغير المفتاح الذي يقرأ منه، واترك العزل مفعّلًا ليأخذ كل عامل مجلد بيانات مستقلًا."
             }
-            ListView {
+            PinList {
                 id: providerList
                 objectName: "providerList"
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
@@ -927,9 +985,9 @@ ApplicationWindow {
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Box {
                     required property var modelData
-                    width: providerList.width; height: 68
+                    width: providerList.width; height: Math.round(56 * win.uiScale)
                     RowLayout {
-                        anchors.fill: parent; anchors.margins: 14; spacing: 10
+                        anchors.fill: parent; anchors.margins: 10; spacing: 8
                         AppButton { text: "حذف"; danger: true; visible: !modelData.builtin; onClicked: { win.pendingProvider = modelData; deleteProviderDialog.open() } }
                         AppButton {
                             text: "تعديل"; visible: !modelData.builtin
@@ -938,7 +996,7 @@ ApplicationWindow {
                         Item { Layout.fillWidth: true }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            LabelText { text: modelData.name; font.pixelSize: 16; Layout.fillWidth: true }
+                            LabelText { text: modelData.name; font.pixelSize: win.fs(16); Layout.fillWidth: true }
                             SubText { text: modelData.id + (modelData.keyEnv ? "  ·  " + modelData.keyEnv : "  ·  بلا مفتاح (تسجيل دخول)") + (modelData.builtin ? "  ·  مدمج" : "  ·  مضاف يدويًا") }
                         }
                     }
@@ -947,7 +1005,7 @@ ApplicationWindow {
             Box {
                 Layout.fillWidth: true; implicitHeight: provForm.implicitHeight + 36
                 ColumnLayout {
-                    id: provForm; anchors.fill: parent; anchors.margins: 18; spacing: 10
+                    id: provForm; anchors.fill: parent; anchors.margins: 12; spacing: 8
                     RowLayout {
                         Layout.fillWidth: true
                         AppField { id: provId; objectName: "providerIdField"; Layout.fillWidth: true; placeholderText: "groq" }
@@ -1003,7 +1061,7 @@ ApplicationWindow {
         id: advancedDialog; anchors.centerIn: parent; width: Math.min(850, win.width - 100); height: win.height - 120; modal: true
         title: "الإعدادات المتقدمة — دون مفاتيح API"; standardButtons: Dialog.Save | Dialog.Cancel
         onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        contentItem: ScrollView { TextArea { id: rawSettings; text: backend.settingsJson; selectByMouse: true; wrapMode: TextEdit.Wrap; font.family: "Consolas"; font.pixelSize: 13 } }
+        contentItem: ScrollView { TextArea { id: rawSettings; text: backend.settingsJson; selectByMouse: true; wrapMode: TextEdit.Wrap; font.family: "Consolas"; font.pixelSize: win.fs(13) } }
         onAccepted: backend.saveSettings(rawSettings.text)
     }
     Dialog {
@@ -1032,7 +1090,7 @@ ApplicationWindow {
                     win.loadTemplateFields()
                 } }
                 Item { Layout.fillWidth: true }
-                LabelText { text: "القوالب المحفوظة"; font.pixelSize: 16 }
+                LabelText { text: "القوالب المحفوظة"; font.pixelSize: win.fs(16) }
             }
             ComboBox { id: tplBox; objectName: "templateEditorBox"; Layout.fillWidth: true; model: win.templ; textRole: "name"; onActivated: win.loadTemplateFields() }
             RowLayout {
@@ -1042,7 +1100,7 @@ ApplicationWindow {
             SubText { text: "يجب أن يحتوي كل قالب {transcript_path} و{output_path}، ويمكن استخدام {title} و{position}."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
             ScrollView {
                 Layout.fillWidth: true; Layout.fillHeight: true
-                TextArea { id: tplText; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: 14; horizontalAlignment: Text.AlignRight; background: Rectangle { color: win.dark ? "#0f192a" : "#f7f9fc"; radius: 8; border.color: win.line } }
+                TextArea { id: tplText; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: win.fs(14); horizontalAlignment: Text.AlignRight; background: Rectangle { color: win.dark ? "#0f192a" : "#f7f9fc"; radius: 8; border.color: win.line } }
             }
         }
         onAccepted: {

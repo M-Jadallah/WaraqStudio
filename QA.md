@@ -1,8 +1,8 @@
-# Verification — 2026-09-19 · منطق إعادة تنزيل YouTube
+# Verification — 2026-09-19 · منطق إعادة تنزيل YouTube + ضغط الواجهة
 
 ## Local automated tests
 
-72 engine/service tests passed (run three times to rule out timing flakes), covering:
+73 engine/service tests passed (timing-flake checks included), covering:
 
 - Atomic task claims under competing workers.
 - Crash recovery and uncertain paid requests.
@@ -50,7 +50,15 @@ YouTube retry rework (this round):
 
 Upgrade rehearsal on copies of the real settings and task database: the `runtime_state` table is created non-destructively, all 22 jobs and 66 stages are preserved, the five OpenCode workers and seven Deepgram workers stay as saved, and the smoke run exits 0.
 
-Native UI interaction checks passed for all six screens, range selection, custom ordering, queue insertion, template publication/save/enqueue snapshotting, the auto-stop toggle wiring, direct worker enable toggles, provider management (adding one, rejecting a bad id and a reserved id, refusing to delete one in use), the pre-start override question starting the queue on both answers, library organise/list/delete, service pause/resume, the new automatic-download-block flow (block reason visible on the YouTube worker row, re-check lifts it and requeues the parked job), theme persistence and a 1060 × 720 window. No QML errors were reported. Screenshots were inspected at 1060 × 720 for Arabic shaping, reading order, contrast, spacing, modal readability and overflow. The interface is a native Qt application, so verification used Qt Test and QQuickWindow screenshots rather than a web browser.
+UI density round (this round):
+
+- All six data lists (operations, source, workers, library, files, providers) use `PinList`, which preserves the scroll position across backend model republishing; a native check scrolls the jobs list, triggers a republish and asserts the offset survives, including a user scroll that races the restore window.
+- Every page was compressed: shorter rows (jobs 89→70, source 64→54, workers 126→96, library 100→72, files 78→62), smaller buttons/fields, tighter margins and a single compact header — screenshots reviewed at 1060×720 for all six pages plus dialogs.
+- The navigation rail collapses 220↔64 px with icon-only mode and tooltips; the state persists through `ui_rail_collapsed` and navigation keeps working while collapsed (verified by clicking through to the library page).
+- `ui_scale` (0.8–1.4) scales fonts and control metrics live through the shared `fs()` helper and the button/field primitives; the Settings slider applies and persists it, and a saved 1.2 value updates the window property and re-scales the interface.
+- Validation rejects `ui_scale` outside 0.8–1.4 (including strings and booleans) and non-boolean `ui_rail_collapsed`; the template carries both defaults.
+
+Native UI interaction checks passed for all six screens, range selection, custom ordering, queue insertion, template publication/save/enqueue snapshotting, the auto-stop toggle wiring, direct worker enable toggles, provider management (adding one, rejecting a bad id and a reserved id, refusing to delete one in use), the pre-start override question starting the queue on both answers, library organise/list/delete, service pause/resume, the automatic-download-block flow (block reason visible on the YouTube worker row, re-check lifts it and requeues the parked job), scroll-position pinning across republishes, the collapsible navigation rail, the live UI-scale setting, theme persistence and a 1060 × 720 window. No QML errors were reported. Screenshots were inspected at 1060 × 720 for Arabic shaping, reading order, contrast, spacing, modal readability and overflow. The interface is a native Qt application, so verification used Qt Test and QQuickWindow screenshots rather than a web browser.
 
 The source environment resolves FFmpeg, yt-dlp, EJS, Requests, OpenPyXL, Windows Credential Manager, Node.js and the installed OpenCode executable.
 

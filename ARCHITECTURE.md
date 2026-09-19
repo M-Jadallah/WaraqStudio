@@ -10,7 +10,7 @@ Modules:
 - `scheduler.py`: dependency/order gates, per-project concurrency, downstream queue/disk backpressure and worker lifecycle.
 - `library.py`: type-grouped mirror of finished artifacts with a stable name manifest.
 - `bridge.py`: UI operations and background discovery; no paid requests on startup.
-- `qml/`: native screens and reusable controls.
+- `qml/`: native screens and reusable controls. Data lists use `PinList`, a ListView that keeps the user's scroll position across wholesale model republishing: a sampler records the last scrollable offset and a post-repopulate restore re-pins it unless the user already scrolled during the rebuild window. Fonts and control metrics scale through `ui_scale` (0.8–1.4, live-applied from Settings) via a shared `fs()` helper and a `uiScale` property on the button/field primitives; `ui_rail_collapsed` persists the collapsible navigation rail.
 
 Task stage states: pending → running → completed. Terminal/action states: failed, blocked, uncertain, cancelled. Paused is used for local operations interrupted by process exit. Skipped stages count as dependency-satisfied only for valid plans. Claims compare-and-set `pending` under a database lock so two workers cannot execute the same stage. A transient failure returns a stage to pending with a future `next_retry` (deferral); the claim predicate honors that timestamp, so scheduled retries survive restarts and resume without user action. `retries` counts consecutive automatic deferrals of the current episode and resets on any explicit transition, success, or manual retry.
 

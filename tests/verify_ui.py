@@ -178,6 +178,20 @@ def main():
         bridge.deleteLibraryFile(str(target))
         assert not target.exists() and bridge.library == []
         click("nav0")
+        # Scroll pinning: a backend republish must not throw the user back to the top.
+        bulk = [{"video_id": f"bulk{i}", "title": f"مهمة إضافية {i}", "position": 100 + i,
+                 "url": "https://www.youtube.com/watch?v=bulk"} for i in range(1, 41)]
+        store.add(bulk, config.snapshot())
+        bridge.refresh()
+        QTest.qWait(200)  # let the first repopulation settle
+        jobs_view = find(root.contentItem(), "jobsList")
+        assert jobs_view is not None
+        assert jobs_view.property("contentHeight") > jobs_view.property("height")
+        jobs_view.setProperty("contentY", 260)
+        QTest.qWait(250)  # let the PinList sampler capture the scrolled position
+        bridge.refresh()
+        QTest.qWait(300)
+        assert jobs_view.property("contentY") > 200, jobs_view.property("contentY")
         # Pause controls exercised with no dispatch: stage-specific pause, worker controls, theme persistence.
         bridge.pauseStage("download", True)
         assert "download" in scheduler.manual_paused_stages
@@ -193,6 +207,30 @@ def main():
         bridge.recheckStage("download")
         assert "download" not in scheduler.automatic_stage_blocks
         assert store.get(store.jobs()[0]["id"])["stages"]["download"]["status"] == "pending"
+        # Collapsible navigation rail; collapse state persists through settings.
+        rail = find(root.contentItem(), "navRail")
+        click("railToggle")
+        QTest.qWait(300)
+        assert rail.property("width") < 100, rail.property("width")
+        if len(sys.argv) > 1:
+            evidence_dir = Path(sys.argv[1])
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            root.grabWindow().save(str(evidence_dir / "rail-collapsed.png"))
+        click("nav3")
+        assert root.property("page") == 3
+        click("railToggle")
+        QTest.qWait(300)
+        assert rail.property("width") > 200, rail.property("width")
+        # UI scale round-trips through settings and re-scales the interface.
+        tuned = config.snapshot()
+        tuned["ui_scale"] = 1.2
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
+        QTest.qWait(150)
+        assert abs(root.property("uiScale") - 1.2) < 0.001
+        tuned["ui_scale"] = 1.0
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
+        QTest.qWait(150)
+        assert abs(root.property("uiScale") - 1.0) < 0.001
         for theme in ("light", "dark"):
             data = config.snapshot()
             data["theme"] = theme
@@ -207,6 +245,10 @@ def main():
             root.setProperty("toastText", "")
             evidence = Path(sys.argv[1])
             evidence.mkdir(parents=True, exist_ok=True)
+            scrolled = find(root.contentItem(), "jobsList")
+            if scrolled is not None:
+                scrolled.setProperty("contentY", 0)
+            QTest.qWait(120)
             for index in range(6):
                 click("nav" + str(index))
                 QTest.qWait(80)
@@ -239,7 +281,8 @@ def main():
     failures = [m for m in messages if any(s in m for s in ("Error", "Unable", "Cannot", "ReferenceError", "binding loop"))]
     assert not failures, failures
     print("Native UI passed: 6 pages, range selection, reorder, enqueue, templates, auto-stop toggle, worker toggles, "
-          "provider override, library organise/list/delete, stage pause, themes, 1060x720, no QML errors.")
+          "provider override, library organise/list/delete, stage pause, automatic-block re-check, scroll pinning, "
+          "collapsible rail, UI scale, themes, 1060x720, no QML errors.")
 
 
 if __name__ == "__main__":

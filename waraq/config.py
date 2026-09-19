@@ -120,7 +120,7 @@ def defaults(home: Path):
         "opencode_providers": [],
         "library_root": str(home / "library"),
         "library_auto": True, "library_copy_audio": False,
-        "theme": "dark",
+        "theme": "dark", "ui_scale": 1.0, "ui_rail_collapsed": False,
         "deepgram_workers": default_deepgram_workers(),
         "opencode_workers": default_opencode_workers(),
     }
@@ -235,7 +235,7 @@ class Config:
         for key, label in (("opencode_data_root", "بيانات عمال OpenCode"), ("library_root", "مكتبة الملفات")):
             if not Path(d[key]).is_absolute():
                 raise ValueError(f"اختر مسار {label} مسارًا مطلقًا.")
-        for k in ("library_auto", "library_copy_audio"):
+        for k in ("library_auto", "library_copy_audio", "ui_rail_collapsed"):
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
         for k, low, high in [
@@ -246,6 +246,7 @@ class Config:
             ("audio_bitrate", 32, 192), ("http_timeout", 30, 7200),
             ("max_retries", 1, 6), ("opencode_timeout", 60, 43200),
             ("youtube_cooldown", 60, 86400), ("youtube_retry_attempts", 0, 6),
+            ("ui_scale", 0.8, 1.4),
             ("auto_retry_attempts", 0, 6), ("opencode_limit_retries", 0, 12),
         ]:
             if not isinstance(d[k], (int, float)) or isinstance(d[k], bool):
