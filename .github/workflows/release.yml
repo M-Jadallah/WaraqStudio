@@ -10,6 +10,9 @@ on:
 
 permissions:
   contents: write
+  # Needed by the artifact purge step below; without it the purge is a no-op
+  # and the account's artifact storage stays full.
+  actions: write
 
 defaults:
   run:
@@ -27,10 +30,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
@@ -52,7 +55,26 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Purge stale workflow artifacts
+        # Every build here produces ~370 MB and the account's artifact storage
+        # is small, so leftover artifacts must go or the next upload dies with
+        # "Artifact storage quota has been hit". Deleting is best-effort: the
+        # build must never depend on it succeeding.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cutoff="$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1d +%Y-%m-%dT%H:%M:%SZ)"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+            --jq ".artifacts[] | select(.expired == false and .created_at < \"$cutoff\") | .id" \
+          | while read -r id; do
+              [ -n "$id" ] || continue
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null
+              echo "deleted stale artifact $id"
+            done
+          echo "Artifact purge finished."
 
       - name: Compute version and tag
         run: |
@@ -69,7 +91,7 @@ jobs:
           echo "Building version $VERSION (tag v$VERSION)"
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
@@ -116,15 +138,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem dist
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets-${{ github.ref_name }}
-          path: |
-            dist/*.zip
-            dist/*.exe
-          retention-days: 7
-
       - name: Write release notes
         run: |
           cat > RELEASE_NOTES.md <<EOF
@@ -152,3 +165,21 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "WaraqStudio $TAG" \
             --notes-file RELEASE_NOTES.md
+
+      - name: Upload build as fallback artifact
+        # The release assets above ARE the deliverable, and release storage is
+        # separate from Actions artifact storage. Uploading the same ~370 MB
+        # into artifacts on every run is what exhausted the account quota and
+        # killed the job before the release could be published. This now fires
+        # only when something above failed, so a broken build is still
+        # recoverable from the run page, and it can never fail the job.
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: |
+            dist/*.zip
+            dist/*.exe
+            env-report.json
+          retention-days: 1
