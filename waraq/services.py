@@ -270,6 +270,54 @@ class Youtube:
         shutil.copyfile(source, copy)
         return copy
 
+    def _binary(self):
+        from .youtube_update import binary_path
+        if not self.store:
+            return None
+        path = binary_path(self.store.path.parent)
+        return path if path.is_file() else None
+
+    def _cli_options(self, binary, cfg, cookie_copy):
+        args = [str(binary), "--no-config", "--no-warnings", "--windows-filenames",
+                "--retries", "2", "--fragment-retries", "2", "--extractor-retries", "1",
+                "--socket-timeout", "30", "--sleep-requests", str(cfg["youtube_request_delay"]),
+                "--sleep-interval", str(cfg["youtube_sleep_min"]),
+                "--max-sleep-interval", str(cfg["youtube_sleep_max"])]
+        for name in ("deno", "node", "quickjs"):
+            found = shutil.which(name)
+            if found:
+                args.extend(["--js-runtimes", name + ":" + found])
+        if cfg.get("youtube_client"):
+            args.extend(["--extractor-args", "youtube:player_client=" + cfg["youtube_client"]])
+        if cookie_copy:
+            args.extend(["--cookies", str(cookie_copy)])
+        return args
+
+    def _discover_cli(self, binary, url, cfg, cancel, temp):
+        args = self._cli_options(binary, cfg, self.cookies(cfg, temp))
+        args.extend(["--flat-playlist", "--ignore-errors", "--skip-download", "--dump-single-json", url])
+        output = run_process(args, temp, cancel, 3600)
+        for line in reversed(output.splitlines()):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        raise ServiceError("لم تُرجع أداة YouTube بيانات قابلة للقراءة.")
+
+    def _download_cli(self, binary, job, cfg, cancel, progress, temp, folder):
+        args = self._cli_options(binary, cfg, self.cookies(cfg, temp))
+        args.extend(["--no-playlist", "--format", "bestaudio/best", "--newline",
+                     "--output", str(folder / "source.%(ext)s"), job["url"]])
+        def on_line(line):
+            match = re.search(r"\[download\]\s+([\d.]+)%", line)
+            if match:
+                progress(min(99, float(match.group(1))))
+        run_process(args, temp, cancel, 3600, on_line)
+        candidates = [path for path in folder.glob("source.*") if path.is_file() and path.suffix not in (".part", ".ytdl")]
+        if not candidates:
+            raise ServiceError("لم يُعثر على الملف الصوتي المنزل.")
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+
     def discover(self, url, cfg, cancel, refresh=False):
         import tempfile
         import yt_dlp
@@ -280,12 +328,16 @@ class Youtube:
             return cached
         with self.gate, tempfile.TemporaryDirectory(prefix="waraq-yt-") as temp:
             self.pace(cfg, cancel)
-            opts = self.options(cfg, cancel, self.cookies(cfg, temp))
-            opts.update({"extract_flat": "in_playlist", "skip_download": True,
-                         "ignoreerrors": True, "lazy_playlist": False})
             try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    data = ydl.extract_info(url, download=False)
+                binary = self._binary()
+                if binary:
+                    data = self._discover_cli(binary, url, cfg, cancel, temp)
+                else:
+                    opts = self.options(cfg, cancel, self.cookies(cfg, temp))
+                    opts.update({"extract_flat": "in_playlist", "skip_download": True,
+                                 "ignoreerrors": True, "lazy_playlist": False})
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        data = ydl.extract_info(url, download=False)
                 checkpoint(cancel)
                 if not data:
                     raise ServiceError("تعذر قراءة المصدر.")
@@ -328,14 +380,18 @@ class Youtube:
                 progress(min(99, 100 * d.get("downloaded_bytes", 0) / total))
         with self.gate, tempfile.TemporaryDirectory(prefix="waraq-yt-") as temp:
             self.pace(cfg, cancel)
-            opts = self.options(cfg, cancel, self.cookies(cfg, temp))
-            opts.update({"noplaylist": True, "format": "bestaudio/best",
-                         "outtmpl": str(folder / "source.%(ext)s"),
-                         "progress_hooks": [hook]})
             try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(job["url"], download=True)
-                    source = Path(ydl.prepare_filename(info))
+                binary = self._binary()
+                if binary:
+                    source = self._download_cli(binary, job, cfg, cancel, progress, temp, folder)
+                else:
+                    opts = self.options(cfg, cancel, self.cookies(cfg, temp))
+                    opts.update({"noplaylist": True, "format": "bestaudio/best",
+                                 "outtmpl": str(folder / "source.%(ext)s"),
+                                 "progress_hooks": [hook]})
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(job["url"], download=True)
+                        source = Path(ydl.prepare_filename(info))
                 checkpoint(cancel)
                 self.last_request = time.time()
             except Cancelled:
@@ -377,7 +433,7 @@ class Deepgram:
         params = {"model": worker["model"], "smart_format": "true", "paragraphs": "true", "utterances": "true"}
         params["detect_language" if worker["language"] == "auto" else "language"] = "true" if worker["language"] == "auto" else worker["language"]
         if worker.get("diarize"):
-            params["diarize"] = "true"
+            params["diarize_model"] = "latest"
         with requests.Session() as session:
             for attempt in range(cfg["max_retries"]):
                 checkpoint(cancel)

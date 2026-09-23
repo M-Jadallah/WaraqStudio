@@ -329,8 +329,7 @@ class Scheduler:
         if not live.get("library_auto", True):
             return
         try:
-            job = self.store.get(ident)
-            copied = self.library.publish(job, live) if job else []
+            copied = self.library.publish_current(self.store, ident, live)
             if copied:
                 self.store.event(ident, "نُسخ إلى المكتبة: " + "، ".join(copied))
         except Exception as exc:

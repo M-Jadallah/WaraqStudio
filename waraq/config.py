@@ -79,7 +79,7 @@ def credential_name(stage, worker_id, provider=""):
 
 def default_deepgram_workers(count=5):
     return [{"id": f"dg{i}", "name": f"Deepgram {i:02d}", "enabled": True, "project": f"proj-{i}",
-             "model": "whisper-large", "language": "ar",
+             "model": "nova-3", "language": "ar",
              "endpoint": "https://api.deepgram.com", "diarize": False} for i in range(1, count + 1)]
 
 

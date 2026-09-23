@@ -421,7 +421,7 @@ ApplicationWindow {
                                 AppField { id: urlField; objectName: "urlField"; Layout.fillWidth: true; placeholderText: "https://www.youtube.com/playlist?list=…"; Accessible.name: "رابط YouTube"; onAccepted: if (!backend.busy) backend.discover(text, forceRefresh.checked) }
                             }
                             RowLayout {
-                                AppButton { text: "استيراد صوت أو TXT"; implicitHeight: 32; onClicked: backend.importLocal() }
+                                AppButton { text: "استيراد صوت أو TXT"; implicitHeight: 32; onClicked: backend.importLocal(sourceFolderCombo.currentValue || "") }
                                 AppButton { text: "إلغاء القراءة"; visible: backend.busy; implicitHeight: 32; onClicked: backend.cancelDiscovery() }
                                 Item { Layout.fillWidth: true }
                                 CheckBox { id: forceRefresh; text: "تحديث المعلومات المحفوظة"; palette.windowText: win.muted }
@@ -464,7 +464,14 @@ ApplicationWindow {
                     }
                     RowLayout {
                         Layout.fillWidth: true
-                        AppButton { text: "إضافة إلى الطابور"; primary: true; enabled: backend.hasSourceSelection; onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex], backend.templates.length > 0 ? templateBox.currentValue : ""); win.page = 0 } }
+                        AppButton { text: "مجلد جديد"; onClicked: folderDialog.open() }
+                        ComboBox { id: sourceFolderCombo; objectName: "sourceFolderCombo"; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.preferredWidth: 220; Accessible.name: "مجلد المادة أو الدرس" }
+                        LabelText { text: "مجلد المادة / الدرس" }
+                        Item { Layout.fillWidth: true }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppButton { text: "إضافة إلى الطابور"; primary: true; enabled: backend.hasSourceSelection; onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex], backend.templates.length > 0 ? templateBox.currentValue : "", sourceFolderCombo.currentValue || ""); win.page = 0 } }
                         Item { Layout.fillWidth: true }
                         ComboBox { id: templateBox; objectName: "templateBox"; visible: backend.templates.length > 0; model: backend.templates; textRole: "name"; valueRole: "id"; Layout.preferredWidth: 200; Accessible.name: "قالب البرومبت" }
                         LabelText { text: "قالب البرومبت"; visible: templateBox.visible }
@@ -539,11 +546,17 @@ ApplicationWindow {
                     spacing: 12
                     RowLayout {
                         AppButton { text: "فتح مجلد النتائج"; onClicked: backend.openPath(settings.output_root) }
+                        AppButton { text: "تصدير Word"; onClicked: backend.exportWord() }
                         AppButton { text: "تقرير Excel"; onClicked: backend.exportReport() }
                         Item { Layout.fillWidth: true }
                         LabelText { text: backend.stats.documents + " مستند Word"; font.pixelSize: win.fs(20) }
                     }
-                    AppField { Layout.fillWidth: true; placeholderText: "بحث في عناوين النتائج"; horizontalAlignment: Text.AlignRight; onTextChanged: backend.setResultsQuery(text); Accessible.name: "بحث في النتائج" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppField { Layout.fillWidth: true; placeholderText: "بحث في عناوين النتائج"; horizontalAlignment: Text.AlignRight; onTextChanged: backend.setResultsQuery(text); Accessible.name: "بحث في النتائج" }
+                        ComboBox { model: [{id:"all", name:"كل المجلدات"}].concat(backend.folders); textRole: "name"; valueRole: "id"; Layout.preferredWidth: 180; onActivated: backend.setResultsFolder(currentValue); Accessible.name: "تصفية النتائج حسب المجلد" }
+                        AppButton { text: "مجلد جديد"; onClicked: folderDialog.open() }
+                    }
                     PinList {
                         id: libraryList
                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: win.rs(8)
@@ -560,7 +573,7 @@ ApplicationWindow {
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     LabelText { text: row.title; font.pixelSize: win.fs(14); Layout.fillWidth: true }
-                                    SubText { text: row.document ? "DOCX · تم التحقق من بنية المستند والنص" : "نتائج وسيطة محفوظة"; Layout.fillWidth: true }
+                                    SubText { text: (row.folder_name ? row.folder_name + " · " : "") + (row.document ? "DOCX · تم التحقق من بنية المستند والنص" : "نتائج وسيطة محفوظة"); Layout.fillWidth: true }
                                 }
                             }
                         }
@@ -583,6 +596,7 @@ ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true; spacing: 14
                         AppField { Layout.fillWidth: true; placeholderText: "بحث في أسماء الملفات"; horizontalAlignment: Text.AlignRight; onTextChanged: backend.setFilesQuery(text); Accessible.name: "بحث في الملفات" }
+                        ComboBox { model: [{name:"كل المجلدات", group:"all"}].concat(backend.folders.map(function(f) { return {name: f.name, group: f.id ? f.name : ""} })); textRole: "name"; Layout.preferredWidth: 150; onActivated: backend.setFilesFolder(model[currentIndex].group); Accessible.name: "تصفية الملفات حسب المجلد" }
                         Repeater {
                             model: [{id: "all", label: "الكل"}, {id: "document", label: "Word"}, {id: "transcript", label: "التفريغات"}, {id: "audio", label: "الصوت"}]
                             delegate: CheckBox {
@@ -612,7 +626,7 @@ ApplicationWindow {
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     LabelText { text: row.name; font.pixelSize: win.fs(14); Layout.fillWidth: true }
-                                    SubText { text: win.kindLabel(row.kind) + "  ·  " + win.fileSize(row.size) + "  ·  " + Qt.formatDateTime(new Date(row.modified * 1000), "yyyy-MM-dd HH:mm") }
+                                    SubText { text: (row.group ? row.group + "  ·  " : "") + win.kindLabel(row.kind) + "  ·  " + win.fileSize(row.size) + "  ·  " + Qt.formatDateTime(new Date(row.modified * 1000), "yyyy-MM-dd HH:mm") }
                                 }
                             }
                         }
@@ -685,6 +699,20 @@ ApplicationWindow {
                                             LabelText { text: modelData.label; Layout.preferredWidth: 185 }
                                         }
                                     }
+                                }
+                            }
+                            Box {
+                                Layout.fillWidth: true; implicitHeight: youtubeUpdateColumn.implicitHeight + 32
+                                ColumnLayout {
+                                    id: youtubeUpdateColumn; anchors.fill: parent; anchors.margins: 14; spacing: 8
+                                    LabelText { text: "أداة جلب بيانات YouTube"; font.pixelSize: win.fs(18); Layout.alignment: Qt.AlignRight }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        AppButton { objectName: "youtubeUpdateButton"; text: backend.youtubeUpdating ? "جارٍ التحديث…" : "تحديث yt-dlp"; enabled: !backend.youtubeUpdating; onClicked: backend.updateYoutube() }
+                                        Item { Layout.fillWidth: true }
+                                        SubText { text: "الإصدار المستخدم: " + backend.youtubeVersion }
+                                    }
+                                    SubText { text: "يجلب أحدث إصدار مستقر رسمي ويتحقق من بصمته، ثم يستخدمه التطبيق لقراءة المصادر والتنزيل. يحتاج إلى اتصال إنترنت."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                                 }
                             }
                             Box {
@@ -823,11 +851,23 @@ ApplicationWindow {
     }
 
     Dialog {
+        id: folderDialog
+        anchors.centerIn: parent; width: 460; modal: true; title: "مجلد مادة أو درس"
+        standardButtons: Dialog.Save | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Save).text = "إنشاء"; standardButton(Dialog.Cancel).text = "إلغاء"; folderName.forceActiveFocus() }
+        contentItem: ColumnLayout {
+            spacing: 10
+            SubText { text: "اجمع مواضيع المادة أو الدرس في مجلد واحد. سيظهر التنظيم في المكتبة وفي تصدير Word."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+            AppField { id: folderName; Layout.fillWidth: true; placeholderText: "اسم المادة أو الدرس"; Accessible.name: "اسم المجلد الجديد" }
+        }
+        onAccepted: { var ident = backend.createFolder(folderName.text); if (ident) { var items = backend.folders; for (var i=0; i<items.length; i++) if (items[i].id === ident) sourceFolderCombo.currentIndex = i; folderName.text = "" } }
+    }
+    Dialog {
         id: jobDialog
         anchors.centerIn: parent; width: Math.min(900, win.width - 80); height: 610; modal: true
         title: "تفاصيل المهمة"
         standardButtons: Dialog.Close
-        onOpened: standardButton(Dialog.Close).text = "إغلاق"
+        onOpened: { standardButton(Dialog.Close).text = "إغلاق"; jobFolderCombo.currentIndex = Math.max(0, backend.folders.findIndex(function(f) { return f.id === selectedJob.folder_id })) }
         background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
         contentItem: ColumnLayout {
             spacing: 14
@@ -835,6 +875,12 @@ ApplicationWindow {
             SubText { text: (selectedJob.statusLabel || "") + "  ·  " + (selectedJob.stageLabel || ""); Layout.fillWidth: true }
             SubText { text: selectedJob.retryAt ? "أُعيدت الجدولة تلقائيًا — المحاولة القادمة " + selectedJob.retryAt : ""; visible: !!selectedJob.retryAt; color: win.dark ? "#87b7ff" : "#215cc4"; Layout.fillWidth: true }
             SubText { text: selectedJob.template ? "قالب البرومبت: " + selectedJob.template : ""; visible: !!selectedJob.template; Layout.fillWidth: true }
+            RowLayout {
+                Layout.fillWidth: true
+                ComboBox { id: jobFolderCombo; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.preferredWidth: 240; onActivated: { backend.assignJobFolder(selectedJob.id, currentValue || ""); selectedJob = backend.jobById(selectedJob.id) } }
+                LabelText { text: "مجلد المادة / الدرس" }
+                Item { Layout.fillWidth: true }
+            }
             SubText { text: selectedJob.error || ""; visible: !!selectedJob.error; color: win.dark ? "#ffbc88" : "#98450b"; wrapMode: Text.WordWrap; Layout.fillWidth: true }
             ProgressBar { Layout.fillWidth: true; from: 0; to: 100; value: selectedJob.progress || 0; indeterminate: selectedJob.status === "running" && selectedJob.progress < 0; visible: selectedJob.status === "running" }
             RowLayout {

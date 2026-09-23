@@ -55,7 +55,12 @@ def main():
         for index in range(6):
             click("nav" + str(index))
             assert root.property("page") == index
+            if index == 5:
+                assert find(root.contentItem(), "youtubeUpdateButton") is not None
         click("nav1")
+        assert find(root.contentItem(), "sourceFolderCombo") is not None
+        assert bridge.createFolder("مادة اختبار")
+        assert any(folder["name"] == "مادة اختبار" for folder in bridge.folders)
         bridge._accept_source(json.dumps({"title": "قائمة اختبار", "items": [
             {"video_id": f"id{i}", "position": i, "title": f"درس تجريبي {i}", "url": "https://www.youtube.com/watch?v=test",
              "duration": 60, "available": True, "selected": True} for i in range(1, 5)
@@ -187,6 +192,9 @@ def main():
         QTest.qWait(200)  # let the initial population settle
         jobs_view = find(root.contentItem(), "jobsList")
         assert jobs_view is not None
+        deadline = time.time() + 2
+        while jobs_view.property("contentHeight") <= jobs_view.property("height") and time.time() < deadline:
+            QTest.qWait(50)
         assert jobs_view.property("contentHeight") > jobs_view.property("height")
         jobs_view.setProperty("contentY", 260)
         QTest.qWait(150)

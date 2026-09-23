@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -14,6 +15,7 @@ STAGES = ("download", "deepgram", "opencode")
 class Store:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
         self.lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -40,6 +42,8 @@ class Store:
             );
             CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, created REAL);
             CREATE TABLE IF NOT EXISTS runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+              created REAL NOT NULL);
         ''')
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}
         if "queue_order" not in columns:
@@ -49,6 +53,8 @@ class Store:
             self.db.execute("ALTER TABLE jobs ADD COLUMN seq INTEGER DEFAULT 0")
             # rowid equals insertion order; timestamps can tie on coarse Windows timers.
             self.db.execute("UPDATE jobs SET seq=rowid")
+        if "folder_id" not in columns:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN folder_id TEXT DEFAULT ''")
         stage_columns = {r[1] for r in self.db.execute("PRAGMA table_info(stages)")}
         if "retries" not in stage_columns:
             self.db.execute("ALTER TABLE stages ADD COLUMN retries INTEGER DEFAULT 0")
@@ -72,7 +78,40 @@ class Store:
                             (keep_events,))
             self.db.execute("DELETE FROM cache WHERE created < ?", (time.time() - 86400,))
 
-    def add(self, items, config, batch="", input_path=""):
+    def folders(self):
+        with self.lock:
+            return [dict(row) for row in self.db.execute("SELECT id,name FROM folders ORDER BY name COLLATE NOCASE")]
+
+    def create_folder(self, name):
+        name = str(name).strip()
+        if not 1 <= len(name) <= 80 or name in (".", "..") or re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or name.endswith((".", " ")):
+            raise ValueError("اسم المجلد يجب أن يكون بين 1 و80 محرفًا دون رموز المسارات.")
+        if name.casefold() in ("word", "التفريغات", "الصوت") or name.upper().split(".")[0] in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+            raise ValueError("هذا الاسم محجوز في Windows.")
+        ident = uuid.uuid4().hex[:12]
+        with self.lock:
+            try:
+                self.db.execute("INSERT INTO folders VALUES(?,?,?)", (ident, name, time.time()))
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("يوجد مجلد بهذا الاسم.") from exc
+        return ident
+
+    def folder_name(self, ident):
+        if not ident:
+            return ""
+        with self.lock:
+            row = self.db.execute("SELECT name FROM folders WHERE id=?", (ident,)).fetchone()
+            if not row:
+                raise ValueError("المجلد المحدد غير موجود.")
+            return row["name"]
+
+    def assign_folder(self, job_id, folder_id):
+        with self.lock:
+            self.folder_name(folder_id)
+            if self.db.execute("UPDATE jobs SET folder_id=? WHERE id=?", (folder_id, job_id)).rowcount != 1:
+                raise ValueError("المهمة غير موجودة.")
+
+    def add(self, items, config, batch="", input_path="", folder_id=""):
         if not any(config[s + "_enabled"] for s in STAGES):
             raise ValueError("فعّل مرحلة واحدة على الأقل.")
         if not input_path:
@@ -83,6 +122,7 @@ class Store:
         added = []
         batch = batch or uuid.uuid4().hex[:8]
         with self.lock:
+            self.folder_name(folder_id)
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 base = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM jobs").fetchone()[0]
@@ -91,11 +131,11 @@ class Store:
                         continue
                     ident = uuid.uuid4().hex[:12]
                     folder = str(Path(config["output_root"]) / ident)
-                    self.db.execute("INSERT INTO jobs(id,video_id,title,url,position,batch,config,folder,created,input_path,duration,queue_order,seq) "
-                                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    self.db.execute("INSERT INTO jobs(id,video_id,title,url,position,batch,config,folder,created,input_path,duration,queue_order,seq,folder_id) "
+                                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                     (ident, item["video_id"], item["title"], item.get("url", ""), item["position"],
                                      batch, json.dumps(config, ensure_ascii=False), folder, time.time(), input_path,
-                                     item.get("duration") or 0, queue_order, base + queue_order))
+                                     item.get("duration") or 0, queue_order, base + queue_order, folder_id))
                     local_txt = input_path.lower().endswith(".txt")
                     for stage in STAGES:
                         skip = not config[stage + "_enabled"] or (input_path and stage == "download") or (local_txt and stage == "deepgram")
@@ -113,7 +153,7 @@ class Store:
 
     def jobs(self):
         with self.lock:
-            rows = [dict(r) for r in self.db.execute("SELECT * FROM jobs ORDER BY seq")]
+            rows = [dict(r) for r in self.db.execute("SELECT jobs.*,COALESCE(folders.name,'') AS folder_name FROM jobs LEFT JOIN folders ON folders.id=jobs.folder_id ORDER BY jobs.seq")]
             # One pass over all stages instead of a query per job; the queue is
             # rescanned several times per second by the UI timer and scheduler.
             stages = {}
@@ -126,7 +166,7 @@ class Store:
 
     def get(self, ident):
         with self.lock:
-            row = self.db.execute("SELECT * FROM jobs WHERE id=?", (ident,)).fetchone()
+            row = self.db.execute("SELECT jobs.*,COALESCE(folders.name,'') AS folder_name FROM jobs LEFT JOIN folders ON folders.id=jobs.folder_id WHERE jobs.id=?", (ident,)).fetchone()
             if row is None:
                 return None
             job = dict(row)

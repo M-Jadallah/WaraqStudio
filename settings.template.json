@@ -36,11 +36,11 @@
   "ui_scale": 1.0,
   "ui_rail_collapsed": false,
   "deepgram_workers": [
-    {"id": "dg1", "name": "Deepgram 01", "enabled": true, "project": "proj-1", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
-    {"id": "dg2", "name": "Deepgram 02", "enabled": true, "project": "proj-2", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
-    {"id": "dg3", "name": "Deepgram 03", "enabled": true, "project": "proj-3", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
-    {"id": "dg4", "name": "Deepgram 04", "enabled": true, "project": "proj-4", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
-    {"id": "dg5", "name": "Deepgram 05", "enabled": true, "project": "proj-5", "model": "whisper-large", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false}
+    {"id": "dg1", "name": "Deepgram 01", "enabled": true, "project": "proj-1", "model": "nova-3", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
+    {"id": "dg2", "name": "Deepgram 02", "enabled": true, "project": "proj-2", "model": "nova-3", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
+    {"id": "dg3", "name": "Deepgram 03", "enabled": true, "project": "proj-3", "model": "nova-3", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
+    {"id": "dg4", "name": "Deepgram 04", "enabled": true, "project": "proj-4", "model": "nova-3", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false},
+    {"id": "dg5", "name": "Deepgram 05", "enabled": true, "project": "proj-5", "model": "nova-3", "language": "ar", "endpoint": "https://api.deepgram.com", "diarize": false}
   ],
   "opencode_workers": [
     {"id": "oc1", "name": "OpenCode 01", "enabled": true, "provider": "login", "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"},

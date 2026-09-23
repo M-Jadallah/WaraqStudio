@@ -30,6 +30,8 @@ class Bridge(QObject):
     backgroundError = Signal(str)
     autoStopReached = Signal()
     libraryChanged = Signal()
+    foldersChanged = Signal()
+    youtubeVersionChanged = Signal()
 
     def __init__(self, store, config, secrets, scheduler):
         super().__init__()
@@ -43,6 +45,7 @@ class Bridge(QObject):
         self._auto_stop_fired = False
         self._library = []
         self._library_busy = False
+        self._youtube_updating = False
         # QML ListViews bind to these instead of the QVariantList properties:
         # rows are updated in place (dataChanged) so scroll position survives
         # every refresh tick, unlike a republished JS array which resets the view.
@@ -55,6 +58,8 @@ class Bridge(QObject):
         self._results_query = ""
         self._files_query = ""
         self._files_kind = "all"
+        self._results_folder = "all"
+        self._files_folder = "all"
         # refreshLibrary() may run on a worker thread (after organizing); the
         # queued connection applies the scan result to the model on the GUI thread.
         self.libraryChanged.connect(self._publish_files)
@@ -139,8 +144,77 @@ class Bridge(QObject):
     @Property("QVariantList", notify=libraryChanged)
     def library(self): return self._library
 
+    @Property("QVariantList", notify=foldersChanged)
+    def folders(self):
+        return [{"id": "", "name": "بدون مجلد"}] + self.store.folders()
+
+    @Slot(str, result=str)
+    def createFolder(self, name):
+        try:
+            ident = self.store.create_folder(name)
+            self.foldersChanged.emit()
+            self.notice.emit("أُنشئ المجلد «" + name.strip() + "».", False)
+            return ident
+        except Exception as exc:
+            self.notice.emit(str(exc), True)
+            return ""
+
+    @Slot(str, str)
+    def assignJobFolder(self, job_id, folder_id):
+        try:
+            self.store.assign_folder(job_id, folder_id)
+            self.refresh()
+            def work():
+                try:
+                    self.scheduler.library.publish_current(self.store, job_id, self.config.snapshot())
+                    self.notice.emit("حُدّث مجلد المهمة ونسختها في المكتبة.", False)
+                except Exception as exc:
+                    self.notice.emit("حُفظ تصنيف المهمة، وتعذر تحديث نسخة المكتبة: " + str(exc), True)
+                finally:
+                    self.refreshLibrary()
+            threading.Thread(target=work, daemon=True, name="folder-assignment").start()
+        except Exception as exc:
+            self.notice.emit(str(exc), True)
+
     @Property(bool, notify=libraryChanged)
     def libraryBusy(self): return self._library_busy
+
+    @Property(bool, notify=youtubeVersionChanged)
+    def youtubeUpdating(self): return self._youtube_updating
+
+    @Property(str, notify=youtubeVersionChanged)
+    def youtubeVersion(self):
+        from .youtube_update import binary_version
+        try:
+            active = binary_version(self.config.home)
+            if active:
+                return active + " (محدّثة)"
+        except Exception:
+            pass
+        import yt_dlp
+        return yt_dlp.version.__version__ + " (مدمجة)"
+
+    @Slot()
+    def updateYoutube(self):
+        if self._youtube_updating:
+            return
+        if not self.scheduler.idle() or self._busy:
+            self.notice.emit("انتظر اكتمال قراءة المصدر أو تنزيله قبل تحديث أداة YouTube.", True)
+            return
+        self._youtube_updating = True
+        self.youtubeVersionChanged.emit()
+        def work():
+            try:
+                from .youtube_update import update
+                with self.scheduler.youtube.gate:
+                    version = update(self.config.home)
+                self.notice.emit("اكتمل تحديث yt-dlp إلى " + version + " وسيُستخدم في الطلبات التالية.", False)
+            except Exception as exc:
+                self.notice.emit("فشل تحديث yt-dlp: " + str(exc), True)
+            finally:
+                self._youtube_updating = False
+                self.youtubeVersionChanged.emit()
+        threading.Thread(target=work, daemon=True, name="youtube-update").start()
 
     @Property("QVariantMap", notify=changed)
     def stats(self):
@@ -205,7 +279,8 @@ class Bridge(QObject):
         query = self._results_query.lower()
         rows = [j for j in self._jobs
                 if (j["document"] or j["transcript"] or j["audio"])
-                and (not query or query in str(j["title"]).lower())]
+                and (not query or query in str(j["title"]).lower())
+                and (self._results_folder == "all" or j.get("folder_id", "") == self._results_folder)]
         self._results_model.update_items(rows)
 
     @Slot(str)
@@ -216,11 +291,17 @@ class Bridge(QObject):
         self._results_query = text
         self._publish_results()
 
+    @Slot(str)
+    def setResultsFolder(self, ident):
+        self._results_folder = ident
+        self._publish_results()
+
     def _publish_files(self):
         query = self._files_query.lower()
         rows = [f for f in self._library
                 if (self._files_kind == "all" or f["kind"] == self._files_kind)
-                and (not query or query in str(f["name"]).lower())]
+                and (not query or query in str(f["name"]).lower())
+                and (self._files_folder == "all" or f["group"] == self._files_folder)]
         self._files_model.update_items(rows)
 
     @Slot(str)
@@ -237,6 +318,11 @@ class Bridge(QObject):
         if kind == self._files_kind:
             return
         self._files_kind = kind
+        self._publish_files()
+
+    @Slot(str)
+    def setFilesFolder(self, name):
+        self._files_folder = name
         self._publish_files()
 
     def _provider_rows(self):
@@ -322,7 +408,8 @@ class Bridge(QObject):
             self.sourceChanged.emit()
 
     @Slot(str, str)
-    def enqueue(self, preset, template_id=""):
+    @Slot(str, str, str)
+    def enqueue(self, preset, template_id="", folder_id=""):
         try:
             cfg = self.config.snapshot()
             if preset != "custom":
@@ -337,14 +424,15 @@ class Bridge(QObject):
             if not selected:
                 raise ValueError("حدد فيديو واحدًا على الأقل.")
             # Preserve original lesson numbers; Store saves the visual queue order separately.
-            added = self.store.add(selected, cfg)
+            added = self.store.add(selected, cfg, folder_id=folder_id)
             self.notice.emit(f"أضيفت {len(added)} مهمة. اضغط تشغيل لبدء المعالجة.", False)
             self.refresh()
         except Exception as exc:
             self.notice.emit(str(exc), True)
 
     @Slot()
-    def importLocal(self):
+    @Slot(str)
+    def importLocal(self, folder_id=""):
         paths, _ = QFileDialog.getOpenFileNames(None, "استيراد صوت أو تفريغ", "", "Media (*.mp3 *.wav *.m4a *.flac *.ogg *.txt)")
         added = 0
         for name in paths:
@@ -366,7 +454,7 @@ class Bridge(QObject):
             cfg["opencode_enabled"] = True
             try:
                 self.store.add([{"video_id": "local-" + path.stem, "title": path.stem, "position": 1,
-                                 "url": "", "available": True}], cfg, input_path=str(path))
+                                 "url": "", "available": True}], cfg, input_path=str(path), folder_id=folder_id)
             except Exception as exc:
                 self.notice.emit(f"تعذر استيراد «{path.name}»: {exc}", True)
                 continue
@@ -592,7 +680,7 @@ class Bridge(QObject):
         self.libraryChanged.emit()
         def work():
             try:
-                copied = self.scheduler.library.organize_all(self.store.jobs(), self.config.snapshot())
+                copied = self.scheduler.library.organize_current(self.store, self.config.snapshot())
                 self.notice.emit(f"نُظّم {copied} ملفًا في المكتبة.", False)
             except Exception as exc:
                 self.notice.emit("تعذر التنظيم: " + str(exc), True)
@@ -600,6 +688,24 @@ class Bridge(QObject):
                 self._library_busy = False
                 self.refreshLibrary()
         threading.Thread(target=work, daemon=True, name="library").start()
+
+    @Slot()
+    def exportWord(self):
+        destination = QFileDialog.getExistingDirectory(None, "تصدير ملفات Word إلى مجلد", "")
+        if not destination or self._library_busy:
+            return
+        self._library_busy = True
+        self.libraryChanged.emit()
+        def work():
+            try:
+                count = self.scheduler.library.export_documents(self.store.jobs(), self.config.snapshot(), destination)
+                self.notice.emit(f"صُدّر {count} مستند Word إلى {destination} وفق مجلدات المواد والدروس.", False)
+            except Exception as exc:
+                self.notice.emit("تعذر تصدير Word: " + str(exc), True)
+            finally:
+                self._library_busy = False
+                self.libraryChanged.emit()
+        threading.Thread(target=work, daemon=True, name="word-export").start()
 
     @Slot(str)
     def deleteLibraryFile(self, path):

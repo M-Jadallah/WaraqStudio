@@ -937,6 +937,112 @@ def test_library_remove_stays_inside_the_library(tmp_path):
     assert not inside.exists() and outside.is_file()
 
 
+def test_subject_folders_follow_jobs_library_and_word_export(env, tmp_path):
+    store, cfg = env
+    subject = store.create_folder("الفقه")
+    with pytest.raises(ValueError):
+        store.create_folder("الفقه")
+    with pytest.raises(ValueError):
+        store.create_folder("../خارج")
+    with pytest.raises(ValueError):
+        store.add(items(), cfg.snapshot(), folder_id="unknown")
+    ident = store.add(items(), cfg.snapshot(), folder_id=subject)[0]
+    job = store.get(ident)
+    assert job["folder_name"] == "الفقه" and job["folder_id"] == subject
+    source = make_docx(tmp_path / "original.docx")
+    store.artifact(ident, "document", source)
+    job = store.get(ident)
+    library = Library()
+    assert library.publish(job, cfg.data) == ["001-درس 1.docx"]
+    grouped = tmp_path / "library" / "الفقه" / "Word" / "001-درس 1.docx"
+    assert grouped.is_file()
+    destination = tmp_path / "export"
+    destination.mkdir()
+    assert library.export_documents(store.jobs(), cfg.data, destination) == 1
+    exported = list((destination / "الفقه" / "Word").glob("*.docx"))
+    assert len(exported) == 1 and exported[0].read_bytes() == source.read_bytes()
+    assert library.export_documents(store.jobs(), cfg.data, destination) == 1
+    assert list((destination / "الفقه" / "Word").glob("*.docx")) == exported
+    store.assign_folder(ident, "")
+    assert library.publish(store.get(ident), cfg.data) == ["001-درس 1.docx"]
+    assert not grouped.exists() and (tmp_path / "library" / "Word" / grouped.name).is_file()
+
+
+def test_library_legacy_manifest_moves_to_subject(tmp_path):
+    cfg = Config(tmp_path)
+    source = make_docx(tmp_path / "original.docx")
+    job = {"id": "old", "position": 1, "title": "عنوان", "document": str(source)}
+    library = Library()
+    library.publish(job, cfg.data)
+    root = tmp_path / "library"
+    manifest = root / ".waraq-library.json"
+    manifest.write_text(json.dumps({"old|document": "001-عنوان.docx"}), encoding="utf-8")
+    job["folder_name"] = "اللغة"
+    assert library.publish(job, cfg.data) == ["001-عنوان.docx"]
+    assert not (root / "Word" / "001-عنوان.docx").exists()
+    assert (root / "اللغة" / "Word" / "001-عنوان.docx").is_file()
+    assert library.publish(job, cfg.data) == []
+
+
+def test_deepgram_uses_current_nova_diarization_parameter(monkeypatch, tmp_path):
+    import requests
+    captured = {}
+    def fake_post(self, url, **kwargs):
+        captured.update(kwargs)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"results":{"channels":[{"alternatives":[{"transcript":"ok"}]}]}}'
+        return response
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"audio")
+    cfg = defaults(tmp_path)
+    assert cfg["deepgram_workers"][0]["model"] == "nova-3"
+    worker = dict(cfg["deepgram_workers"][0], diarize=True)
+    Deepgram().request(audio, worker, cfg, "test", threading.Event(), tmp_path / "raw.json")
+    assert captured["params"]["diarize_model"] == "latest"
+    assert "diarize" not in captured["params"]
+
+
+def test_updated_youtube_binary_is_used_for_discovery(monkeypatch, env, tmp_path):
+    import waraq.services as services
+    from waraq.youtube_update import binary_path
+    store, cfg = env
+    binary = binary_path(tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"fake executable")
+    commands = []
+    def fake_process(command, cwd, cancel, timeout, log=lambda line: None, env=None):
+        commands.append(command)
+        return json.dumps({"title": "مادة", "entries": [{"id": "one", "title": "موضوع", "playlist_index": 2}]})
+    monkeypatch.setattr(services, "run_process", fake_process)
+    result = Youtube(store).discover("https://www.youtube.com/watch?v=one", cfg.data, threading.Event())
+    assert result["items"][0]["title"] == "موضوع"
+    assert result["items"][0]["position"] == 2
+    assert commands[0][0] == str(binary)
+    assert "--no-config" in commands[0] and "--dump-single-json" in commands[0]
+
+
+def test_existing_jobs_migrate_to_uncategorized_without_loss(tmp_path):
+    import sqlite3
+    path = tmp_path / "legacy.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, video_id TEXT, title TEXT, url TEXT, position INTEGER, "
+               "batch TEXT, config TEXT, folder TEXT, created REAL, audio TEXT DEFAULT '', transcript TEXT DEFAULT '', "
+               "document TEXT DEFAULT '', input_path TEXT DEFAULT '', duration REAL DEFAULT 0, queue_order INTEGER DEFAULT 0, seq INTEGER DEFAULT 0)")
+    db.execute("INSERT INTO jobs(id,video_id,title,url,position,batch,config,folder,created,seq) "
+               "VALUES('old','video','درس سابق','',1,'',?, '',0,1)", (json.dumps(defaults(tmp_path)),))
+    db.commit()
+    db.close()
+    store = Store(path)
+    try:
+        job = store.get("old")
+        assert job["title"] == "درس سابق"
+        assert job["folder_id"] == "" and job["folder_name"] == ""
+    finally:
+        store.db.close()
+
+
 @pytest.mark.parametrize("message,kind", [
     ("HTTP Error 429: Too Many Requests", "rate_limited"),
     ("unable to download video data: HTTP Error 500", "failed"),
