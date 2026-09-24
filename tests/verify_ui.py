@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QObject, QPoint, QUrl, qInstallMessageHandler, QMetaObject, Q_ARG
+from PySide6.QtCore import QObject, QPoint, QPointF, QUrl, qInstallMessageHandler, QMetaObject, Q_ARG
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -15,6 +15,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 
+import waraq.bridge as bridge_module
 from waraq.bridge import Bridge
 from waraq.config import Config
 from waraq.scheduler import Scheduler
@@ -30,6 +31,13 @@ def main():
         home = Path(temp)
         store, config = Store(home / "test.db"), Config(home)
         keys = type("Keys", (), {"get": lambda s, w: "", "set": lambda s,w,v: None})()
+        bridge_module.deepgram_models = lambda: [
+            {"id": "nova-3-general", "languages": ["ar", "ar-JO", "en"]},
+            {"id": "whisper-large", "languages": ["ar", "en"]},
+        ]
+        bridge_module.opencode_models = lambda executable, context="": [
+            "openai/gpt-6-astra", "openai/gpt-6-sol", "opencode/big-pickle"
+        ]
         scheduler = Scheduler(store, config, keys)
         bridge = Bridge(store, config, keys, scheduler)
         engine = QQmlApplicationEngine()
@@ -46,6 +54,22 @@ def main():
                 if result is not None:
                     return result
             return None
+        def find_all(item, name):
+            matches = [item] if item.objectName() == name else []
+            for child in item.childItems():
+                matches.extend(find_all(child, name))
+            return matches
+        def assert_worker_rows_fit():
+            cards = find_all(root.contentItem(), "workerCard")
+            assert cards, "worker cards did not render"
+            for card in cards:
+                content = find(card, "workerContent")
+                assert content is not None
+                for name in ("workerStatus", "workerDetails", "workerError"):
+                    label = find(card, name)
+                    if label is not None and label.isVisible():
+                        bottom = content.property("y") + label.property("y") + label.property("height")
+                        assert bottom <= card.property("height") + 1, (name, bottom, card.property("height"))
         def click(name):
             item = find(root.contentItem(), name)
             assert item is not None, name
@@ -119,6 +143,35 @@ def main():
         assert [w["id"] for w in scheduler.workers() if w["stage"] == "opencode"] == ["oc1", "oc2", "oc3", "oc4", "oc5"]
         oc1 = [w for w in scheduler.workers() if w["id"] == "oc1"][0]
         assert oc1["provider"] == "login" and oc1["modelResolved"] == "openai/gpt-6-astra"
+        # Model selectors load asynchronously, retain saved values and persist choices.
+        QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", config.data["deepgram_workers"][0]), Q_ARG("QVariant", "deepgram"))
+        QTest.qWait(150)
+        assert [item["id"] for item in bridge.deepgramModels] == ["nova-3-general", "whisper-large"]
+        model_box = find(root.contentItem(), "workerModelBox")
+        language_box = find(root.contentItem(), "workerLanguageBox")
+        worker_dialog = find(root.contentItem(), "workerDialog")
+        assert model_box.property("count") >= 2 and language_box.property("count") >= 3
+        assert model_box.property("editText") == "nova-3"
+        p = model_box.mapToScene(QPointF(model_box.width() - 16, model_box.height() / 2))
+        QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(p.x()), int(p.y())))
+        QTest.qWait(60)
+        assert model_box.property("down"), "model dropdown did not open"
+        QTest.keyClick(root, Qt.Key_Escape)
+        model_box.setProperty("editText", "whisper-large")
+        QTest.qWait(70)
+        assert model_box.property("editText") == "whisper-large", model_box.property("editText")
+        assert language_box.property("count") >= 3
+        language_box.setProperty("currentIndex", 2)
+        click("workerSaveButton")
+        assert config.data["deepgram_workers"][0]["model"] == "whisper-large", (config.data["deepgram_workers"][0], messages[-5:])
+        assert config.data["deepgram_workers"][0]["language"] == "en"
+        QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", config.data["opencode_workers"][0]), Q_ARG("QVariant", "opencode"))
+        QTest.qWait(100)
+        model_box = find(root.contentItem(), "workerModelBox")
+        assert model_box.property("count") >= 3
+        model_box.setProperty("editText", "openai/gpt-6-sol")
+        click("workerSaveButton")
+        assert config.data["opencode_workers"][0]["model"] == "openai/gpt-6-sol"
         bridge.setWorkerEnabled("oc3", False)
         assert not [w for w in scheduler.workers() if w["id"] == "oc3"][0]["enabled"]
         bridge.setWorkerEnabled("oc3", True)
@@ -158,6 +211,7 @@ def main():
         assert scheduler.running, "the forced-start button must start the queue"
         # The dialog prefilled from the first worker, so that is what got forced.
         assert scheduler.provider_override == "login" and scheduler.provider_override_variant == "high"
+        assert scheduler.provider_override_model == "openai/gpt-6-sol"
         click("runButton")
         assert not scheduler.running
         bridge.setProviderOverride("", "", "")
@@ -212,11 +266,14 @@ def main():
         bridge.pauseStage("download", False)
         # An automatic download block shows on the worker row and a re-check
         # lifts it and requeues the parked job.
-        scheduler.block_stage("download", "YouTube رفض الوصول.")
-        store.set_stage(store.jobs()[0]["id"], "download", "blocked", "YouTube رفض الوصول.")
+        block_reason = "YouTube رفض الوصول. تحقّق من الاتصال وإعدادات الخدمة قبل إعادة الفحص."
+        scheduler.block_stage("download", block_reason)
+        store.set_stage(store.jobs()[0]["id"], "download", "blocked", block_reason)
         bridge.refresh()
         download_worker = next(w for w in bridge.workers if w["stage"] == "download")
         assert download_worker["autoBlocked"] and download_worker["error"]
+        click("nav2")
+        assert_worker_rows_fit()
         bridge.recheckStage("download")
         assert "download" not in scheduler.automatic_stage_blocks
         assert store.get(store.jobs()[0]["id"])["stages"]["download"]["status"] == "pending"
@@ -244,6 +301,22 @@ def main():
         assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
         QTest.qWait(150)
         assert abs(root.property("uiScale") - 1.0) < 0.001
+        # Compact cards must still contain every text line at minimum window
+        # width and maximum supported text scale.
+        root.setWidth(1060)
+        root.setHeight(720)
+        tuned["ui_scale"] = 1.4
+        tuned["ui_compact"] = True
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
+        click("nav2")
+        QTest.qWait(150)
+        assert_worker_rows_fit()
+        if len(sys.argv) > 1:
+            root.setProperty("toastText", "")
+            QTest.qWait(60)
+            root.grabWindow().save(str(Path(sys.argv[1]) / "workers-compact-140.png"))
+        tuned["ui_scale"] = 1.0
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
         for theme in ("light", "dark"):
             data = config.snapshot()
             data["theme"] = theme
@@ -270,6 +343,12 @@ def main():
             QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", config.data["deepgram_workers"][0]), Q_ARG("QVariant", "deepgram"))
             QTest.qWait(100)
             root.grabWindow().save(str(evidence / "worker-dialog.png"))
+            picker = find(root.contentItem(), "workerModelBox")
+            p = picker.mapToScene(QPointF(picker.width() - 16, picker.height() / 2))
+            QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(p.x()), int(p.y())))
+            QTest.qWait(80)
+            root.grabWindow().save(str(evidence / "worker-model-options.png"))
+            QTest.keyClick(root, Qt.Key_Escape)
             QTest.keyClick(root, Qt.Key_Escape)
             QTest.qWait(80)
             QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", config.data["opencode_workers"][0]), Q_ARG("QVariant", "opencode"))

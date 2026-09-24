@@ -40,6 +40,7 @@ ApplicationWindow {
     // List density: rows, paddings and gaps shrink together; fonts stay on fs().
     readonly property real density: settings.ui_compact === true ? 0.72 : 1.0
     property bool railOpen: settings.ui_rail_collapsed !== true
+    readonly property bool narrowHeader: width - navRail.width < 960 * uiScale
     function fs(n) { return Math.max(9, Math.round(n * uiScale)) }
     function rh(n) { return Math.max(20, Math.round(n * uiScale * density)) }
     function rs(n) { return Math.max(2, Math.round(n * density)) }
@@ -94,13 +95,14 @@ ApplicationWindow {
         var provider = lastForce.provider || (settings.opencode_workers[0] ? (settings.opencode_workers[0].provider || "login") : "login")
         forceProvider.currentIndex = Math.max(0, ids.indexOf(provider))
         var source = settings.opencode_workers.find(function(w) { return (w.provider || "login") === provider }) || settings.opencode_workers[0] || {}
-        forceModel.text = lastForce.provider ? lastForce.model : (source.model || "")
+        forceDialog.modelDraft = lastForce.provider ? lastForce.model : (source.model || "")
+        forceModel.editText = forceDialog.modelDraft
         forceVariant.text = lastForce.provider ? lastForce.variant : (source.variant || "")
         forceDialog.open()
     }
     function applyForce(force, start) {
         var provider = force ? (forceProvider.currentValue || "") : ""
-        lastForce = force ? {provider: provider, model: forceModel.text, variant: forceVariant.text}
+        lastForce = force ? {provider: provider, model: forceModel.editText.trim(), variant: forceVariant.text}
                           : {provider: "", model: "", variant: ""}
         backend.setProviderOverride(lastForce.provider, lastForce.model, lastForce.variant)
         forceDialog.close()
@@ -117,10 +119,42 @@ ApplicationWindow {
         if (bytes >= 1024) return Math.round(bytes / 1024) + " ك.ب"
         return bytes + " بايت"
     }
+    function opencodeModelOptions(provider, saved) {
+        var options = backend.opencodeModels.filter(function(id) {
+            return !provider || provider === "login" || id.indexOf(provider + "/") === 0
+        })
+        if (saved && options.indexOf(saved) < 0) options.unshift(saved)
+        return options
+    }
+    function deepgramModelOptions(saved) {
+        var options = backend.deepgramModels.map(function(item) { return item.id })
+        if (saved && options.indexOf(saved) < 0) options.unshift(saved)
+        return options
+    }
+    function deepgramLanguageOptions(model, saved) {
+        var aliases = {"nova-3": "nova-3-general", "nova-2": "nova-2-general", "nova": "nova-general"}
+        var canonical = aliases[model] || model
+        var entry = backend.deepgramModels.find(function(item) { return item.id === canonical })
+        var codes = ["auto"].concat(entry ? entry.languages : [])
+        if (saved && codes.indexOf(saved) < 0) codes.push(saved)
+        return codes.map(function(code) {
+            var labels = {"auto": "تحديد تلقائي", "ar": "العربية", "en": "الإنجليزية", "multi": "متعدد اللغات"}
+            return {id: code, name: (labels[code] || code) + (labels[code] ? " (" + code + ")" : "")}
+        })
+    }
+    function selectWorkerLanguage() {
+        var choices = workerLanguage.model
+        var index = choices.findIndex(function(item) { return item.id === workerDialog.languageDraft })
+        workerLanguage.currentIndex = index < 0 ? 0 : index
+        workerDialog.languageDraft = workerLanguage.currentValue || "auto"
+    }
     function fillWorkerFields() {
         workerName.text = editingWorker.name
-        workerModel.text = editingWorker.model
-        workerExtra.text = workerKind === "deepgram" ? editingWorker.language : editingWorker.variant
+        workerDialog.modelDraft = editingWorker.model
+        workerDialog.languageDraft = editingWorker.language || "auto"
+        workerModel.editText = editingWorker.model
+        workerExtra.text = editingWorker.variant || ""
+        win.selectWorkerLanguage()
         workerProject.text = workerKind === "deepgram" ? editingWorker.project : editingWorker.agent
         endpoint.currentIndex = Math.max(0, ["https://api.deepgram.com", "https://api.eu.deepgram.com", "https://api.au.deepgram.com"].indexOf(editingWorker.endpoint))
         diarize.checked = !!editingWorker.diarize
@@ -227,9 +261,10 @@ ApplicationWindow {
             spacing: 0
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.round(112 * win.uiScale)
+                Layout.preferredHeight: Math.max(Math.round(112 * win.uiScale), headerContent.implicitHeight + 16)
                 color: win.bg
                 ColumnLayout {
+                    id: headerContent
                     anchors.fill: parent
                     anchors.leftMargin: 32
                     anchors.rightMargin: 32
@@ -256,7 +291,18 @@ ApplicationWindow {
                         }
                         Item { Layout.fillWidth: true }
                         ColumnLayout {
+                            visible: !win.narrowHeader
                             Layout.alignment: Qt.AlignRight
+                            spacing: 3
+                            LabelText { text: win.pageNames[win.page]; font.pixelSize: win.fs(21); font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
+                            SubText { text: "من الفيديو إلى مستند يستحق القراءة"; Layout.alignment: Qt.AlignRight }
+                        }
+                    }
+                    RowLayout {
+                        visible: win.narrowHeader
+                        Layout.fillWidth: true
+                        Item { Layout.fillWidth: true }
+                        ColumnLayout {
                             spacing: 3
                             LabelText { text: win.pageNames[win.page]; font.pixelSize: win.fs(21); font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
                             SubText { text: "من الفيديو إلى مستند يستحق القراءة"; Layout.alignment: Qt.AlignRight }
@@ -271,8 +317,7 @@ ApplicationWindow {
                             text: "فرض إعداد على عمال OpenCode"
                             onClicked: win.openForceDialog(false)
                         }
-                        LabelText { objectName: "forceSummary"; text: win.forceSummary(); color: win.lastForce.provider ? win.accent : win.muted }
-                        Item { Layout.fillWidth: true }
+                        LabelText { objectName: "forceSummary"; text: win.forceSummary(); color: win.lastForce.provider ? win.accent : win.muted; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
                     }
                 }
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
@@ -498,8 +543,12 @@ ApplicationWindow {
                         model: backend.workersModel
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
-                            width: workerList.width; height: row.error ? win.rh(120) : win.rh(96)
+                            objectName: "workerCard"
+                            width: workerList.width
+                            height: Math.max(win.rh(96), workerContent.implicitHeight + 2 * win.rs(12))
                             ColumnLayout {
+                                id: workerContent
+                                objectName: "workerContent"
                                 anchors.fill: parent; anchors.margins: win.rs(12); spacing: win.rs(5)
                                 RowLayout {
                                     Layout.fillWidth: true; spacing: win.rs(12)
@@ -516,22 +565,20 @@ ApplicationWindow {
                                         Accessible.name: "تفعيل العامل " + row.name
                                     }
                                     Item { Layout.fillWidth: true }
-                                    ColumnLayout {
-                                        Layout.alignment: Qt.AlignRight
-                                        LabelText { text: row.name; font.pixelSize: win.fs(17); font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
-                                        SubText {
-                                            Layout.alignment: Qt.AlignRight
-                                            text: row.job_id ? "يعالج " + row.job_id + "  ·  " + row.elapsed + " ثانية"
-                                                : (!row.enabled ? "معطل"
-                                                : row.paused ? "الاستقبال متوقف"
-                                                : row.cooldownSeconds > 0 ? "تهدئة تقييد YouTube — يستأنف التنزيل تلقائيًا بعد " + Math.ceil(row.cooldownSeconds / 60) + " دقيقة"
-                                                : row.stageLabel + "  ·  جاهز لاستقبال مهمة")
-                                        }
-                                        SubText { text: win.workerLine(row); visible: text.length > 0; Layout.alignment: Qt.AlignRight }
-                                    }
+                                    LabelText { text: row.name; font.pixelSize: win.fs(17); font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
                                     Rectangle { width: 10; height: 10; radius: 5; color: row.error ? "#f4b880" : row.job_id ? win.accent : win.muted }
                                 }
-                                SubText { text: row.error || ""; color: win.dark ? "#f4b880" : "#9a4409"; visible: !!row.error; Layout.fillWidth: true }
+                                SubText {
+                                    objectName: "workerStatus"
+                                    Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                                    text: row.job_id ? "يعالج " + row.job_id + "  ·  " + row.elapsed + " ثانية"
+                                        : (!row.enabled ? "معطل"
+                                        : row.paused ? "الاستقبال متوقف"
+                                        : row.cooldownSeconds > 0 ? "تهدئة تقييد YouTube — يستأنف التنزيل تلقائيًا بعد " + Math.ceil(row.cooldownSeconds / 60) + " دقيقة"
+                                        : row.stageLabel + "  ·  جاهز لاستقبال مهمة")
+                                }
+                                SubText { objectName: "workerDetails"; text: win.workerLine(row); visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                SubText { objectName: "workerError"; text: row.error || ""; color: win.dark ? "#f4b880" : "#9a4409"; visible: !!row.error; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
                             }
                         }
                     }
@@ -922,16 +969,38 @@ ApplicationWindow {
         onAccepted: { backend.retry(selectedJob.id, "deepgram", true); jobDialog.close() }
     }
     Dialog {
-        id: workerDialog; anchors.centerIn: parent; width: 620; height: workerKind === "deepgram" ? 650 : 610; modal: true
+        id: workerDialog; objectName: "workerDialog"; anchors.centerIn: parent; width: 620; height: workerKind === "deepgram" ? 650 : 610; modal: true
+        property string modelDraft: ""
+        property string languageDraft: "auto"
         title: "إعدادات العامل"; standardButtons: Dialog.Save | Dialog.Cancel
-        onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Cancel).text = "إلغاء"; Qt.callLater(win.fillWorkerFields) }
+        onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Save).objectName = "workerSaveButton"; standardButton(Dialog.Cancel).text = "إلغاء"; Qt.callLater(win.fillWorkerFields); backend.refreshModelCatalogs() }
         background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
         contentItem: ColumnLayout {
             spacing: 10
             LabelText { text: "اسم العامل"; Layout.alignment: Qt.AlignRight }
             AppField { id: workerName; Layout.fillWidth: true }
             LabelText { text: "النموذج"; Layout.alignment: Qt.AlignRight }
-            AppField { id: workerModel; Layout.fillWidth: true }
+            RowLayout {
+                Layout.fillWidth: true
+                ComboBox {
+                    id: workerModel; objectName: "workerModelBox"
+                    Layout.fillWidth: true; editable: true
+                    model: workerKind === "deepgram" ? win.deepgramModelOptions(editingWorker.model)
+                                                      : win.opencodeModelOptions(workerProvider.currentValue, editingWorker.model)
+                    onModelChanged: Qt.callLater(function() { if (workerDialog.opened) workerModel.editText = workerDialog.modelDraft })
+                    onActivated: { workerDialog.modelDraft = editText; if (workerKind === "deepgram") Qt.callLater(win.selectWorkerLanguage) }
+                    onAccepted: workerDialog.modelDraft = editText
+                    Accessible.name: "نموذج العامل"
+                }
+                AppButton { text: "تحديث القائمة"; enabled: !backend.catalogBusy; onClicked: backend.refreshModelCatalogs() }
+            }
+            SubText {
+                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                text: backend.catalogBusy ? "جارٍ تحميل النماذج المتاحة…"
+                      : (backend.catalogErrors[workerKind] || (workerKind === "deepgram"
+                          ? "نماذج التفريغ ولغاتها من Deepgram. يمكن كتابة معرّف نموذج مخصص."
+                          : "النماذج من OpenCode المثبّت محليًا. يمكن كتابة معرّف نموذج مخصص."))
+            }
             RowLayout {
                 visible: workerKind !== "deepgram"
                 ComboBox { id: workerProvider; objectName: "workerProviderBox"; Layout.fillWidth: true; model: backend.providers; textRole: "name"; valueRole: "id" }
@@ -942,11 +1011,22 @@ ApplicationWindow {
                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                 text: workerProvider.currentValue === "login"
                       ? "يستخدم تسجيل الدخول المحفوظ داخل OpenCode (اشتراك ChatGPT وغيره) دون مفتاح، وفي مجلد بيانات OpenCode المشترك."
-                      : "يُشغَّل بمفتاح هذا العامل، وفي مجلد بيانات مستقل حتى لا تتعارض العمليات المتوازية. المعرّف المرسل: " + win.resolvedModel(workerProvider.currentValue, workerModel.text)
+                      : "يُشغَّل بمفتاح هذا العامل، وفي مجلد بيانات مستقل حتى لا تتعارض العمليات المتوازية. المعرّف المرسل: " + win.resolvedModel(workerProvider.currentValue, workerModel.editText)
             }
             RowLayout {
-                AppField { id: workerExtra; Layout.fillWidth: true }
-                LabelText { text: workerKind === "deepgram" ? "اللغة: ar أو auto" : "مستوى التفكير (فارغ = بلا درجة)" }
+                Layout.fillWidth: true
+                ComboBox {
+                    id: workerLanguage; objectName: "workerLanguageBox"
+                    visible: workerKind === "deepgram"; Layout.fillWidth: true
+                    model: win.deepgramLanguageOptions(workerModel.editText,
+                                                        workerModel.editText === editingWorker.model ? editingWorker.language : "")
+                    textRole: "name"; valueRole: "id"
+                    onModelChanged: Qt.callLater(function() { if (workerDialog.opened && workerKind === "deepgram") win.selectWorkerLanguage() })
+                    onActivated: workerDialog.languageDraft = currentValue
+                    Accessible.name: "لغة التفريغ"
+                }
+                AppField { id: workerExtra; visible: workerKind !== "deepgram"; Layout.fillWidth: true }
+                LabelText { text: workerKind === "deepgram" ? "لغة التفريغ" : "مستوى التفكير (فارغ = بلا درجة)" }
             }
             RowLayout {
                 AppField { id: workerProject; Layout.fillWidth: true }
@@ -969,9 +1049,9 @@ ApplicationWindow {
             Item { Layout.fillHeight: true }
         }
         onAccepted: {
-            editingWorker.name = workerName.text; editingWorker.model = workerModel.text; editingWorker.enabled = workerEnabled.checked
+            editingWorker.name = workerName.text; editingWorker.model = workerModel.editText.trim(); editingWorker.enabled = workerEnabled.checked
             if(workerKind === "deepgram") {
-                editingWorker.language = workerExtra.text; editingWorker.project = workerProject.text; editingWorker.endpoint = endpoint.currentText; editingWorker.diarize = diarize.checked
+                editingWorker.language = workerLanguage.currentValue || "auto"; editingWorker.project = workerProject.text; editingWorker.endpoint = endpoint.currentText; editingWorker.diarize = diarize.checked
                 settings.deepgram_workers[workerIndex] = editingWorker
             } else {
                 editingWorker.variant = workerExtra.text; editingWorker.agent = workerProject.text
@@ -987,8 +1067,10 @@ ApplicationWindow {
     Dialog {
         id: forceDialog
         property bool starting: true
+        property string modelDraft: ""
         anchors.centerIn: parent; width: 640; height: 460; modal: true
         title: "فرض إعداد على عمال OpenCode"
+        onOpened: backend.refreshModelCatalogs()
         background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
         contentItem: ColumnLayout {
             spacing: 12
@@ -1006,7 +1088,14 @@ ApplicationWindow {
             }
             RowLayout {
                 Layout.fillWidth: true
-                AppField { id: forceModel; objectName: "forceModelField"; Layout.fillWidth: true; horizontalAlignment: Text.AlignRight; placeholderText: "معرّف النموذج" }
+                ComboBox {
+                    id: forceModel; objectName: "forceModelField"; Layout.fillWidth: true; editable: true
+                    model: win.opencodeModelOptions(forceProvider.currentValue, "")
+                    onModelChanged: Qt.callLater(function() { if (forceDialog.opened) forceModel.editText = forceDialog.modelDraft })
+                    onActivated: forceDialog.modelDraft = editText
+                    onAccepted: forceDialog.modelDraft = editText
+                    Accessible.name: "نموذج OpenCode المفروض"
+                }
                 LabelText { text: "النموذج" }
             }
             RowLayout {
