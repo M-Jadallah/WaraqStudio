@@ -10,6 +10,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QFileDialog
 
 from . import __version__
+from .catalog import deepgram_models, opencode_models
 from .config import (BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
                      provider_info, provider_of)
 from .models import DictListModel
@@ -32,6 +33,8 @@ class Bridge(QObject):
     libraryChanged = Signal()
     foldersChanged = Signal()
     youtubeVersionChanged = Signal()
+    modelCatalogChanged = Signal()
+    _modelCatalogReady = Signal(object, object, str, str)
 
     def __init__(self, store, config, secrets, scheduler):
         super().__init__()
@@ -46,6 +49,11 @@ class Bridge(QObject):
         self._library = []
         self._library_busy = False
         self._youtube_updating = False
+        self._deepgram_models = []
+        self._opencode_models = []
+        self._catalog_errors = {"deepgram": "", "opencode": ""}
+        self._catalog_busy = False
+        self._modelCatalogReady.connect(self._apply_model_catalogs)
         # QML ListViews bind to these instead of the QVariantList properties:
         # rows are updated in place (dataChanged) so scroll position survives
         # every refresh tick, unlike a republished JS array which resets the view.
@@ -83,6 +91,49 @@ class Bridge(QObject):
 
     @Property("QVariantList", notify=changed)
     def workers(self): return self._workers
+
+    @Property("QVariantList", notify=modelCatalogChanged)
+    def deepgramModels(self): return self._deepgram_models
+
+    @Property("QVariantList", notify=modelCatalogChanged)
+    def opencodeModels(self): return self._opencode_models
+
+    @Property("QVariantMap", notify=modelCatalogChanged)
+    def catalogErrors(self): return self._catalog_errors
+
+    @Property(bool, notify=modelCatalogChanged)
+    def catalogBusy(self): return self._catalog_busy
+
+    @Slot()
+    def refreshModelCatalogs(self):
+        if self._catalog_busy:
+            return
+        self._catalog_busy = True
+        self.modelCatalogChanged.emit()
+        cfg = self.config.snapshot()
+        threading.Thread(target=self._load_model_catalogs, args=(cfg,), daemon=True).start()
+
+    def _load_model_catalogs(self, cfg):
+        dg, oc, dg_error, oc_error = None, None, "", ""
+        try:
+            dg = deepgram_models()
+        except Exception:
+            dg_error = "تعذّر جلب نماذج Deepgram. يمكنك إبقاء النموذج المحفوظ أو إعادة المحاولة."
+        try:
+            oc = opencode_models(cfg["opencode_executable"], cfg.get("opencode_context", ""))
+        except Exception:
+            oc_error = "تعذّر قراءة نماذج OpenCode المحلية. تحقق من مسار البرنامج ثم أعد المحاولة."
+        self._modelCatalogReady.emit(dg, oc, dg_error, oc_error)
+
+    @Slot(object, object, str, str)
+    def _apply_model_catalogs(self, dg, oc, dg_error, oc_error):
+        if dg is not None:
+            self._deepgram_models = dg
+        if oc is not None:
+            self._opencode_models = oc
+        self._catalog_errors = {"deepgram": dg_error, "opencode": oc_error}
+        self._catalog_busy = False
+        self.modelCatalogChanged.emit()
 
     @Property("QVariantList", notify=changed)
     def logs(self): return self._logs
