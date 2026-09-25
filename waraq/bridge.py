@@ -556,12 +556,7 @@ class Bridge(QObject):
     @Slot(str, str, bool)
     def retry(self, ident, stage, rerun):
         try:
-            self.store.retry(ident, stage, rerun)
-            if not rerun:
-                job = self.store.get(ident)
-                for name in STAGES[STAGES.index(stage) + 1:]:
-                    if job["stages"][name]["status"] == "cancelled":
-                        self.store.set_stage(ident, name, "pending")
+            self._retry_one(ident, stage, rerun)
             # Retrying a download lifts the automatic block (cookies, disk) but
             # never the user's manual pause and never the 429 cooldown.
             manual = stage == "download" and stage in self.scheduler.manual_paused_stages
@@ -579,6 +574,41 @@ class Bridge(QObject):
             self.refresh()
         except Exception as exc:
             self.notice.emit(str(exc), True)
+
+    def _retry_one(self, ident, stage, rerun=False):
+        self.store.retry(ident, stage, rerun)
+        if not rerun:
+            job = self.store.get(ident)
+            for name in STAGES[STAGES.index(stage) + 1:]:
+                if job["stages"][name]["status"] == "cancelled":
+                    self.store.set_stage(ident, name, "pending")
+
+    @Slot('QVariantList', str, str)
+    def retryMany(self, idents, stage, status):
+        """Apply one action to matching attention jobs; ignore stale UI selections."""
+        if stage not in STAGES or status not in ("failed", "blocked", "uncertain"):
+            self.notice.emit("اختر مجموعة مهام متشابهة لإعادة المحاولة.", True)
+            return
+        count = skipped = 0
+        for ident in dict.fromkeys(str(value) for value in idents):
+            job = self.store.get(ident)
+            if not job or any(record["status"] == "running" for record in job["stages"].values()):
+                skipped += 1
+                continue
+            current = next((name for name in STAGES if job["stages"][name]["status"] not in ("completed", "skipped")), "")
+            if current != stage or job["stages"][stage]["status"] != status:
+                skipped += 1
+                continue
+            try:
+                self._retry_one(ident, stage)
+                self.store.event(ident, "إعادة محاولة جماعية بطلب المستخدم.")
+                count += 1
+            except Exception:
+                skipped += 1
+        if count and stage == "download":
+            self.scheduler.unblock_stage(stage)
+        self.notice.emit(f"أُعيدت {count} مهمة إلى الطابور" + (f"؛ تخطيت {skipped} مهمة تغيّرت حالتها." if skipped else "."), not bool(count))
+        self.refresh()
 
     @Slot(str)
     def openPath(self, path):

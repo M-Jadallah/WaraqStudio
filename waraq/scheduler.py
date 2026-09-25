@@ -13,7 +13,8 @@ from .store import STAGES
 
 class Scheduler:
     def __init__(self, store, config, secrets, youtube=None, deepgram=None, opencode=None, library=None,
-                 retry_delays=(300, 900, 2700), limit_retry_delay=3600):
+                 retry_delays=(300, 900, 2700), limit_retry_delay=3600,
+                 deepgram_backup_delays=(30, 90)):
         self.store, self.config, self.secrets = store, config, secrets
         self.youtube = youtube or Youtube(store)
         self.deepgram = deepgram or Deepgram()
@@ -21,6 +22,7 @@ class Scheduler:
         self.library = library or Library()
         self.retry_delays = tuple(retry_delays)
         self.limit_retry_delay = limit_retry_delay
+        self.deepgram_backup_delays = tuple(deepgram_backup_delays)
         self.running = False
         self.stop_event = threading.Event()
         self.active = {}
@@ -182,6 +184,11 @@ class Scheduler:
                         return False
         return True
 
+    def deepgram_backups(self, cfg):
+        """Only keyed, enabled backup workers can receive paid fallback requests."""
+        return [w for w in cfg["deepgram_workers"] if w.get("role") == "backup"
+                and w["enabled"] and self.key_state("deepgram", w)]
+
     def loop(self):
         next_prune = time.time() + 3600
         while not self.stop_event.wait(0.25):
@@ -202,6 +209,14 @@ class Scheduler:
     def tick(self):
         cfg = self.config.snapshot()
         jobs = self.store.jobs()
+        backups = self.deepgram_backups(cfg)
+        for job in jobs:
+            record = job["stages"]["deepgram"]
+            used = int(record.get("retries", 0))
+            if record["status"] == "pending" and used and record["next_retry"] <= time.time() and used > len(backups):
+                self.store.set_stage(job["id"], "deepgram", "failed",
+                                     "العامل الاحتياطي المطلوب غير متاح. فعّل عاملَي Deepgram الاحتياطيين وأضف مفتاحيهما، ثم أعد المحاولة.")
+                record["status"] = "failed"
         pending_audio = sum(bool(j["audio"]) and j["stages"]["deepgram"]["status"] not in ("completed", "skipped", "cancelled") for j in jobs)
         for stage, pool in [("download", [{"id": "yt1", "enabled": True}]),
                             ("deepgram", cfg["deepgram_workers"]), ("opencode", cfg["opencode_workers"])]:
@@ -231,6 +246,13 @@ class Scheduler:
                 for job in jobs:
                     if not self.ready(job, stage, jobs):
                         continue
+                    if stage == "deepgram":
+                        used = int(job["stages"][stage].get("retries", 0))
+                        expected = backups[used - 1]["id"] if 0 < used <= len(backups) else ""
+                        if used and wid != expected:
+                            continue
+                        if not used and worker.get("role", "primary") == "backup":
+                            continue
                     if stage == "download":
                         root = Path(job["config"]["output_root"])
                         root.mkdir(parents=True, exist_ok=True)
@@ -239,11 +261,15 @@ class Scheduler:
                             self.store.set_stage(job["id"], stage, "blocked", message)
                             self.block_stage(stage, message)
                             break
-                    if not self.store.claim(job["id"], stage, wid):
-                        continue
-                    job["stages"][stage]["status"] = "running"
-                    cancel = threading.Event()
                     with self.lock:
+                        if wid in self.active:
+                            continue
+                        if stage == "deepgram" and sum(a["stage"] == stage and a.get("project") == worker["project"] for a in self.active.values()) >= cfg["project_concurrency"]:
+                            continue
+                        if not self.store.claim(job["id"], stage, wid):
+                            continue
+                        job["stages"][stage]["status"] = "running"
+                        cancel = threading.Event()
                         self.active[wid] = {"job_id": job["id"], "stage": stage, "cancel": cancel,
                                             "project": worker.get("project"), "started": time.time()}
                     thread = threading.Thread(target=self.execute, args=(job, stage, worker.copy(), secret, cancel), daemon=True, name=wid)
@@ -286,6 +312,10 @@ class Scheduler:
             # before a setting existed keep its sane default.
             if kind == "rate_limited" and stage == "opencode":
                 budget, delay = cfg.get("opencode_limit_retries", 5), self.limit_retry_delay
+            elif kind == "retryable" and stage == "deepgram":
+                backups = self.deepgram_backups(self.config.snapshot())
+                budget = min(2, len(backups))
+                delay = self.deepgram_backup_delays[min(used, len(self.deepgram_backup_delays) - 1)]
             elif kind == "rate_limited" and stage == "download":
                 budget = cfg.get("youtube_retry_attempts", 3)
                 # A throttled download is never retried sooner than the shared cooldown.
@@ -304,6 +334,11 @@ class Scheduler:
                            if stage == "opencode" else
                            f"استُنفدت إعادات تنزيل YouTube التلقائية ({budget}) بعد تقييد الطلبات. أعد المحاولة يدويًا لاحقًا.")
                 self.store.set_stage(ident, stage, "failed", message)
+                self.store.event(ident, message, "error")
+            elif kind == "retryable" and stage == "deepgram":
+                message = (f"استُنفدت محاولات Deepgram الاحتياطية المتاحة ({budget}). راجع الخطأ ثم أعد المحاولة يدويًا."
+                           if budget else "لا يوجد عامل Deepgram احتياطي مفعّل وله مفتاح. اضبط العاملين الاحتياطيين ثم أعد المحاولة.")
+                self.store.set_stage(ident, stage, "failed", message + " " + str(exc))
                 self.store.event(ident, message, "error")
             else:
                 status = kind if kind in ("blocked", "uncertain", "cancelled") else "failed"

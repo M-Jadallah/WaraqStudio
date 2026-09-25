@@ -77,8 +77,9 @@ def credential_name(stage, worker_id, provider=""):
     return worker_id
 
 
-def default_deepgram_workers(count=5):
+def default_deepgram_workers(count=7):
     return [{"id": f"dg{i}", "name": f"Deepgram {i:02d}", "enabled": True, "project": f"proj-{i}",
+             "role": "backup" if i > count - 2 else "primary",
              "model": "nova-3", "language": "ar",
              "endpoint": "https://api.deepgram.com", "diarize": False} for i in range(1, count + 1)]
 
@@ -154,6 +155,30 @@ class Config:
             if "youtube_retry_attempts" not in saved:
                 self.data["youtube_retry_attempts"] = saved.get("auto_retry_attempts", self.data["youtube_retry_attempts"])
         self.migrate()
+        self.migrate_backups()
+
+    def migrate_backups(self):
+        """Reserve two existing Deepgram slots for distinct fallback attempts."""
+        if self.data.get("deepgram_backups_configured"):
+            return
+        pool = self.data["deepgram_workers"]
+        if sum(w.get("role") == "backup" for w in pool) == 2:
+            self.data["deepgram_backups_configured"] = True
+            self.save({})
+            return
+        for worker in pool:
+            worker["role"] = "primary"
+        while len(pool) < 16 and sum(w.get("role") == "backup" for w in pool) < 2:
+            ident, index = self._free_worker_id("deepgram_workers", len(pool) + 1)
+            clone = copy.deepcopy(pool[0])
+            clone.update(id=ident, name=f"Deepgram احتياطي {index:02d}", project=f"proj-{index}", enabled=True, role="backup")
+            pool.append(clone)
+        if sum(w.get("role") == "backup" for w in pool) < 2:
+            for worker in pool[-2:]:
+                worker["role"] = "backup"
+        self.data["deepgram_backups_configured"] = True
+        self.save({})
+        self.migration_note += (" " if self.migration_note else "") + "أُضيف عاملان احتياطيان لـ Deepgram؛ أضف مفتاحًا مستقلًا لكل منهما."
 
     def migrate(self):
         """One-time normalisation of the worker pools.
@@ -323,6 +348,10 @@ class Config:
                     "https://api.deepgram.com", "https://api.eu.deepgram.com", "https://api.au.deepgram.com"
                 ]:
                     raise ValueError("عنوان Deepgram غير معتمد.")
+                if kind == "deepgram_workers" and worker.get("role", "primary") not in ("primary", "backup"):
+                    raise ValueError("دور عامل Deepgram غير معروف.")
+        if sum(w.get("role") == "backup" for w in d["deepgram_workers"]) > 2:
+            raise ValueError("يمكن تخصيص عاملين احتياطيين فقط لـ Deepgram.")
 
     def import_legacy(self, path: Path, secrets: Secrets):
         d = json.loads(path.read_text(encoding="utf-8-sig"))

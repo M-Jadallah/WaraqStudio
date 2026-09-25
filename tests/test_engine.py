@@ -241,7 +241,7 @@ def test_project_cap(env):
 def test_distinct_projects_allow_five_parallel_deepgram_workers(env):
     store, cfg = env
     cfg.data["project_concurrency"] = 1
-    assert len({w["project"] for w in cfg.data["deepgram_workers"]}) == 5
+    assert len({w["project"] for w in cfg.data["deepgram_workers"]}) == 7
     used = []
     class FakeDG:
         def transcribe(self, job, worker, cfg, secret, cancel, progress):
@@ -552,6 +552,92 @@ def test_deepgram_failure_not_auto_rescheduled(env, tmp_path):
     assert len(calls) == 1  # paid transcription is never resubmitted automatically
 
 
+def test_deepgram_retryable_failure_uses_two_distinct_backups(env, tmp_path):
+    store, cfg = env
+    cfg.data["opencode_enabled"] = False
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"audio fixture")
+    ident = store.add(items(), cfg.snapshot(), input_path=str(audio))[0]
+    calls = []
+    class FakeDG:
+        def transcribe(self, job, worker, config, secret, cancel, progress):
+            calls.append(worker["id"])
+            if worker["id"] != "dg7":
+                raise ServiceError("Deepgram HTTP 503", "retryable")
+            output = Path(job["folder"]) / "transcript.txt"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("نص ناجح", encoding="utf-8")
+            return output
+    keys = type("Keys", (), {"get": lambda self, name: "key" if name in ("dg1", "dg6", "dg7") else ""})()
+    scheduler = Scheduler(store, cfg, keys, deepgram=FakeDG(), deepgram_backup_delays=(0.01, 0.01))
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        scheduler.tick()
+        if store.get(ident)["stages"]["deepgram"]["status"] == "completed":
+            break
+        time.sleep(0.01)
+    assert calls == ["dg1", "dg6", "dg7"]
+    assert store.get(ident)["stages"]["deepgram"]["status"] == "completed"
+    while not scheduler.idle() and time.time() < deadline:
+        time.sleep(0.01)
+
+
+def test_deepgram_uncertain_result_does_not_use_backup(env, tmp_path):
+    store, cfg = env
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"audio fixture")
+    ident = store.add(items(), cfg.snapshot(), input_path=str(audio))[0]
+    calls = []
+    class FakeDG:
+        def transcribe(self, job, worker, config, secret, cancel, progress):
+            calls.append(worker["id"])
+            raise ServiceError("انقطع الاتصال", "uncertain")
+    keys = type("Keys", (), {"get": lambda self, name: "key"})()
+    scheduler = Scheduler(store, cfg, keys, deepgram=FakeDG(), deepgram_backup_delays=(0.01, 0.01))
+    pump(scheduler, store, ident, "deepgram", ("uncertain",))
+    scheduler.tick()
+    assert calls == ["dg1"]
+
+
+def test_deepgram_explicit_server_failure_is_backup_eligible(monkeypatch, env, tmp_path):
+    import requests
+    _, cfg = env
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"audio fixture")
+    class Response:
+        ok = False
+        status_code = 503
+        text = "temporary failure"
+        headers = {}
+    class Session:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def post(self, *args, **kwargs): return Response()
+    monkeypatch.setattr(requests, "Session", Session)
+    settings = cfg.snapshot()
+    settings["max_retries"] = 1
+    with pytest.raises(ServiceError) as error:
+        Deepgram().request(audio, settings["deepgram_workers"][0], settings, "key", threading.Event(), tmp_path / "raw.json")
+    assert error.value.kind == "retryable"
+
+
+def test_bulk_retry_only_matching_attention_group(env):
+    from PySide6.QtCore import QCoreApplication
+    from waraq.bridge import Bridge
+    app = QCoreApplication.instance() or QCoreApplication([])
+    store, cfg = env
+    ids = store.add(items(3), cfg.snapshot())
+    store.set_stage(ids[0], "download", "failed")
+    store.set_stage(ids[1], "download", "failed")
+    store.set_stage(ids[2], "download", "blocked")
+    scheduler = Scheduler(store, cfg, None)
+    bridge = Bridge(store, cfg, None, scheduler)
+    bridge.retryMany(ids + [ids[0], "missing"], "download", "failed")
+    assert [store.get(ident)["stages"]["download"]["status"] for ident in ids] == ["pending", "pending", "blocked"]
+    assert len([event for event in store.events() if event["message"] == "إعادة محاولة جماعية بطلب المستخدم."]) == 2
+    bridge.timer.stop()
+
+
 @pytest.mark.parametrize("kind", ["uncertain", "blocked", "cancelled"])
 def test_terminal_kinds_never_rescheduled(env, tmp_path, kind):
     store, cfg = env
@@ -679,10 +765,11 @@ def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises):
     assert exc.value.kind == "rate_limited"
 
 
-def test_default_pools_offer_five_workers_each_without_router_workers(tmp_path):
+def test_default_pools_offer_two_deepgram_backups(tmp_path):
     cfg = Config(tmp_path)
-    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5"]
-    assert len({w["project"] for w in cfg.data["deepgram_workers"]}) == 5
+    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5", "dg6", "dg7"]
+    assert [w["role"] for w in cfg.data["deepgram_workers"]] == ["primary"] * 5 + ["backup"] * 2
+    assert len({w["project"] for w in cfg.data["deepgram_workers"]}) == 7
     assert [w["id"] for w in cfg.data["opencode_workers"]] == ["oc1", "oc2", "oc3", "oc4", "oc5"]
     assert {w["provider"] for w in cfg.data["opencode_workers"]} == {"login"}
     assert cfg.data["opencode_providers"] == []
@@ -697,7 +784,8 @@ def test_worker_pool_migration_tops_up_and_keeps_saved_workers(tmp_path):
                                     "model": "openai/gpt-5.6-sol", "variant": "high", "agent": "build"}]}
     (tmp_path / "settings.json").write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
     cfg = Config(tmp_path)
-    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5"]
+    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5", "dg6", "dg7"]
+    assert [w["role"] for w in cfg.data["deepgram_workers"]] == ["primary"] * 5 + ["backup"] * 2
     assert [w["id"] for w in cfg.data["opencode_workers"]] == ["oc1", "oc2", "oc3", "oc4", "oc5"]
     # The saved worker keeps every field the user chose; the clones inherit its settings.
     assert cfg.data["deepgram_workers"][0]["project"] == "default"
@@ -735,7 +823,7 @@ def test_migration_removes_automatically_created_router_workers(tmp_path):
     assert [w["id"] for w in cfg.data["opencode_workers"]] == ["oc1", "oc2", "oc3", "oc4", "oc5"]
     assert {w.get("provider", "login") for w in cfg.data["opencode_workers"]} == {"login"}
     assert {w["model"] for w in cfg.data["opencode_workers"]} == {"openai/gpt-5.6-sol"}
-    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5"]
+    assert [w["id"] for w in cfg.data["deepgram_workers"]] == ["dg1", "dg2", "dg3", "dg4", "dg5", "dg6", "dg7"]
     assert cfg.data["workers_normalised"] is True
     # A hand-made worker that merely mentions a router provider is left alone.
     cfg.data["opencode_workers"].append({"id": "ocmy1", "name": "عامل مزود خاص", "enabled": True,

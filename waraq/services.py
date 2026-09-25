@@ -465,6 +465,7 @@ class Deepgram:
                             delay = 15 * (attempt + 1)
                         wait_cancel(cancel, delay)
                         continue
+                    raise ServiceError(f"Deepgram HTTP {response.status_code} بعد استنفاد محاولات الطلب.", "retryable")
                 raise ServiceError(f"فشل Deepgram: HTTP {response.status_code} — {response.text[:400]}")
 
     def transcribe(self, job, worker, cfg, secret, cancel, progress):

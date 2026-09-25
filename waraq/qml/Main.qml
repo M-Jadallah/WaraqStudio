@@ -23,6 +23,7 @@ ApplicationWindow {
     property string toastText: ""
     property bool toastError: false
     property var selectedJob: ({})
+    property var bulkGroup: ({})
     property var editingWorker: ({})
     property string workerKind: ""
     property int workerIndex: 0
@@ -61,6 +62,17 @@ ApplicationWindow {
         return (filter === "all" || job.status === filter || (filter === "attention" && ["blocked", "failed", "uncertain"].indexOf(job.status) >= 0))
             && (search.length === 0 || job.title.toLowerCase().indexOf(search.toLowerCase()) >= 0)
     }
+    function attentionGroups() {
+        var groups = {}
+        backend.jobs.forEach(function(job) {
+            if (["failed", "blocked", "uncertain"].indexOf(job.status) < 0 || !win.matches(job)) return
+            var key = job.current + ":" + job.status
+            if (!groups[key]) groups[key] = {stage: job.current, status: job.status,
+                label: job.stageLabel + " · " + job.statusLabel, ids: []}
+            groups[key].ids.push(job.id)
+        })
+        return Object.keys(groups).map(function(key) { return groups[key] })
+    }
     function stateColor(status) {
         if (status === "completed") return dark ? "#61ddbb" : "#08765b"
         if (status === "running") return dark ? "#87b7ff" : "#215cc4"
@@ -74,7 +86,8 @@ ApplicationWindow {
     }
     function workerLine(w) {
         if (w.stage === "download") return ""
-        if (w.stage === "deepgram") return w.hasKey ? "المفتاح محفوظ في مخزن الاعتماد" : "لا مفتاح محفوظ لهذا العامل"
+        if (w.stage === "deepgram") return (w.role === "backup" ? "احتياطي · " : "أساسي · ") +
+            (w.hasKey ? "المفتاح محفوظ في مخزن الاعتماد" : "لا مفتاح محفوظ لهذا العامل")
         var parts = [w.providerLabel, w.modelResolved]
         if ((w.variant || "").length > 0) parts.push("تفكير " + w.variant)
         parts.push(!w.keyEnv ? "تسجيل دخول OpenCode" : (w.hasKey ? "المفتاح محفوظ" : "لا مفتاح محفوظ"))
@@ -156,6 +169,7 @@ ApplicationWindow {
         workerExtra.text = editingWorker.variant || ""
         win.selectWorkerLanguage()
         workerProject.text = workerKind === "deepgram" ? editingWorker.project : editingWorker.agent
+        workerRole.currentIndex = editingWorker.role === "backup" ? 1 : 0
         endpoint.currentIndex = Math.max(0, ["https://api.deepgram.com", "https://api.eu.deepgram.com", "https://api.au.deepgram.com"].indexOf(editingWorker.endpoint))
         diarize.checked = !!editingWorker.diarize
         var ids = backend.providers.map(function(p) { return p.id })
@@ -372,6 +386,21 @@ ApplicationWindow {
                                 text: modelData.label; primary: win.filter === modelData.id
                                 implicitHeight: 30
                                 onClicked: win.filter = modelData.id
+                            }
+                        }
+                    }
+                    Flow {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: childrenRect.height
+                        spacing: 8
+                        visible: win.filter === "attention"
+                        Repeater {
+                            model: win.attentionGroups()
+                            delegate: AppButton {
+                                required property var modelData
+                                text: "إعادة " + modelData.label + " (" + modelData.ids.length + ")"
+                                implicitHeight: 30
+                                onClicked: { win.bulkGroup = modelData; bulkRetry.open() }
                             }
                         }
                     }
@@ -963,6 +992,16 @@ ApplicationWindow {
         onAccepted: { backend.retry(selectedJob.id, selectedJob.current, false); jobDialog.close() }
     }
     Dialog {
+        id: bulkRetry; anchors.centerIn: parent; width: 530; modal: true; title: "إعادة محاولة جماعية"; standardButtons: Dialog.Ok | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Ok).text = "إعادة " + (bulkGroup.ids || []).length + " مهمة"; standardButton(Dialog.Cancel).text = "إلغاء" }
+        Label { width: parent.width; wrapMode: Text.WordWrap
+            text: bulkGroup.status === "uncertain"
+                ? "نتائج " + (bulkGroup.ids || []).length + " طلب تفريغ غير مؤكدة. قد تكون اكتملت لدى Deepgram، وإعادة إرسالها قد تسبب تكلفة إضافية لكل مهمة. هل تريد إعادة المحاولة للجميع؟"
+                : "ستُعاد " + (bulkGroup.ids || []).length + " مهمة من مجموعة «" + (bulkGroup.label || "") + "» إلى الطابور باستخدام الملفات المكتملة المحفوظة."
+        }
+        onAccepted: backend.retryMany(bulkGroup.ids, bulkGroup.stage, bulkGroup.status)
+    }
+    Dialog {
         id: paidRerun; anchors.centerIn: parent; width: 500; modal: true; title: "تفريغ جديد"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "تفريغ جديد"; standardButton(Dialog.Cancel).text = "إلغاء" }
         Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُرسل الصوت مجددًا إلى Deepgram وقد تنتج تكلفة جديدة. ستبقى النسخة السابقة محفوظة." }
@@ -1032,6 +1071,11 @@ ApplicationWindow {
                 AppField { id: workerProject; Layout.fillWidth: true }
                 LabelText { text: workerKind === "deepgram" ? "معرّف المشروع المشترك" : "الوكيل" }
             }
+            RowLayout {
+                visible: workerKind === "deepgram"; Layout.fillWidth: true
+                ComboBox { id: workerRole; model: ["أساسي", "احتياطي لإعادة التفريغ"]; Layout.fillWidth: true }
+                LabelText { text: "دور العامل" }
+            }
             ComboBox { id: endpoint; visible: workerKind === "deepgram"; Layout.fillWidth: true; model: ["https://api.deepgram.com", "https://api.eu.deepgram.com", "https://api.au.deepgram.com"] }
             CheckBox { id: diarize; visible: workerKind === "deepgram"; text: "تمييز المتحدثين"; palette.windowText: win.ink }
             LabelText {
@@ -1051,7 +1095,7 @@ ApplicationWindow {
         onAccepted: {
             editingWorker.name = workerName.text; editingWorker.model = workerModel.editText.trim(); editingWorker.enabled = workerEnabled.checked
             if(workerKind === "deepgram") {
-                editingWorker.language = workerLanguage.currentValue || "auto"; editingWorker.project = workerProject.text; editingWorker.endpoint = endpoint.currentText; editingWorker.diarize = diarize.checked
+                editingWorker.language = workerLanguage.currentValue || "auto"; editingWorker.project = workerProject.text; editingWorker.endpoint = endpoint.currentText; editingWorker.diarize = diarize.checked; editingWorker.role = workerRole.currentIndex === 1 ? "backup" : "primary"
                 settings.deepgram_workers[workerIndex] = editingWorker
             } else {
                 editingWorker.variant = workerExtra.text; editingWorker.agent = workerProject.text
