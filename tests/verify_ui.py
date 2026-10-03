@@ -22,6 +22,7 @@ from waraq.bridge import Bridge
 from waraq.config import Config
 from waraq.scheduler import Scheduler
 from waraq.store import Store
+from scheduler_test_support import SchedulerHarness
 
 
 def main():
@@ -29,7 +30,7 @@ def main():
     app = QApplication([])
     messages = []
     qInstallMessageHandler(lambda kind, ctx, text: messages.append(text))
-    with tempfile.TemporaryDirectory(prefix="waraq-ui-", ignore_cleanup_errors=True) as temp:
+    with tempfile.TemporaryDirectory(prefix="waraq-ui-", ignore_cleanup_errors=True) as temp, SchedulerHarness() as harness:
         home = Path(temp)
         store, config = Store(home / "test.db"), Config(home)
         keys = type("Keys", (), {"get": lambda s, w: "", "set": lambda s,w,v: None})()
@@ -496,11 +497,12 @@ def main():
         if len(sys.argv) > 1:
             root.grabWindow().save(str(Path(sys.argv[1]) / "txt-import-options-140.png"))
         root.close()
-        scheduler.shutdown()
         bridge.timer.stop()
+        harness.shutdown_and_join()
         engine.deleteLater()
         app.processEvents()
-        store.db.close()
+        with store.lock:
+            store.db.close()
     failures = [m for m in messages if any(s in m for s in ("Error", "Unable", "Cannot", "ReferenceError", "binding loop"))]
     assert not failures, failures
     print("Native UI passed: 6 pages, range selection, reorder, enqueue, templates, auto-stop toggle, worker toggles, "

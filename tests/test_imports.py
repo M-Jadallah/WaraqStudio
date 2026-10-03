@@ -15,7 +15,7 @@ from waraq.store import Store
 
 
 @pytest.fixture
-def imports(tmp_path):
+def imports(tmp_path, scheduler_harness):
     app = QCoreApplication.instance() or QCoreApplication([])
     config = Config(tmp_path)
     store = Store(tmp_path / "tasks.db")
@@ -23,10 +23,13 @@ def imports(tmp_path):
     bridge = Bridge(store, config, None, scheduler)
     notices = []
     bridge.notice.connect(lambda text, error: notices.append((text, error)))
-    yield bridge, store, config, scheduler, notices
-    bridge.timer.stop()
-    scheduler.shutdown()
-    store.db.close()
+    try:
+        yield bridge, store, config, scheduler, notices
+    finally:
+        bridge.timer.stop()
+        scheduler_harness.shutdown_and_join()
+        with store.lock:
+            store.db.close()
 
 
 def transcript(tmp_path, name="درس.txt", content=None):

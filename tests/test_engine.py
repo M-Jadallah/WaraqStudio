@@ -26,11 +26,15 @@ def make_docx(path, text="مستند اختباري"):
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, scheduler_harness):
     cfg = Config(tmp_path)
     store = Store(tmp_path / "tasks.db")
-    yield store, cfg
-    store.db.close()
+    try:
+        yield store, cfg
+    finally:
+        scheduler_harness.shutdown_and_join()
+        with store.lock:
+            store.db.close()
 
 
 def items(n=1):
@@ -213,9 +217,11 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
     deadline = time.time() + 8
     while time.time() < deadline:
         scheduler.tick()
-        if all(j["stages"]["opencode"]["status"] == "completed" for j in store.jobs()):
+        if all(j["stages"]["opencode"]["status"] == "completed" for j in store.jobs()) and scheduler.idle():
             break
         time.sleep(0.015)
+    assert scheduler.idle(), "Workers are still publishing completed results"
+    assert all(j["stages"]["opencode"]["status"] == "completed" for j in store.jobs())
     assert all(j["document"] for j in store.jobs())
     # One downloader, two keyed Deepgram workers, and an OpenCode pool no longer capped at two.
     assert peaks["download"] == 1 and peaks["deepgram"] == 2
@@ -224,6 +230,62 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
     assert set(seen_keys) == {("dg1", "key-one"), ("dg2", "key-two")}
     for j in store.jobs():
         validate_docx(j["document"])
+
+
+@pytest.mark.parametrize("background_loop", [False, True])
+def test_database_cleanup_waits_for_completed_worker_publication(env, tmp_path, background_loop):
+    store, cfg = env
+    ident = local_txt_job(store, cfg, tmp_path)
+    publishing = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    class FakeOC:
+        def process(self, job, worker, config, secret, cancel, log):
+            return make_docx(Path(job["folder"]) / "result.docx")
+
+    class HeldLibrary:
+        def publish_current(self, current_store, job_id, config):
+            publishing.set()
+            if not release.wait(5):
+                raise TimeoutError("Test publication was not released by scheduler shutdown")
+            current_store.event(job_id, "Publication finished before database cleanup")
+            finished.set()
+            return []
+
+    scheduler = Scheduler(store, cfg, None, opencode=FakeOC(), library=HeldLibrary())
+    original_shutdown = scheduler.shutdown
+
+    def shutdown():
+        original_shutdown()
+        release.set()
+
+    scheduler.shutdown = shutdown
+    # Held entries in other concurrency tests have no backing thread. They
+    # must not prevent teardown from joining the actual OpenCode worker.
+    scheduler.active["synthetic"] = {"job_id": "held", "stage": "deepgram", "project": "held",
+                                     "started": time.time(), "cancel": threading.Event()}
+    connection = store.db
+
+    class GuardedConnection:
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+        def close(self):
+            assert finished.is_set(), "SQLite closed before completed worker finished publishing"
+            assert scheduler.thread is None or not scheduler.thread.is_alive()
+            connection.close()
+
+    store.db = GuardedConnection()
+    if background_loop:
+        scheduler.start()
+    else:
+        scheduler.tick()
+    assert publishing.wait(3)
+    assert store.get(ident)["stages"]["opencode"]["status"] == "completed"
+    assert not scheduler.idle()
+    # Deliberately return while publication is blocked: env's finalizer must
+    # stop/join real threads before GuardedConnection allows SQLite to close.
 
 
 def test_project_cap(env):
@@ -476,6 +538,7 @@ def pump(scheduler, store, ident, stage, wanted, timeout=5.0):
             # sqlite connection mid-write is not thread-safe.
             while not scheduler.idle() and time.time() < deadline:
                 time.sleep(0.005)
+            assert scheduler.idle(), f"{stage} reached {wanted} but its worker did not finish"
             return
         time.sleep(0.01)
     raise AssertionError(f"{stage} stuck at {store.get(ident)['stages'][stage]['status']}")
