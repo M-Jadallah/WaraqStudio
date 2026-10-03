@@ -5,9 +5,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QObject, QPoint, QPointF, QUrl, qInstallMessageHandler, QMetaObject, Q_ARG
+from PySide6.QtCore import QObject, QPoint, QPointF, QUrl, QMimeData, qInstallMessageHandler, QMetaObject, Q_ARG
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -364,6 +366,135 @@ def main():
             click("providersButton")
             QTest.qWait(200)
             root.grabWindow().save(str(evidence / "providers-dialog.png"))
+            QTest.keyClick(root, Qt.Key_Escape)
+            QTest.qWait(80)
+        # Local TXT imports use the same selected template and subject folder,
+        # skip both upstream services, and own their input copy immediately.
+        root.setProperty("toastText", "")
+        click("nav1")
+        assert root.property("page") == 1
+        template_box = find(root.contentItem(), "templateBox")
+        folder_box = find(root.contentItem(), "sourceFolderCombo")
+        template_box.setProperty("currentIndex", 1)
+        folder_box.setProperty("currentIndex", 1)
+        QTest.qWait(80)
+        selected_folder = folder_box.property("currentValue")
+        assert selected_folder and template_box.property("currentValue") == "tplx"
+        imports = home / "inputs with spaces"
+        imports.mkdir()
+        single = imports / "تفريغ واحد.txt"
+        single.write_text("تفريغ جاهز لإنشاء Word", encoding="utf-8")
+
+        def assert_imported(before, sources):
+            new_jobs = store.jobs()[before:]
+            assert len(new_jobs) == len(sources), (new_jobs, sources, messages[-5:])
+            assert len({j["batch"] for j in new_jobs}) == 1
+            assert [j["position"] for j in new_jobs] == list(range(1, len(sources) + 1))
+            assert [j["queue_order"] for j in new_jobs] == list(range(1, len(sources) + 1))
+            for job, source_file in zip(new_jobs, sources):
+                assert job["folder_id"] == selected_folder
+                assert job["config"]["template_name"] == "خطب"
+                assert job["config"]["prompt"].startswith("استخدم مهارة عربية للخطب")
+                managed = Path(job["transcript"])
+                assert managed.parent == Path(job["folder"])
+                assert managed != source_file and managed.read_bytes() == source_file.read_bytes()
+                assert job["stages"]["download"]["status"] == "skipped"
+                assert job["stages"]["deepgram"]["status"] == "skipped"
+                assert job["stages"]["opencode"]["status"] == "pending"
+            assert root.property("page") == 0
+            return new_jobs
+
+        before = len(store.jobs())
+        with patch.object(bridge_module.QFileDialog, "getOpenFileNames", return_value=([str(single)], "")):
+            click("importTranscriptsButton")
+        new_jobs = assert_imported(before, [single])
+        single.unlink()
+        assert Path(new_jobs[0]["transcript"]).read_text(encoding="utf-8").startswith("تفريغ جاهز")
+
+        first, second = imports / "درس 2.txt", imports / "درس 10.TXT"
+        first.write_text("درس ثانٍ", encoding="utf-8-sig")
+        second.write_text("درس عاشر", encoding="utf-8")
+        root.setProperty("toastText", "")
+        click("nav1")
+        assert root.property("page") == 1
+        before = len(store.jobs())
+        with patch.object(bridge_module.QFileDialog, "getOpenFileNames", return_value=([str(first), str(second)], "")):
+            click("importTranscriptsButton")
+        assert_imported(before, [first, second])
+        (imports / "ignore.mp3").write_bytes(b"audio")
+        nested = imports / "nested"
+        nested.mkdir()
+        (nested / "ignored.txt").write_text("ليس من هذا المجلد", encoding="utf-8")
+        root.setProperty("toastText", "")
+        click("nav1")
+        assert root.property("page") == 1
+        before = len(store.jobs())
+        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=str(imports)):
+            click("importTranscriptFolderButton")
+        assert_imported(before, [first, second])
+
+        # Deliver native Qt drag events on the workers page: global dropping
+        # must work even when the source picker page is hidden.
+        click("nav2")
+        before = len(store.jobs())
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(first)), QUrl.fromLocalFile(str(second))])
+        point = QPoint(600, 350)
+        enter = QDragEnterEvent(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(root, enter)
+        QTest.qWait(80)
+        assert enter.isAccepted(), "native TXT drag was not accepted"
+        overlay = find(root.contentItem(), "transcriptDropOverlay")
+        assert overlay is not None and overlay.isVisible()
+        if len(sys.argv) > 1:
+            root.grabWindow().save(str(Path(sys.argv[1]) / "txt-drop-overlay.png"))
+        drop = QDropEvent(QPointF(point), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(root, drop)
+        QTest.qWait(80)
+        assert drop.isAccepted(), "native TXT drop was not accepted"
+        assert_imported(before, [first, second])
+        assert not overlay.isVisible()
+        before = len(store.jobs())
+        invalid_mime = QMimeData()
+        invalid_mime.setUrls([QUrl.fromLocalFile(str(imports / "ignore.mp3"))])
+        invalid_enter = QDragEnterEvent(point, Qt.CopyAction, invalid_mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(root, invalid_enter)
+        assert not invalid_enter.isAccepted() and len(store.jobs()) == before
+
+        # The new controls remain visible within the minimum window at 140%.
+        root.setProperty("toastText", "")
+        click("nav1")
+        assert root.property("page") == 1
+        tuned = config.snapshot()
+        tuned["ui_scale"] = 1.4
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
+        QTest.qWait(150)
+        rail_origin = rail.mapToScene(QPointF(0, 0))
+        assert rail_origin.x() >= 0 and rail_origin.x() + rail.width() <= root.width() + 1
+        def assert_in_window(name):
+            control = find(root.contentItem(), name)
+            assert control is not None and control.isVisible()
+            origin = control.mapToScene(QPointF(0, 0))
+            assert origin.x() >= 0 and origin.x() + control.width() <= root.width() + 1, (name, origin)
+            assert origin.y() >= 0 and origin.y() + control.height() <= root.height() + 1, (name, origin)
+        for name in ("importTranscriptsButton", "importTranscriptFolderButton"):
+            assert_in_window(name)
+        if len(sys.argv) > 1:
+            root.setProperty("toastText", "")
+            QTest.qWait(60)
+            root.grabWindow().save(str(Path(sys.argv[1]) / "txt-import-140.png"))
+        source_scroll = find(root.contentItem(), "sourceScroll")
+        assert source_scroll is not None
+        flick = source_scroll.property("contentItem")
+        assert flick.property("contentHeight") > flick.property("height")
+        flick.setProperty("contentY", flick.property("contentHeight") - flick.property("height"))
+        QTest.qWait(100)
+        for name in ("sourceFolderCombo", "templateBox", "sourcePreset", "enqueueSourceButton"):
+            assert_in_window(name)
+        source_view = find(root.contentItem(), "sourceList")
+        assert source_view is not None and source_view.height() >= 100
+        if len(sys.argv) > 1:
+            root.grabWindow().save(str(Path(sys.argv[1]) / "txt-import-options-140.png"))
         root.close()
         scheduler.shutdown()
         bridge.timer.stop()
@@ -374,7 +505,8 @@ def main():
     assert not failures, failures
     print("Native UI passed: 6 pages, range selection, reorder, enqueue, templates, auto-stop toggle, worker toggles, "
           "provider override, library organise/list/delete, stage pause, automatic-block re-check, scroll pinning, "
-          "collapsible rail, UI scale, themes, 1060x720, no QML errors.")
+          "collapsible rail, UI scale, themes, single/multi/folder TXT import, native TXT drag/drop, "
+          "managed input copies, selected templates/folders, 1060x720, no QML errors.")
 
 
 if __name__ == "__main__":

@@ -64,7 +64,9 @@ def test_local_txt_skips_upstream(env, tmp_path):
     txt.write_text("نص", encoding="utf-8")
     ident = store.add(items(), cfg.snapshot(), input_path=str(txt))[0]
     job = store.get(ident)
-    assert job["transcript"] == str(txt)
+    assert Path(job["transcript"]) == Path(job["folder"]) / txt.name
+    assert Path(job["transcript"]).read_bytes() == txt.read_bytes()
+    assert job["input_path"] == str(txt)
     assert job["stages"]["download"]["status"] == "skipped"
     assert job["stages"]["deepgram"]["status"] == "skipped"
     assert job["stages"]["opencode"]["status"] == "pending"

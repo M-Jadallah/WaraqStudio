@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -112,14 +113,16 @@ class Store:
                 raise ValueError("المهمة غير موجودة.")
 
     def add(self, items, config, batch="", input_path="", folder_id=""):
+        items = [item for item in items if item.get("selected", True) and item.get("available", True)]
         if not any(config[s + "_enabled"] for s in STAGES):
             raise ValueError("فعّل مرحلة واحدة على الأقل.")
-        if not input_path:
+        if any(not item.get("input_path", input_path) for item in items):
             if not config["download_enabled"]:
                 raise ValueError("مصدر YouTube يحتاج التنزيل؛ استورد الملفات المحلية لتجاوزه.")
             if config["opencode_enabled"] and not config["deepgram_enabled"]:
                 raise ValueError("إنشاء Word يحتاج تفريغًا. فعّل Deepgram أو استورد ملف TXT.")
         added = []
+        copied_folders = []
         batch = batch or uuid.uuid4().hex[:8]
         with self.lock:
             self.folder_name(folder_id)
@@ -127,27 +130,49 @@ class Store:
             try:
                 base = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM jobs").fetchone()[0]
                 for queue_order, item in enumerate(items, 1):
-                    if not item.get("selected", True) or not item.get("available", True):
-                        continue
                     ident = uuid.uuid4().hex[:12]
                     folder = str(Path(config["output_root"]) / ident)
+                    source_path = str(item.get("input_path", input_path))
+                    local_txt = source_path.lower().endswith(".txt")
+                    transcript = ""
+                    if local_txt:
+                        # Own the bytes before publishing a runnable job. The source
+                        # path is kept only for provenance, never for Word input.
+                        content = Path(source_path).read_bytes()
+                        if not content.decode("utf-8-sig").strip():
+                            raise ValueError("ملف التفريغ فارغ.")
+                        managed_folder = Path(folder)
+                        managed_folder.mkdir(parents=True, exist_ok=False)
+                        copied_folders.append(managed_folder)
+                        transcript = str(managed_folder / Path(source_path).name)
+                        Path(transcript).write_bytes(content)
                     self.db.execute("INSERT INTO jobs(id,video_id,title,url,position,batch,config,folder,created,input_path,duration,queue_order,seq,folder_id) "
                                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                     (ident, item["video_id"], item["title"], item.get("url", ""), item["position"],
-                                     batch, json.dumps(config, ensure_ascii=False), folder, time.time(), input_path,
+                                     batch, json.dumps(config, ensure_ascii=False), folder, time.time(), source_path,
                                      item.get("duration") or 0, queue_order, base + queue_order, folder_id))
-                    local_txt = input_path.lower().endswith(".txt")
                     for stage in STAGES:
-                        skip = not config[stage + "_enabled"] or (input_path and stage == "download") or (local_txt and stage == "deepgram")
+                        skip = not config[stage + "_enabled"] or (source_path and stage == "download") or (local_txt and stage == "deepgram")
                         self.db.execute("INSERT INTO stages(job_id,name,status,updated) VALUES(?,?,?,?)",
                                         (ident, stage, "skipped" if skip else "pending", time.time()))
-                    if input_path:
+                    if source_path:
                         field = "transcript" if local_txt else "audio"
-                        self.db.execute(f"UPDATE jobs SET {field}=? WHERE id=?", (input_path, ident))
+                        self.db.execute(f"UPDATE jobs SET {field}=? WHERE id=?", (transcript if local_txt else source_path, ident))
                     added.append(ident)
                 self.db.execute("COMMIT")
-            except BaseException:
+            except BaseException as exc:
                 self.db.execute("ROLLBACK")
+                output_root = Path(config["output_root"]).resolve()
+                for copied_folder in copied_folders:
+                    try:
+                        # Remove only new job directories directly under this
+                        # output root; never follow a replaced directory outside it.
+                        if copied_folder.resolve().parent != output_root:
+                            raise OSError("مسار تنظيف نسخة التفريغ خارج مجلد العمل.")
+                        shutil.rmtree(copied_folder)
+                    except OSError as cleanup_error:
+                        if hasattr(exc, "add_note"):
+                            exc.add_note("تعذر تنظيف نسخة التفريغ: " + str(cleanup_error))
                 raise
         return added
 

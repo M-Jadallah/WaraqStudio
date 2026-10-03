@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -481,38 +483,105 @@ class Bridge(QObject):
         except Exception as exc:
             self.notice.emit(str(exc), True)
 
-    @Slot()
-    @Slot(str)
-    def importLocal(self, folder_id=""):
+    @Slot(result=int)
+    @Slot(str, result=int)
+    @Slot(str, str, result=int)
+    def importLocal(self, folder_id="", template_id=""):
         paths, _ = QFileDialog.getOpenFileNames(None, "استيراد صوت أو تفريغ", "", "Media (*.mp3 *.wav *.m4a *.flac *.ogg *.txt)")
-        added = 0
-        for name in paths:
-            path = Path(name)
-            if path.suffix.lower() == ".txt":
-                # Reject unreadable transcripts here instead of failing later at the Word stage.
-                try:
-                    readable = path.read_text(encoding="utf-8-sig").strip()
-                except (OSError, UnicodeDecodeError) as exc:
-                    self.notice.emit(f"تعذر استيراد «{path.name}»: {exc}", True)
-                    continue
-                if not readable:
-                    self.notice.emit(f"تعذر استيراد «{path.name}»: ملف التفريغ فارغ.", True)
-                    continue
-            cfg = self.config.snapshot()
-            # Audio is normalized by FFmpeg before API upload; local TXT goes directly to Word.
-            cfg["download_enabled"] = False
-            cfg["deepgram_enabled"] = path.suffix.lower() != ".txt"
-            cfg["opencode_enabled"] = True
-            try:
-                self.store.add([{"video_id": "local-" + path.stem, "title": path.stem, "position": 1,
-                                 "url": "", "available": True}], cfg, input_path=str(path), folder_id=folder_id)
-            except Exception as exc:
-                self.notice.emit(f"تعذر استيراد «{path.name}»: {exc}", True)
+        return self._import_paths(paths, template_id, folder_id, transcripts_only=False)
+
+    @Slot(result=int)
+    @Slot(str, result=int)
+    @Slot(str, str, result=int)
+    def importTranscripts(self, template_id="", folder_id=""):
+        paths, _ = QFileDialog.getOpenFileNames(None, "إضافة تفريغات إلى الطابور", "", "تفريغات TXT (*.txt *.TXT)")
+        return self.importTranscriptPaths(paths, template_id, folder_id)
+
+    @staticmethod
+    def _transcript_order(path):
+        # Tagged segments make names beginning with digits and letters comparable.
+        return tuple((1, int(part)) if part.isdigit() else (0, part.casefold())
+                     for part in re.split(r"(\d+)", path.name))
+
+    @Slot(result=int)
+    @Slot(str, result=int)
+    @Slot(str, str, result=int)
+    def importTranscriptFolder(self, template_id="", folder_id=""):
+        name = QFileDialog.getExistingDirectory(None, "اختيار مجلد التفريغات", "")
+        if not name:
+            return 0
+        try:
+            paths = sorted((path for path in Path(name).iterdir() if path.is_file() and path.suffix.lower() == ".txt"),
+                           key=lambda path: (self._transcript_order(path), path.name.casefold(), path.name))
+        except OSError as exc:
+            self.notice.emit("تعذر قراءة مجلد التفريغات: " + str(exc), True)
+            return 0
+        if not paths:
+            self.notice.emit("لا توجد ملفات TXT مباشرة في المجلد المحدد.", True)
+            return 0
+        return self.importTranscriptPaths(paths, template_id, folder_id)
+
+    @Slot("QVariantList", result=int)
+    @Slot("QVariantList", str, result=int)
+    @Slot("QVariantList", str, str, result=int)
+    def importDroppedTranscripts(self, urls, template_id="", folder_id=""):
+        paths, errors = [], []
+        for value in urls:
+            url = value if isinstance(value, QUrl) else QUrl(str(value))
+            if not url.isLocalFile() or url.hasQuery() or url.hasFragment():
+                errors.append("يُقبل سحب ملفات TXT المحلية فقط.")
                 continue
-            added += 1
-        if added:
-            self.notice.emit(f"أضيفت {added} ملفات محلية.", False)
-            self.refresh()
+            paths.append(url.toLocalFile())
+        return self._import_paths(paths, template_id, folder_id, errors=errors)
+
+    def importTranscriptPaths(self, paths, template_id="", folder_id=""):
+        return self._import_paths(paths, template_id, folder_id)
+
+    def _import_paths(self, paths, template_id, folder_id, transcripts_only=True, errors=None):
+        errors = list(errors or [])
+        items, seen = [], set()
+        for name in paths:
+            try:
+                path = Path(name).resolve(strict=True)
+                canonical = os.path.normcase(str(path))
+                if canonical in seen:
+                    continue
+                seen.add(canonical)
+                if not path.is_file():
+                    raise ValueError("المسار ليس ملفًا.")
+                extensions = (".txt",) if transcripts_only else (".txt", ".mp3", ".wav", ".m4a", ".flac", ".ogg")
+                if path.suffix.lower() not in extensions:
+                    raise ValueError("صيغة الملف غير مدعومة؛ أضف ملف TXT." if transcripts_only else "صيغة الملف غير مدعومة.")
+                if path.suffix.lower() == ".txt":
+                    if not path.read_text(encoding="utf-8-sig").strip():
+                        raise ValueError("ملف التفريغ فارغ.")
+                items.append({"video_id": "local-" + path.stem, "title": path.stem, "position": len(items) + 1,
+                              "url": "", "input_path": str(path)})
+            except (OSError, UnicodeError, ValueError) as exc:
+                errors.append(f"تعذر استيراد «{Path(name).name}»: {exc}")
+        count = 0
+        if items:
+            try:
+                cfg = self.config.snapshot()
+                cfg["download_enabled"] = False
+                cfg["deepgram_enabled"] = any(not item["input_path"].lower().endswith(".txt") for item in items)
+                cfg["opencode_enabled"] = True
+                template = next((t for t in cfg["opencode_templates"] if t["id"] == template_id), None)
+                if template_id and not template:
+                    raise ValueError("القالب المحدد غير موجود؛ اختر قالبًا آخر.")
+                if template:
+                    cfg["prompt"], cfg["template_name"] = template["text"], template["name"]
+                count = len(self.store.add(items, cfg, folder_id=folder_id))
+                self.refresh()
+            except Exception as exc:
+                errors.append("تعذر إضافة الملفات إلى الطابور: " + str(exc))
+                errors.extend(getattr(exc, "__notes__", ()))
+        if count or errors:
+            message = f"أضيفت {count} ملفات إلى الطابور." if count else "لم تُضف ملفات إلى الطابور."
+            if errors:
+                message += "\n" + "\n".join(dict.fromkeys(errors))
+            self.notice.emit(message, bool(errors))
+        return count
 
     @Slot()
     def toggleRunning(self):
