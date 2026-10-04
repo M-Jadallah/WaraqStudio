@@ -520,9 +520,23 @@ def main():
         assert not find(root.contentItem(), "deleteSelectedJobsButton").property("enabled")
         for stage in ("download", "deepgram", "opencode"):
             assert find(root.contentItem(), "queueStage-" + pending_id + "-" + stage) is not None
-        jobs_view.setProperty("contentY", max(0, jobs_view.property("contentHeight") - jobs_view.property("height")))
-        QMetaObject.invokeMethod(jobs_view, "positionViewAtIndex", Q_ARG("int", len(bridge.jobs) - 1), Q_ARG("int", 2))
-        QTest.qWait(150)
+        # Filtering changes delegate heights asynchronously. Position against
+        # the settled layout and verify the click is inside the clipped list;
+        # estimated contentHeight + a fixed sleep can leave the last checkbox
+        # below the viewport on slower Windows runners.
+        deadline = time.monotonic() + 3
+        while True:
+            QMetaObject.invokeMethod(jobs_view, "forceLayout")
+            QMetaObject.invokeMethod(jobs_view, "positionViewAtIndex", Q_ARG("int", len(bridge.jobs) - 1), Q_ARG("int", 1))
+            QTest.qWait(100)
+            checkbox = find(root.contentItem(), "selectJob-" + local_id)
+            center = checkbox.mapToScene(checkbox.boundingRect().center()) if checkbox is not None else QPointF(-1, -1)
+            view_origin = jobs_view.mapToScene(QPointF(0, 0))
+            if (view_origin.x() < center.x() < view_origin.x() + jobs_view.width()
+                    and view_origin.y() < center.y() < view_origin.y() + jobs_view.height()
+                    and 0 < center.y() < root.height()):
+                break
+            assert time.monotonic() < deadline, (center, view_origin, jobs_view.height())
         assert find(root.contentItem(), "queueStage-" + local_id + "-opencode") is not None
         assert find(root.contentItem(), "queueStage-" + local_id + "-download") is None
         assert find(root.contentItem(), "queueStage-" + local_id + "-deepgram") is None
