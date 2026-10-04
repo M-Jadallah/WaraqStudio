@@ -382,6 +382,19 @@ def main():
         QTest.qWait(80)
         selected_folder = folder_box.property("currentValue")
         assert selected_folder and template_box.property("currentValue") == "tplx"
+        original_defaults = config.snapshot()
+        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=""):
+            click("sourceOutputFolderButton")
+        assert config.snapshot() == original_defaults
+        selected_output = home / "نتائج Word المختارة"
+        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=str(selected_output)):
+            click("sourceOutputFolderButton")
+        QTest.qWait(80)
+        assert config.snapshot()["output_root"] == str(selected_output)
+        assert template_box.property("currentValue") == "tplx"
+        assert folder_box.property("currentValue") == selected_folder
+        assert find(root.contentItem(), "sourceOutputFolderPath").property("text") == str(selected_output)
+        root.setProperty("toastText", "")
         imports = home / "inputs with spaces"
         imports.mkdir()
         single = imports / "تفريغ واحد.txt"
@@ -399,6 +412,8 @@ def main():
                 assert job["config"]["prompt"].startswith("استخدم مهارة عربية للخطب")
                 managed = Path(job["transcript"])
                 assert managed.parent == Path(job["folder"])
+                assert Path(job["folder"]).parent == selected_output
+                assert job["config"]["output_root"] == str(selected_output)
                 assert managed != source_file and managed.read_bytes() == source_file.read_bytes()
                 assert job["stages"]["download"]["status"] == "skipped"
                 assert job["stages"]["deepgram"]["status"] == "skipped"
@@ -448,6 +463,8 @@ def main():
         assert enter.isAccepted(), "native TXT drag was not accepted"
         overlay = find(root.contentItem(), "transcriptDropOverlay")
         assert overlay is not None and overlay.isVisible()
+        drop_options = find(root.contentItem(), "transcriptDropOptions").property("text")
+        assert "خطب" in drop_options and str(selected_output) in drop_options
         if len(sys.argv) > 1:
             root.grabWindow().save(str(Path(sys.argv[1]) / "txt-drop-overlay.png"))
         drop = QDropEvent(QPointF(point), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
@@ -479,7 +496,8 @@ def main():
             origin = control.mapToScene(QPointF(0, 0))
             assert origin.x() >= 0 and origin.x() + control.width() <= root.width() + 1, (name, origin)
             assert origin.y() >= 0 and origin.y() + control.height() <= root.height() + 1, (name, origin)
-        for name in ("importTranscriptsButton", "importTranscriptFolderButton"):
+        for name in ("templateBox", "sourceFolderCombo", "sourceOutputFolderButton", "sourceOutputFolderPath",
+                     "importTranscriptsButton", "importTranscriptFolderButton"):
             assert_in_window(name)
         if len(sys.argv) > 1:
             root.setProperty("toastText", "")
@@ -491,7 +509,7 @@ def main():
         assert flick.property("contentHeight") > flick.property("height")
         flick.setProperty("contentY", flick.property("contentHeight") - flick.property("height"))
         QTest.qWait(100)
-        for name in ("sourceFolderCombo", "templateBox", "sourcePreset", "enqueueSourceButton"):
+        for name in ("sourcePreset", "enqueueSourceButton"):
             assert_in_window(name)
         source_view = find(root.contentItem(), "sourceList")
         assert source_view is not None and source_view.height() >= 100

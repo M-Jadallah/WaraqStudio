@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import sqlite3
 import zipfile
@@ -58,6 +59,53 @@ def test_import_owns_exact_bytes_and_captures_template_folder(imports, tmp_path)
     assert [job["stages"][stage]["status"] for stage in ("download", "deepgram", "opencode")] == ["skipped", "skipped", "pending"]
     source.unlink()
     assert Path(job["transcript"]).read_bytes() == original
+
+
+@pytest.mark.parametrize("method", ["files", "folder", "drop"])
+def test_txt_import_methods_capture_saved_output_root_template_and_subject(imports, tmp_path, monkeypatch, method):
+    bridge, store, config, _, _ = imports
+    sources = tmp_path / "source transcripts"
+    sources.mkdir()
+    source = transcript(sources, "درس مختار.txt")
+    output_root = tmp_path / "chosen output"
+    library_root = tmp_path / "separate library"
+    subject = store.create_folder("المادة المختارة")
+    prompt = "القالب المختار: {transcript_path} إلى {output_path}"
+    settings = config.snapshot()
+    settings.update(output_root=str(output_root), library_root=str(library_root))
+    settings["opencode_templates"].append({"id": "chosen", "name": "قالب المادة", "text": prompt})
+    assert bridge.saveSettings(json.dumps(settings, ensure_ascii=False))
+    if method == "files":
+        monkeypatch.setattr("waraq.bridge.QFileDialog.getOpenFileNames", lambda *a: ([str(source)], ""))
+        count = bridge.importTranscripts("chosen", subject)
+    elif method == "folder":
+        monkeypatch.setattr("waraq.bridge.QFileDialog.getExistingDirectory", lambda *a: str(sources))
+        count = bridge.importTranscriptFolder("chosen", subject)
+    else:
+        count = bridge.importDroppedTranscripts([QUrl.fromLocalFile(str(source)).toString()], "chosen", subject)
+    assert count == 1
+    job = store.jobs()[0]
+    assert job["config"]["output_root"] == str(output_root)
+    assert Path(job["folder"]).parent == output_root
+    assert Path(job["transcript"]).parent == Path(job["folder"])
+    assert Path(job["transcript"]).read_bytes() == source.read_bytes()
+    assert job["input_path"] == str(source.resolve())
+    assert job["config"]["prompt"] == prompt
+    assert job["config"]["template_name"] == "قالب المادة"
+    assert job["folder_id"] == subject
+    assert job["folder_name"] == "المادة المختارة"
+    assert output_root != library_root
+    changed = config.snapshot()
+    changed.update(output_root=str(tmp_path / "different output"), prompt="قالب آخر {transcript_path} {output_path}")
+    changed["opencode_templates"][1]["text"] = "نص قالب جديد {transcript_path} {output_path}"
+    changed["opencode_templates"][1]["name"] = "اسم جديد"
+    assert bridge.saveSettings(json.dumps(changed, ensure_ascii=False))
+    captured = store.get(job["id"])
+    assert captured["config"]["output_root"] == str(output_root)
+    assert captured["config"]["prompt"] == prompt
+    assert captured["config"]["template_name"] == "قالب المادة"
+    assert captured["folder"] == job["folder"]
+    assert captured["transcript"] == job["transcript"]
 
 
 def test_multiple_paths_share_batch_and_strict_queue_order(imports, tmp_path):

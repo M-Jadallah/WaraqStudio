@@ -13,6 +13,7 @@ ApplicationWindow {
     title: "ورق | Waraq Studio"
     property int page: 0
     property var settings: JSON.parse(backend.settingsJson)
+    readonly property string savedOutputRoot: JSON.parse(backend.settingsJson).output_root || ""
     readonly property var queueSnapshot: JSON.parse(backend.jobsJson)
     readonly property var appUpdateState: backend.appUpdate || ({status: "idle", version: "", progress: 0, message: "", hasToken: false})
     property bool dark: settings.theme !== "light"
@@ -49,6 +50,22 @@ ApplicationWindow {
     function rh(n) { return Math.max(20, Math.round(n * uiScale * density)) }
     function rs(n) { return Math.max(2, Math.round(n * density)) }
     function transcriptTemplateId() { return backend.templates.length > 0 ? (templateBox.currentValue || "") : "" }
+    function chooseSourceOutputFolder() {
+        var path = backend.choosePath("folder")
+        if (!path) return
+        var templateId = win.transcriptTemplateId()
+        var folderId = sourceFolderCombo.currentValue || ""
+        var updated = JSON.parse(backend.settingsJson)
+        updated.output_root = path
+        if (backend.saveSettings(JSON.stringify(updated))) {
+            // Saving defaults republishes the template model; keep the user's
+            // chosen template and subject when the ComboBoxes settle.
+            Qt.callLater(function() {
+                templateBox.currentIndex = Math.max(0, backend.templates.findIndex(function(t) { return t.id === templateId }))
+                sourceFolderCombo.currentIndex = Math.max(0, backend.folders.findIndex(function(f) { return f.id === folderId }))
+            })
+        }
+    }
     function hasLocalTranscript(urls) {
         for (var i = 0; i < urls.length; i++) {
             if (/^file:\/\/.*\.txt$/i.test(urls[i].toString())) return true
@@ -568,8 +585,39 @@ ApplicationWindow {
                             ColumnLayout {
                                 id: sourceImportContent
                                 anchors.fill: parent; anchors.margins: win.rs(14); spacing: win.rs(8)
-                                LabelText { text: "ما الذي تريد تحويله اليوم؟"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
-                                SubText { text: "رابط فيديو واحد أو قائمة تشغيل. ستختار الفيديوهات قبل إضافتها إلى الطابور."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                LabelText { text: "إعدادات الناتج"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                SubText { text: "اختر القالب ومجلد الناتج قبل إضافة التفريغات أو فيديوهات YouTube."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                GridLayout {
+                                    Layout.fillWidth: true
+                                    columns: sourcePage.width < 1000 * win.uiScale ? 2 : 4
+                                    columnSpacing: win.rs(8); rowSpacing: win.rs(6)
+                                    LabelText { text: "قالب البرومبت"; Layout.row: 0; Layout.column: 0 }
+                                    ComboBox { id: templateBox; objectName: "templateBox"; model: backend.templates; textRole: "name"; valueRole: "id"; Layout.row: 0; Layout.column: 1; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200; Accessible.name: "قالب البرومبت" }
+                                    LabelText { text: "مجلد المادة / الدرس"; Layout.row: parent.columns === 2 ? 1 : 0; Layout.column: parent.columns === 2 ? 0 : 2 }
+                                    RowLayout {
+                                        Layout.row: parent.columns === 2 ? 1 : 0; Layout.column: parent.columns === 2 ? 1 : 3
+                                        Layout.fillWidth: true; Layout.minimumWidth: 80; spacing: win.rs(8)
+                                        ComboBox { id: sourceFolderCombo; objectName: "sourceFolderCombo"; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200; Accessible.name: "مجلد المادة أو الدرس" }
+                                        AppButton { text: "مجلد جديد"; implicitHeight: win.rh(36); onClicked: folderDialog.open() }
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: win.rs(8)
+                                    AppButton { objectName: "sourceOutputFolderButton"; text: "اختيار المجلد"; implicitHeight: win.rh(36); onClicked: win.chooseSourceOutputFolder() }
+                                    AppField { objectName: "sourceOutputFolderPath"; Layout.fillWidth: true; Layout.minimumWidth: 80; text: win.savedOutputRoot; readOnly: true; selectByMouse: true; Accessible.name: "مسار مجلد النتائج الافتراضي" }
+                                    LabelText { text: "مجلد النتائج الافتراضي"; font.pixelSize: win.fs(13) }
+                                }
+                                LabelText { text: "تفريغات جاهزة إلى Word"; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: win.rs(8)
+                                    AppButton { objectName: "importTranscriptsButton"; text: "إضافة ملفات TXT"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscripts(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
+                                    AppButton { objectName: "importTranscriptFolderButton"; text: "إضافة مجلد تفريغات"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscriptFolder(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
+                                    AppButton { text: "إدارة القوالب"; implicitHeight: win.rh(36); onClicked: win.openTemplates() }
+                                    Item { Layout.fillWidth: true }
+                                }
+                                SubText { text: "يمكنك أيضًا إفلات ملفات TXT في التطبيق. تُنتج Word بالقالب والمجلد المحددين أعلاه، دون تنزيل أو تفريغ صوتي. مسار النتائج هو الافتراضي للمهام الجديدة؛ مجلد المادة ينظّم نسخ المكتبة."; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: win.line }
+                                LabelText { text: "YouTube أو ملف صوتي"; font.weight: Font.DemiBold; Layout.fillWidth: true }
                                 RowLayout {
                                     Layout.fillWidth: true; spacing: 10
                                     AppButton { objectName: "discoverButton"; text: backend.busy ? "جارٍ القراءة…" : "قراءة المصدر"; primary: true; enabled: !backend.busy && urlField.text.length > 0; onClicked: backend.discover(urlField.text, forceRefresh.checked) }
@@ -582,14 +630,6 @@ ApplicationWindow {
                                     Item { Layout.fillWidth: true }
                                     CheckBox { id: forceRefresh; text: "تحديث المعلومات المحفوظة"; palette.windowText: win.muted }
                                 }
-                                RowLayout {
-                                    Layout.fillWidth: true; spacing: win.rs(8)
-                                    AppButton { objectName: "importTranscriptsButton"; text: "إضافة ملفات TXT"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscripts(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
-                                    AppButton { objectName: "importTranscriptFolderButton"; text: "إضافة مجلد تفريغات"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscriptFolder(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
-                                    Item { Layout.fillWidth: true }
-                                    LabelText { text: "تفريغات جاهزة إلى Word"; Layout.fillWidth: true; Layout.minimumWidth: 0 }
-                                }
-                                SubText { text: "اسحب ملف TXT أو عدة ملفات إلى أي مكان في التطبيق. تُنسخ إلى مجلد العمل وتُضاف للطابور لإنتاج Word عبر OpenCode مباشرة، بالقالب ومجلد الدرس المحددين أدناه."; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight }
                             }
                         }
                         RowLayout {
@@ -629,18 +669,9 @@ ApplicationWindow {
                         }
                         RowLayout {
                             Layout.fillWidth: true
-                            AppButton { text: "مجلد جديد"; onClicked: folderDialog.open() }
-                            ComboBox { id: sourceFolderCombo; objectName: "sourceFolderCombo"; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 220; Accessible.name: "مجلد المادة أو الدرس" }
-                            LabelText { text: "مجلد المادة / الدرس" }
-                        }
-                        GridLayout {
-                            Layout.fillWidth: true
-                            columns: sourcePage.width < 1000 * win.uiScale ? 2 : 4
-                            columnSpacing: win.rs(8); rowSpacing: win.rs(6)
-                            LabelText { text: "قالب البرومبت"; visible: templateBox.visible; Layout.row: 0; Layout.column: 0 }
-                            ComboBox { id: templateBox; objectName: "templateBox"; visible: backend.templates.length > 0; model: backend.templates; textRole: "name"; valueRole: "id"; Layout.row: 0; Layout.column: 1; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200; Accessible.name: "قالب البرومبت" }
-                            LabelText { text: "مراحل المعالجة"; Layout.row: parent.columns === 2 ? 1 : 0; Layout.column: parent.columns === 2 ? 0 : 2 }
-                            ComboBox { id: preset; objectName: "sourcePreset"; model: ["الدورة الكاملة حتى Word", "تنزيل وتفريغ فقط", "تنزيل فقط", "القالب المخصص من الإعدادات"]; Layout.row: parent.columns === 2 ? 1 : 0; Layout.column: parent.columns === 2 ? 1 : 3; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 230; Accessible.name: "مراحل المعالجة" }
+                            spacing: win.rs(8)
+                            LabelText { text: "مراحل معالجة الفيديو / الصوت" }
+                            ComboBox { id: preset; objectName: "sourcePreset"; model: ["الدورة الكاملة حتى Word", "تنزيل وتفريغ فقط", "تنزيل فقط", "القالب المخصص من الإعدادات"]; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 230; Accessible.name: "مراحل المعالجة" }
                         }
                         RowLayout {
                             Layout.fillWidth: true
@@ -1068,6 +1099,7 @@ ApplicationWindow {
                 anchors.centerIn: parent; width: Math.min(660, parent.width - 80); spacing: win.rs(16)
                 LabelText { text: "أفلت تفريغات TXT لإضافتها إلى الطابور"; font.pixelSize: win.fs(24); Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
                 SubText { text: "تُنسخ الملفات تلقائيًا إلى مجلد العمل لإنتاج Word عبر OpenCode. يُستخدم القالب ومجلد الدرس المحددان في صفحة إضافة مصدر، وتُتجاهل الملفات الأخرى."; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
+                SubText { objectName: "transcriptDropOptions"; text: "القالب: " + templateBox.currentText + "  ·  المادة: " + sourceFolderCombo.currentText + "\nمجلد النتائج: " + win.savedOutputRoot; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WrapAnywhere }
             }
         }
     }
