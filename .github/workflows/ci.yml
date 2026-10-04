@@ -41,3 +41,6 @@ jobs:
 
       - name: Native UI interaction checks
         run: python tests/verify_ui.py
+
+      - name: Native queue scrolling stress
+        run: python tests/verify_queue_scroll.py

@@ -27,6 +27,7 @@ STAGE_LABELS = {"download": "التنزيل", "deepgram": "التفريغ", "ope
 
 class Bridge(QObject):
     changed = Signal()
+    jobsChanged = Signal()
     sourceChanged = Signal()
     settingsChanged = Signal()
     notice = Signal(str, bool)
@@ -46,6 +47,7 @@ class Bridge(QObject):
         super().__init__()
         self.store, self.config, self.secrets, self.scheduler = store, config, secrets, scheduler
         self._jobs, self._workers, self._logs, self._source = [], [], [], []
+        self._jobs_json = "[]"
         self._running = False
         self._source_title = ""
         self._busy = False
@@ -105,6 +107,11 @@ class Bridge(QObject):
 
     @Property("QVariantList", notify=changed)
     def jobs(self): return self._jobs
+
+    @Property(str, notify=jobsChanged)
+    def jobsJson(self):
+        """A cached snapshot QML can parse once into a native JavaScript array."""
+        return self._jobs_json
 
     @Property("QVariantList", notify=changed)
     def workers(self): return self._workers
@@ -451,12 +458,17 @@ class Bridge(QObject):
                 self._auto_stop_seen = True
         # The timer fires while idle too; republishing identical state would
         # make QML re-evaluate every binding for nothing.
-        if result == self._jobs and workers == self._workers and logs == self._logs and running == self._running:
+        jobs_changed = result != self._jobs
+        if not jobs_changed and workers == self._workers and logs == self._logs and running == self._running:
             return
         self._jobs, self._workers, self._logs, self._running = result, workers, logs, running
-        self._jobs_model.update_items(result)
+        if jobs_changed:
+            self._jobs_json = json.dumps(result, ensure_ascii=False)
+            self._jobs_model.update_items(result)
         self._workers_model.update_items(workers)
         self._publish_results()
+        if jobs_changed:
+            self.jobsChanged.emit()
         self.changed.emit()
 
     @staticmethod

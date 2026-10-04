@@ -13,6 +13,7 @@ ApplicationWindow {
     title: "ورق | Waraq Studio"
     property int page: 0
     property var settings: JSON.parse(backend.settingsJson)
+    readonly property var queueSnapshot: JSON.parse(backend.jobsJson)
     readonly property var appUpdateState: backend.appUpdate || ({status: "idle", version: "", progress: 0, message: "", hasToken: false})
     property bool dark: settings.theme !== "light"
     readonly property color bg: dark ? "#0d1422" : "#f3f6fa"
@@ -72,7 +73,7 @@ ApplicationWindow {
             && (search.length === 0 || job.title.toLowerCase().indexOf(search.toLowerCase()) >= 0)
     }
     function visibleQueueIds() {
-        return backend.jobs.filter(function(job) { return win.matches(job) }).map(function(job) { return job.id })
+        return win.queueSnapshot.filter(function(job) { return win.matches(job) }).map(function(job) { return job.id })
     }
     function visibleQueueSelectionCount() {
         return win.visibleQueueIds().filter(function(id) { return win.selectedQueueIds.indexOf(id) >= 0 }).length
@@ -88,7 +89,7 @@ ApplicationWindow {
         win.selectedQueueIds = selected ? next.concat(visibleIds) : next
     }
     function reconcileQueueSelection() {
-        var existing = backend.jobs.map(function(job) { return job.id })
+        var existing = win.queueSnapshot.map(function(job) { return job.id })
         var next = win.selectedQueueIds.filter(function(id) { return existing.indexOf(id) >= 0 })
         if (next.length !== win.selectedQueueIds.length) win.selectedQueueIds = next
     }
@@ -98,7 +99,7 @@ ApplicationWindow {
     }
     function attentionGroups() {
         var groups = {}
-        backend.jobs.forEach(function(job) {
+        win.queueSnapshot.forEach(function(job) {
             if (["failed", "blocked", "uncertain"].indexOf(job.status) < 0 || !win.matches(job)) return
             var key = job.current + ":" + job.status
             if (!groups[key]) groups[key] = {stage: job.current, status: job.status,
@@ -273,13 +274,13 @@ ApplicationWindow {
             autoStopTimer.restart()
         }
         function onChanged() {
-            win.reconcileQueueSelection()
             if (jobDialog.opened && selectedJob.id) {
                 var currentJob = backend.jobById(String(selectedJob.id))
                 if (currentJob.id) selectedJob = currentJob
                 win.updateJobLog()
             }
         }
+        function onJobsChanged() { win.reconcileQueueSelection() }
     }
     Connections {
         target: win

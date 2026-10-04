@@ -2,6 +2,8 @@
 
 The native Qt Quick/QML UI talks to a QObject bridge. The bridge runs source discovery off the GUI thread and presents snapshots of durable state. SQLite WAL transactions serialize task claims. A scheduler owns one download slot plus independent Deepgram and OpenCode worker pools. Each worker has at most one active job and a private cancellation event.
 
+Queue aggregates and selection use a native JavaScript array parsed from cached `Bridge.jobsJson`, invalidated only by `jobsChanged`. Iterating a Python QVariantList from QML repeatedly reads/converts the entire sequence and can stall large queues. Worker elapsed-time and log-only refreshes do not invalidate the queue snapshot. The visible list still uses `jobsModel` for in-place row updates and stable scrolling.
+
 Bulk queue deletion takes the scheduler lock before the store lock, matching dispatch. It removes idle job/stage rows in one transaction while retaining events, source files, workspaces and library copies. An active worker protects its job until publication/finally completes, even after its stage becomes completed; retry uses the same guard. Cancellation holds the dispatch lock throughout stage-state changes. Worker preparation/start failures become visible failures and release their active slot. The bridge retains all stages for durable dependency logic, while imported TXT rows expose only the Word step to QML.
 
 Modules:
