@@ -113,6 +113,7 @@ jobs:
         run: |
           ./Windows/WaraqStudio/WaraqStudio.exe --check-environment env-report.json
           cat env-report.json
+          python -c "import json, os; d=json.load(open('env-report.json')); assert d['version']==os.environ['VERSION'], (d['version'], os.environ['VERSION']); assert d['ffmpeg_exists'], d"
 
       - name: Smoke test bundled exe (UI launch)
         run: ./Windows/WaraqStudio/WaraqStudio.exe --smoke
@@ -144,11 +145,14 @@ jobs:
           إصدار تلقائي بواسطة GitHub Actions (وسم $TAG، من الالتزام ${GITHUB_SHA:0:7}).
 
           ## الملفات المرفقة
-          - \`WaraqStudio-${TAG#v}-setup.exe\` — **ملف التثبيت**: شغّله وسيثبّت التطبيق وكل ما يحتاجه (Python وQt وFFmpeg وyt-dlp مضمّنة داخله — لا يحتاج تثبيت أي شيء آخر) في Program Files، مع اختصار في قائمة ابدأ (وسطح المكتب اختياريًا) وإمكانية الإزالة من إعدادات Windows.
+          - \`WaraqStudio-${TAG#v}-setup.exe\` — **ملف التثبيت**: يثبّت التطبيق مع Python وQt وFFmpeg وyt-dlp المضمّنة في Program Files، مع اختصار في قائمة ابدأ (وسطح المكتب اختياريًا) وإمكانية الإزالة من إعدادات Windows.
           - \`WaraqStudio-$TAG-windows-x64.zip\` — بديل محمول دون تثبيت: فك الضغط وشغّل \`WaraqStudio.exe\` (أو \`Start.cmd\`).
           - \`WaraqStudio-$TAG-source.zip\` — نسخة مضغوطة من الكود المصدري.
 
           ## ملاحظات
+          - إنتاج Word يحتاج OpenCode وإعداد مزوّد النموذج ومهارة التنسيق المستخدمة؛ تنزيل YouTube يحتاج Node.js أو Deno مناسبًا. هذه الأدوات وحساباتها خارج الحزمة.
+          - يمكنك تحديد عناصر الطابور وحذف سجلاتها مع الاحتفاظ بالملفات. التفريغات TXT المستوردة تعرض مرحلة Word وحدها.
+          - يتوفر فحص تحديث التطبيق وتنزيل مُثبّت موثَّق بالبصمة من الإعدادات. الإصدارات الخاصة تحتاج رمز GitHub شخصيًا له صلاحية قراءة المستودع.
           - أدخل مفاتيح Deepgram وOpenCode من شاشة الإعدادات داخل التطبيق — لا تُضمَّن أي مفاتيح أو بيانات في التثبيت.
           - بيانات المستخدم تُحفظ في \`%LOCALAPPDATA%\\WaraqStudio\` ولا تُحذف عند إزالة التطبيق.
           - يتوفر أيضًا «Source code (zip)» يُنشئه GitHub تلقائيًا أسفل الإصدار.

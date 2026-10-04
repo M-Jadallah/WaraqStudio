@@ -2,6 +2,8 @@
 
 The native Qt Quick/QML UI talks to a QObject bridge. The bridge runs source discovery off the GUI thread and presents snapshots of durable state. SQLite WAL transactions serialize task claims. A scheduler owns one download slot plus independent Deepgram and OpenCode worker pools. Each worker has at most one active job and a private cancellation event.
 
+Bulk queue deletion takes the scheduler lock before the store lock, matching dispatch. It removes idle job/stage rows in one transaction while retaining events, source files, workspaces and library copies. An active worker protects its job until publication/finally completes, even after its stage becomes completed; retry uses the same guard. Cancellation holds the dispatch lock throughout stage-state changes. Worker preparation/start failures become visible failures and release their active slot. The bridge retains all stages for durable dependency logic, while imported TXT rows expose only the Word step to QML.
+
 Modules:
 
 - `config.py`: validated non-secret settings, atomic writes, Windows credential-store integration, one-time worker-pool migration and explicit legacy import.
@@ -10,6 +12,7 @@ Modules:
 - `scheduler.py`: dependency/order gates, per-project concurrency, downstream queue/disk backpressure and worker lifecycle.
 - `library.py`: subject/type-grouped mirror of finished artifacts, Word export, and a stable name manifest.
 - `bridge.py`: UI operations and background discovery; no paid requests on startup.
+- `app_update.py`: stable GitHub installer lookup, numeric version comparison, optional per-user credential-store token for private releases, streamed/cancellable download, exact size and GitHub SHA256 digest verification, and atomic commit under the user data directory. The bridge marshals progress/results onto the GUI thread; install re-verifies the file, requires a paused/drained queue, launches Windows elevation and quits. CI stamps `_build_version.txt` into the frozen package and asserts its version in the executable environment smoke test.
 - `models.py`: `DictListModel`, a QAbstractListModel over dicts that syncs rows in place (dataChanged / row insert / row remove) instead of the wholesale QVariantList republishing that used to reset every QML ListView to the top. Each model exposes a reserved `row` role holding the whole row dict; delegates read `row.<key>` so a data key (a worker's own `model` field) can never shadow the delegate's `model` wrapper.
 - `qml/`: native screens and reusable controls. Data lists bind to bridge models (`jobsModel`, `workersModel`, `sourceModel`, `resultsModel`, `filesModel`, `providersModel`) so progress ticks, log lines and worker elapsed seconds update rows in place and never disturb the scroll position. Fonts and control metrics scale through `ui_scale` (0.8–1.4, live-applied from Settings) via a shared `fs()` helper and a `uiScale` property on the button/field primitives; `ui_compact` shrinks list rows, paddings and gaps through the `rh()`/`rs()`/`density` helpers; `ui_rail_collapsed` persists the collapsible navigation rail.
 

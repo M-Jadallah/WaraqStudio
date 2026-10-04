@@ -2,14 +2,24 @@
 import subprocess
 import shutil
 import sys
+import os
+import re
 from pathlib import Path
+
+from waraq import __version__
 
 root = Path(__file__).resolve().parent
 work = root.parents[1] / "work" / "pyinstaller"
 work.mkdir(parents=True, exist_ok=True)
+version = os.environ.get("VERSION", __version__)
+if not re.fullmatch(r"\d+(?:\.\d+){2,3}", version):
+    raise ValueError("VERSION must be a numeric application release version")
+version_file = work / "_build_version.txt"
+version_file.write_text(version, encoding="utf-8")
 command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--name", "WaraqStudio",
            "--distpath", str(root / "Windows"), "--workpath", str(work / "build"),
            "--specpath", str(work), "--add-data", str(root / "waraq/qml") + ";waraq/qml",
+           "--add-data", str(version_file) + ";waraq",
            "--add-data", str(root / "waraq/icon.svg") + ";waraq", "--icon", str(root / "waraq/icon.ico"),
            "--collect-all", "yt_dlp_ejs", "--collect-all", "imageio_ffmpeg",
            "--collect-submodules", "yt_dlp_plugins", "--hidden-import", "keyring.backends.Windows",

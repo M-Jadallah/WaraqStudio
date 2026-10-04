@@ -90,7 +90,8 @@ class Scheduler:
             self.thread.start()
 
     def pause(self):
-        self.running = False
+        with self.lock:
+            self.running = False
 
     def pause_stage(self, stage, pause):
         """User-driven service pause; never mixed with automatic failure blocks."""
@@ -114,16 +115,32 @@ class Scheduler:
             for active in self.active.values():
                 if active["job_id"] == ident:
                     active["cancel"].set()
-        job = self.store.get(ident)
-        if job:
-            for name, stage in job["stages"].items():
-                if stage["status"] in ("pending", "paused"):
-                    self.store.set_stage(ident, name, "cancelled")
+            job = self.store.get(ident)
+            if job:
+                for name, stage in job["stages"].items():
+                    if stage["status"] in ("pending", "paused"):
+                        self.store.set_stage(ident, name, "cancelled")
+
+    def delete_jobs(self, idents):
+        """Delete idle queue entries; preserve every source/output/library file."""
+        # Dispatch claims and registers active workers under this same lock.
+        # Keep the order scheduler -> store, so deletion either wins before a
+        # claim or sees the worker as busy through its publication/finally.
+        with self.lock:
+            busy_ids = {active["job_id"] for active in self.active.values()}
+            return self.store.delete_jobs(idents, busy_ids=busy_ids)
+
+    def retry_job(self, ident, stage, rerun=False):
+        """Do not start another revision while a worker still owns this job."""
+        with self.lock:
+            if any(active["job_id"] == ident for active in self.active.values()):
+                raise ValueError("انتظر انتهاء العامل ونشر نتائجه قبل إعادة المحاولة.")
+            self.store.retry(ident, stage, rerun)
 
     def shutdown(self):
-        self.running = False
-        self.stop_event.set()
         with self.lock:
+            self.running = False
+            self.stop_event.set()
             for active in self.active.values():
                 active["cancel"].set()
 
@@ -201,12 +218,12 @@ class Scheduler:
                 except Exception as exc:
                     self.store.event("", "تعذر تقليم السجل: " + str(exc), "error")
             try:
-                self.tick()
+                self.tick(require_running=True)
             except Exception as exc:
                 self.store.event("", "توقف المنظم للمراجعة: " + str(exc), "error")
                 self.running = False
 
-    def tick(self):
+    def tick(self, require_running=False):
         cfg = self.config.snapshot()
         jobs = self.store.jobs()
         backups = self.deepgram_backups(cfg)
@@ -262,6 +279,8 @@ class Scheduler:
                             self.block_stage(stage, message)
                             break
                     with self.lock:
+                        if self.stop_event.is_set() or (require_running and not self.running):
+                            return
                         if wid in self.active:
                             continue
                         if stage == "deepgram" and sum(a["stage"] == stage and a.get("project") == worker["project"] for a in self.active.values()) >= cfg["project_concurrency"]:
@@ -272,26 +291,33 @@ class Scheduler:
                         cancel = threading.Event()
                         self.active[wid] = {"job_id": job["id"], "stage": stage, "cancel": cancel,
                                             "project": worker.get("project"), "started": time.time()}
-                    thread = threading.Thread(target=self.execute, args=(job, stage, worker.copy(), secret, cancel), daemon=True, name=wid)
-                    thread.start()
+                    try:
+                        thread = threading.Thread(target=self.execute, args=(job, stage, worker.copy(), secret, cancel), daemon=True, name=wid)
+                        thread.start()
+                    except Exception as exc:
+                        message = str(exc).replace(secret, "[محجوب]") if secret else str(exc)
+                        with self.lock:
+                            self.active.pop(wid, None)
+                            self.store.set_stage(job["id"], stage, "failed", "تعذر بدء العامل: " + message)
+                            self.store.event(job["id"], "تعذر بدء العامل: " + message, "error")
                     break
 
     def execute(self, job, stage, worker, secret, cancel):
         wid, ident = worker["id"], job["id"]
-        cfg = job["config"].copy()
-        if stage != "download":
-            saved_workers = cfg[stage + "_workers"]
-            saved = next((w for w in saved_workers if w["id"] == wid), saved_workers[0])
-            worker = {**saved, "id": wid, "name": worker["name"], "project": worker.get("project", "")}
-            if stage == "opencode":
-                worker = self.effective_worker(worker)
-        # Cookie repairs and executable paths apply without recreating queued work.
-        live = self.config.snapshot()
-        for k in ("cookies_file", "opencode_executable", "opencode_context", "opencode_data_root"):
-            cfg[k] = live[k]
-        self.store.event(ident, f"بدء {stage} — {wid}")
-        progress = lambda value: self.store.progress(ident, stage, value)
         try:
+            cfg = job["config"].copy()
+            if stage != "download":
+                saved_workers = cfg[stage + "_workers"]
+                saved = next((w for w in saved_workers if w["id"] == wid), saved_workers[0])
+                worker = {**saved, "id": wid, "name": worker["name"], "project": worker.get("project", "")}
+                if stage == "opencode":
+                    worker = self.effective_worker(worker)
+            # Cookie repairs and executable paths apply without recreating queued work.
+            live = self.config.snapshot()
+            for k in ("cookies_file", "opencode_executable", "opencode_context", "opencode_data_root"):
+                cfg[k] = live[k]
+            self.store.event(ident, f"بدء {stage} — {wid}")
+            progress = lambda value: self.store.progress(ident, stage, value)
             if stage == "download":
                 output = self.youtube.download(job, cfg, cancel, progress)
                 kind = "audio"

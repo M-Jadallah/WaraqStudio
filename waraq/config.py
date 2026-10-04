@@ -141,6 +141,13 @@ class Secrets:
         if value.strip():
             keyring.set_password(self.namespace, worker_id, value.strip())
 
+    def delete(self, worker_id):
+        import keyring
+        try:
+            keyring.delete_password(self.namespace, worker_id)
+        except keyring.errors.PasswordDeleteError:
+            pass
+
 
 class Config:
     def __init__(self, home: Path):

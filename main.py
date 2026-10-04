@@ -13,6 +13,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from waraq.bridge import Bridge
+from waraq import __version__
 from waraq.config import Config, Secrets
 from waraq.scheduler import Scheduler
 from waraq.store import Store
@@ -45,7 +46,13 @@ def main():
     if not lock.tryLock(100):
         QMessageBox.information(None, "Waraq Studio", "توجد نسخة تعمل بالفعل.")
         return 1
-    config = Config(home)
+    try:
+        config = Config(home)
+    except Exception:
+        QMessageBox.critical(None, "تعذر فتح ورق",
+                             "تعذرت قراءة إعدادات التطبيق. احتفظ بنسخة من الملف ثم راجع صيغته:\n" + str(home / "settings.json"))
+        lock.unlock()
+        return 3
     if args.check_environment:
         import json
         import shutil
@@ -56,7 +63,7 @@ def main():
         import openpyxl
         import requests
         from waraq.services import resolve_opencode
-        report = {"ffmpeg": str(imageio_ffmpeg.get_ffmpeg_exe()), "yt_dlp": yt_dlp.version.__version__,
+        report = {"version": __version__, "ffmpeg": str(imageio_ffmpeg.get_ffmpeg_exe()), "yt_dlp": yt_dlp.version.__version__,
                   "keyring": type(keyring.get_keyring()).__name__, "node": shutil.which("node"),
                   "requests": requests.__version__, "openpyxl": openpyxl.__version__, "ejs": True}
         report["ffmpeg_exists"] = Path(report["ffmpeg"]).is_file()
@@ -67,8 +74,14 @@ def main():
         Path(args.check_environment).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         lock.unlock()
         return 0
-    store = Store(home / "tasks.sqlite3")
-    store.recover()
+    try:
+        store = Store(home / "tasks.sqlite3")
+        store.recover()
+    except Exception:
+        QMessageBox.critical(None, "تعذر فتح ورق",
+                             "تعذر فتح قاعدة المهام. تحقق من المساحة وصلاحيات مجلد البيانات، واحتفظ بنسخة من القاعدة قبل إصلاحها:\n" + str(home / "tasks.sqlite3"))
+        lock.unlock()
+        return 4
     secrets = Secrets()
     scheduler = Scheduler(store, config, secrets)
     bridge = Bridge(store, config, secrets, scheduler)

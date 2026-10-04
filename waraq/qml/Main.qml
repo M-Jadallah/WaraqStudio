@@ -13,6 +13,7 @@ ApplicationWindow {
     title: "ورق | Waraq Studio"
     property int page: 0
     property var settings: JSON.parse(backend.settingsJson)
+    readonly property var appUpdateState: backend.appUpdate || ({status: "idle", version: "", progress: 0, message: "", hasToken: false})
     property bool dark: settings.theme !== "light"
     readonly property color bg: dark ? "#0d1422" : "#f3f6fa"
     readonly property color panel: dark ? "#151f30" : "#ffffff"
@@ -28,6 +29,7 @@ ApplicationWindow {
     property string workerKind: ""
     property int workerIndex: 0
     property string filter: "all"
+    property var selectedQueueIds: []
     property string search: ""
     property string sourceSearch: ""
     property string fileKind: "all"
@@ -68,6 +70,31 @@ ApplicationWindow {
     function matches(job) {
         return (filter === "all" || job.status === filter || (filter === "attention" && ["blocked", "failed", "uncertain"].indexOf(job.status) >= 0))
             && (search.length === 0 || job.title.toLowerCase().indexOf(search.toLowerCase()) >= 0)
+    }
+    function visibleQueueIds() {
+        return backend.jobs.filter(function(job) { return win.matches(job) }).map(function(job) { return job.id })
+    }
+    function visibleQueueSelectionCount() {
+        return win.visibleQueueIds().filter(function(id) { return win.selectedQueueIds.indexOf(id) >= 0 }).length
+    }
+    function setQueueSelected(id, selected) {
+        var next = win.selectedQueueIds.filter(function(value) { return value !== id })
+        if (selected) next.push(id)
+        win.selectedQueueIds = next
+    }
+    function selectVisibleQueue(selected) {
+        var visibleIds = win.visibleQueueIds()
+        var next = win.selectedQueueIds.filter(function(id) { return visibleIds.indexOf(id) < 0 })
+        win.selectedQueueIds = selected ? next.concat(visibleIds) : next
+    }
+    function reconcileQueueSelection() {
+        var existing = backend.jobs.map(function(job) { return job.id })
+        var next = win.selectedQueueIds.filter(function(id) { return existing.indexOf(id) >= 0 })
+        if (next.length !== win.selectedQueueIds.length) win.selectedQueueIds = next
+    }
+    function deleteQueueSelection() {
+        backend.deleteJobs(win.selectedQueueIds.slice())
+        win.reconcileQueueSelection()
     }
     function attentionGroups() {
         var groups = {}
@@ -246,6 +273,7 @@ ApplicationWindow {
             autoStopTimer.restart()
         }
         function onChanged() {
+            win.reconcileQueueSelection()
             if (jobDialog.opened && selectedJob.id) {
                 var currentJob = backend.jobById(String(selectedJob.id))
                 if (currentJob.id) selectedJob = currentJob
@@ -382,7 +410,7 @@ ApplicationWindow {
                         AppButton { text: "إضافة مصدر"; onClicked: win.page = 1 }
                         AppButton { text: "تقرير Excel"; onClicked: backend.exportReport() }
                         Item { Layout.fillWidth: true }
-                        AppField { Layout.preferredWidth: 240; placeholderText: "بحث في المهام"; horizontalAlignment: Text.AlignRight; onTextChanged: win.search = text; Accessible.name: "بحث في المهام" }
+                        AppField { objectName: "queueSearch"; Layout.preferredWidth: 240; Layout.minimumWidth: 0; placeholderText: "بحث في المهام"; horizontalAlignment: Text.AlignRight; onTextChanged: win.search = text; Accessible.name: "بحث في المهام" }
                         LabelText { text: "طابور المعالجة"; font.pixelSize: win.fs(18); font.weight: Font.DemiBold }
                     }
                     RowLayout {
@@ -392,6 +420,7 @@ ApplicationWindow {
                             model: [{id:"attention",label:"تحتاج إجراء"},{id:"completed",label:"مكتملة"},{id:"running",label:"نشطة"},{id:"all",label:"الكل"}]
                             delegate: AppButton {
                                 required property var modelData
+                                objectName: "queueFilter-" + modelData.id
                                 text: modelData.label; primary: win.filter === modelData.id
                                 implicitHeight: 30
                                 onClicked: win.filter = modelData.id
@@ -413,6 +442,26 @@ ApplicationWindow {
                             }
                         }
                     }
+                    ColumnLayout {
+                        Layout.fillWidth: true; spacing: win.rs(4)
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: win.rs(10)
+                            AppButton { objectName: "deleteSelectedJobsButton"; text: "حذف المحدد"; danger: true; enabled: win.selectedQueueIds.length > 0; onClicked: win.deleteQueueSelection() }
+                            LabelText { objectName: "selectedJobsCount"; text: "المحدد: " + win.selectedQueueIds.length }
+                            Item { Layout.fillWidth: true }
+                            CheckBox {
+                                objectName: "selectAllJobsBox"
+                                text: "تحديد الكل في العرض"
+                                palette.windowText: win.ink
+                                enabled: win.visibleQueueIds().length > 0
+                                tristate: true
+                                checkState: win.visibleQueueIds().length > 0 && win.visibleQueueSelectionCount() === win.visibleQueueIds().length ? Qt.Checked : win.visibleQueueSelectionCount() > 0 ? Qt.PartiallyChecked : Qt.Unchecked
+                                nextCheckState: function() { return checkState === Qt.Checked ? Qt.Unchecked : Qt.Checked }
+                                onClicked: win.selectVisibleQueue(checkState === Qt.Checked)
+                            }
+                        }
+                        SubText { text: "الحذف يزيل السجلات فقط؛ تبقى الملفات محفوظة. يشمل المحدد خارج الفلتر أيضًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                    }
                     Box {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -420,10 +469,11 @@ ApplicationWindow {
                             anchors.fill: parent; spacing: 0
                             RowLayout {
                                 Layout.fillWidth: true; Layout.preferredHeight: 38; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                SubText { text: "التفاصيل"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignLeft }
-                                SubText { text: "الحالة"; Layout.preferredWidth: 160 }
-                                SubText { text: "مراحل المعالجة"; Layout.preferredWidth: 230 }
-                                SubText { text: "الفيديو / الملف"; Layout.fillWidth: true }
+                                SubText { text: "التفاصيل"; Layout.preferredWidth: 64; horizontalAlignment: Text.AlignLeft }
+                                SubText { text: "الحالة"; Layout.preferredWidth: 140 }
+                                SubText { text: "مراحل المعالجة"; Layout.preferredWidth: 220 }
+                                SubText { text: "الفيديو / الملف"; Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                SubText { text: "تحديد"; Layout.preferredWidth: 40; font.pixelSize: win.fs(11) }
                             }
                             Rectangle { Layout.fillWidth: true; height: 1; color: win.line }
                             PinList {
@@ -434,10 +484,11 @@ ApplicationWindow {
                                 model: backend.jobsModel
                                 ScrollBar.vertical: ScrollBar {}
                                 delegate: Rectangle {
+                                    objectName: "queueRow-" + row.id
                                     width: jobsList.width
                                     height: win.matches(row) ? win.rh(70) : 0
                                     visible: height > 0
-                                    color: rowMouse.containsMouse ? (win.dark ? "#1a293d" : "#f3f7fb") : "transparent"
+                                    color: row && win.selectedQueueIds.indexOf(row.id) >= 0 ? (win.dark ? "#173b35" : "#e0f5ed") : rowMouse.containsMouse ? (win.dark ? "#1a293d" : "#f3f7fb") : "transparent"
                                     MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.openJob(row.id); cursorShape: Qt.PointingHandCursor }
                                     RowLayout {
                                         anchors.fill: parent; anchors.leftMargin: win.rs(12); anchors.rightMargin: win.rs(12); spacing: win.rs(10)
@@ -453,6 +504,7 @@ ApplicationWindow {
                                                 model: row.steps.slice().reverse()
                                                 delegate: Rectangle {
                                                     required property var modelData
+                                                    objectName: "queueStage-" + row.id + "-" + modelData.name
                                                     Layout.fillWidth: true; height: Math.max(18, win.rh(26)); radius: 5
                                                     color: modelData.status === "completed" ? (win.dark ? "#163b35" : "#e0f5ed") : (win.dark ? "#202d42" : "#eaf0f6")
                                                     border.color: modelData.status === "running" ? "#639ff2" : "transparent"
@@ -462,8 +514,16 @@ ApplicationWindow {
                                         }
                                         ColumnLayout {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             LabelText { text: row.title; Layout.fillWidth: true; font.weight: Font.DemiBold }
                                             SubText { text: "#" + String(row.position).padStart(3,"0") + "   ·   " + row.video_id; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
+                                        }
+                                        CheckBox {
+                                            objectName: "selectJob-" + row.id
+                                            Layout.preferredWidth: 40
+                                            checked: !!row && win.selectedQueueIds.indexOf(row.id) >= 0
+                                            onClicked: win.setQueueSelected(row.id, checked)
+                                            Accessible.name: "تحديد " + row.title
                                         }
                                     }
                                     Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
@@ -751,13 +811,14 @@ ApplicationWindow {
 
                 // Settings
                 ColumnLayout {
+                    Layout.minimumWidth: 0
                     spacing: 12
-                    RowLayout {
+                    Flow {
+                        Layout.fillWidth: true; Layout.preferredHeight: childrenRect.height; spacing: win.rs(8)
                         AppButton { text: "حفظ الإعدادات"; primary: true; onClicked: { settings.prompt = promptField.text; save() } }
                         AppButton { objectName: "templatesButton"; text: "قوالب البرومبت"; onClicked: templatesDialog.open() }
                         AppButton { text: "استيراد إعدادات السكربت"; onClicked: backend.importLegacy() }
                         AppButton { text: "فحص البيئة"; onClicked: backend.checkEnvironment() }
-                        Item { Layout.fillWidth: true }
                         AppButton { text: win.dark ? "المظهر الفاتح" : "المظهر الداكن"; onClicked: { settings.theme = win.dark ? "light" : "dark"; save() } }
                     }
                     Box {
@@ -791,10 +852,13 @@ ApplicationWindow {
                         }
                     }
                     ScrollView {
+                        id: settingsScroll
+                        objectName: "settingsScroll"
+                        Layout.minimumWidth: 0
                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                         contentWidth: availableWidth
                         ColumnLayout {
-                            width: parent.width; spacing: 12
+                            width: settingsScroll.availableWidth; spacing: 12
                             Box {
                                 Layout.fillWidth: true; implicitHeight: storageColumn.implicitHeight + 40
                                 ColumnLayout {
@@ -810,6 +874,33 @@ ApplicationWindow {
                                             LabelText { text: modelData.label; Layout.preferredWidth: 185 }
                                         }
                                     }
+                                }
+                            }
+                            Box {
+                                objectName: "appUpdateCard"
+                                Layout.fillWidth: true; Layout.minimumWidth: 0; implicitHeight: appUpdateColumn.implicitHeight + 28
+                                ColumnLayout {
+                                    id: appUpdateColumn; anchors.fill: parent; anchors.margins: 14; spacing: win.rs(8)
+                                    LabelText { text: "تحديث ورق"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                    SubText { text: "الإصدار الحالي: " + backend.version + (win.appUpdateState.version ? "  ·  أحدث إصدار: " + win.appUpdateState.version : ""); Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { objectName: "appUpdateMessage"; text: win.appUpdateState.message || "افحص توفر إصدار جديد من GitHub."; color: win.appUpdateState.status === "error" ? (win.dark ? "#ffba82" : "#9a4409") : win.ink; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    ProgressBar { objectName: "appUpdateProgress"; visible: win.appUpdateState.status === "downloading"; Layout.fillWidth: true; from: 0; to: 100; value: win.appUpdateState.progress || 0; Accessible.name: "تقدم تنزيل تحديث ورق" }
+                                    Flow {
+                                        Layout.fillWidth: true; Layout.preferredHeight: childrenRect.height; spacing: win.rs(8)
+                                        AppButton { objectName: "checkAppUpdateButton"; text: win.appUpdateState.status === "checking" ? "جارٍ الفحص…" : "فحص التحديث"; enabled: ["checking", "downloading"].indexOf(win.appUpdateState.status) < 0; onClicked: backend.checkAppUpdate() }
+                                        AppButton { objectName: "downloadAppUpdateButton"; text: "تنزيل الإصدار الجديد"; primary: true; visible: win.appUpdateState.status === "available"; onClicked: backend.downloadAppUpdate() }
+                                        AppButton { objectName: "cancelAppUpdateButton"; text: "إلغاء التنزيل"; visible: win.appUpdateState.status === "downloading"; onClicked: backend.cancelAppUpdate() }
+                                        AppButton { objectName: "installAppUpdateButton"; text: "تثبيت التحديث وإغلاق التطبيق"; primary: true; visible: win.appUpdateState.status === "downloaded"; onClicked: backend.installAppUpdate() }
+                                    }
+                                    SubText { text: "ينزّل التطبيق الإصدار مباشرة ويتحقق منه، ثم يفتح المثبّت ويغلق ورق. تُحفظ بياناتك وإعداداتك."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { text: "رمز GitHub للمستودع الخاص (اختياري)"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: win.rs(8)
+                                        AppButton { objectName: "saveUpdateTokenButton"; text: "حفظ الرمز"; enabled: updateTokenField.text.trim().length > 0 && ["checking", "downloading"].indexOf(win.appUpdateState.status) < 0; onClicked: { backend.saveUpdateToken(updateTokenField.text.trim()); updateTokenField.text = "" } }
+                                        AppButton { objectName: "removeUpdateTokenButton"; text: "إزالة الرمز"; visible: win.appUpdateState.hasToken === true; enabled: ["checking", "downloading"].indexOf(win.appUpdateState.status) < 0; onClicked: { backend.saveUpdateToken(""); updateTokenField.text = "" } }
+                                        AppField { id: updateTokenField; objectName: "updateTokenField"; Layout.fillWidth: true; Layout.minimumWidth: 0; echoMode: TextInput.Password; placeholderText: "GitHub token"; Accessible.name: "رمز GitHub لقراءة المستودع الخاص" }
+                                    }
+                                    SubText { objectName: "updateTokenStatus"; text: win.appUpdateState.hasToken ? "الرمز محفوظ في مخزن اعتماد Windows." : "لا يوجد رمز محفوظ. استخدم رمزًا يملك صلاحية Contents: read للمستودع الخاص."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                                 }
                             }
                             Box {

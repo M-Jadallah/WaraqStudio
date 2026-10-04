@@ -206,6 +206,37 @@ class Store:
                                   (worker, time.time(), ident, stage, time.time()))
             return cur.rowcount == 1
 
+    def delete_jobs(self, idents, busy_ids=()):
+        """Remove queue records only, atomically with claims.
+
+        Scheduler.delete_jobs is the public entry point for a live queue: it
+        supplies active jobs, including completed stages still publishing.
+        The running-stage check also protects direct Store callers.
+        """
+        idents = list(dict.fromkeys(str(ident) for ident in idents))
+        busy_ids = set(busy_ids)
+        result = {"deleted": [], "busy": [], "missing": []}
+        if not idents:
+            return result
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                for ident in idents:
+                    if not self.db.execute("SELECT 1 FROM jobs WHERE id=?", (ident,)).fetchone():
+                        result["missing"].append(ident)
+                    elif ident in busy_ids or self.db.execute(
+                            "SELECT 1 FROM stages WHERE job_id=? AND status='running' LIMIT 1", (ident,)).fetchone():
+                        result["busy"].append(ident)
+                    else:
+                        self.db.execute("DELETE FROM stages WHERE job_id=?", (ident,))
+                        self.db.execute("DELETE FROM jobs WHERE id=?", (ident,))
+                        result["deleted"].append(ident)
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return result
+
     def set_stage(self, ident, stage, status, error="", progress=-1, next_retry=0):
         with self.lock:
             # Any explicit transition ends the consecutive-retry episode.

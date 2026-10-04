@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -496,6 +497,147 @@ def main():
         assert source_view is not None and source_view.height() >= 100
         if len(sys.argv) > 1:
             root.grabWindow().save(str(Path(sys.argv[1]) / "txt-import-options-140.png"))
+        # Queue selection follows stable IDs and selects only filtered results.
+        root.setProperty("toastText", "")
+        click("nav0")
+        root.setProperty("filter", "all")
+        queue_inputs = [{"video_id": f"selection-{i}", "title": f"اختبار تحديد {i}", "position": i,
+                         "url": "https://www.youtube.com/watch?v=selection"} for i in (1, 2)]
+        pending_id, running_id = store.add(queue_inputs, config.snapshot())
+        local_input = home / "اختبار تحديد TXT.txt"
+        local_input.write_text("نص اختبار التحديد", encoding="utf-8")
+        local_id = store.add([{"video_id": "selection-txt", "title": local_input.stem, "position": 3,
+                               "url": ""}], config.snapshot(), input_path=str(local_input))[0]
+        managed_input = Path(store.get(local_id)["transcript"])
+        assert store.claim(running_id, "download", "busy-test")
+        bridge.refresh()
+        find(root.contentItem(), "queueSearch").setProperty("text", "اختبار تحديد")
+        jobs_view.setProperty("contentY", 0)
+        QTest.qWait(150)
+        def selection():
+            value = root.property("selectedQueueIds")
+            return value.toVariant() if hasattr(value, "toVariant") else value
+        assert not find(root.contentItem(), "deleteSelectedJobsButton").property("enabled")
+        for stage in ("download", "deepgram", "opencode"):
+            assert find(root.contentItem(), "queueStage-" + pending_id + "-" + stage) is not None
+        jobs_view.setProperty("contentY", max(0, jobs_view.property("contentHeight") - jobs_view.property("height")))
+        QMetaObject.invokeMethod(jobs_view, "positionViewAtIndex", Q_ARG("int", len(bridge.jobs) - 1), Q_ARG("int", 2))
+        QTest.qWait(150)
+        assert find(root.contentItem(), "queueStage-" + local_id + "-opencode") is not None
+        assert find(root.contentItem(), "queueStage-" + local_id + "-download") is None
+        assert find(root.contentItem(), "queueStage-" + local_id + "-deepgram") is None
+        click("selectJob-" + local_id)
+        assert selection() == [local_id], (selection(), find(root.contentItem(), "selectJob-" + local_id).mapToScene(QPointF(0, 0)), jobs_view.property("height"), messages[-8:])
+        if len(sys.argv) > 1:
+            root.grabWindow().save(str(Path(sys.argv[1]) / "queue-txt-word-only-140.png"))
+        click("selectAllJobsBox")
+        assert set(selection()) == {pending_id, running_id, local_id}
+        click("selectAllJobsBox")
+        assert selection() == []
+        click("queueFilter-running")
+        click("selectAllJobsBox")
+        assert selection() == [running_id]
+        click("queueFilter-all")
+        click("selectAllJobsBox")
+        assert set(selection()) == {pending_id, running_id, local_id}
+        assert find(root.contentItem(), "selectedJobsCount").property("text") == "المحدد: 3"
+        for name in ("deleteSelectedJobsButton", "selectAllJobsBox", "selectedJobsCount"):
+            assert_in_window(name)
+        if len(sys.argv) > 1:
+            root.grabWindow().save(str(Path(sys.argv[1]) / "queue-selection-140.png"))
+        click("deleteSelectedJobsButton")
+        assert store.get(pending_id) is None and store.get(local_id) is None
+        assert store.get(running_id) is not None and selection() == [running_id]
+        assert managed_input.is_file() and local_input.is_file()
+        assert root.property("toastError") and root.property("toastText")
+        store.set_stage(running_id, "download", "failed", "اختبار انتهاء المهمة المشغولة")
+        bridge.refresh()
+        root.setProperty("toastText", "")
+        click("deleteSelectedJobsButton")
+        assert store.get(running_id) is None and selection() == []
+        assert not find(root.contentItem(), "deleteSelectedJobsButton").property("enabled")
+        find(root.contentItem(), "queueSearch").setProperty("text", "")
+        # The update card uses mocked GitHub services and an in-memory token.
+        root.setProperty("toastText", "")
+        click("nav5")
+        settings_scroll = find(root.contentItem(), "settingsScroll")
+        settings_flick = settings_scroll.property("contentItem")
+        def reveal_update_control(name):
+            item = find(root.contentItem(), name)
+            origin = item.mapToScene(QPointF(0, 0))
+            scroll_origin = settings_scroll.mapToScene(QPointF(0, 0))
+            new_y = settings_flick.property("contentY") + origin.y() - scroll_origin.y() - 12
+            maximum = max(0, settings_flick.property("contentHeight") - settings_flick.property("height"))
+            settings_flick.setProperty("contentY", max(0, min(maximum, new_y)))
+            QTest.qWait(80)
+            assert_in_window(name)
+        def wait_update(status):
+            deadline = time.time() + 3
+            while bridge.appUpdate["status"] != status and time.time() < deadline:
+                QTest.qWait(25)
+            assert bridge.appUpdate["status"] == status, bridge.appUpdate
+            QTest.qWait(50)
+        credentials = {}
+        release = {"available": True, "version": "99.0.0", "name": "fake-setup.exe"}
+        installer = home / "fake-update.exe"
+        installer.write_bytes(b"fake installer - never launched")
+        download_finish = threading.Event()
+        def fake_download(home_path, latest, cancel, progress, token):
+            assert token == "ui-update-token"
+            progress(37)
+            while not download_finish.wait(0.01):
+                if cancel.is_set():
+                    raise bridge_module.app_update.UpdateCancelled("أُلغي التنزيل الاختباري.")
+            progress(100)
+            return installer
+        with patch.object(keys, "get", side_effect=lambda key: credentials.get(key, "")), \
+                patch.object(keys, "set", side_effect=lambda key, value: credentials.update({key: value})), \
+                patch.object(keys, "delete", side_effect=lambda key: credentials.pop(key, None), create=True), \
+                patch.object(bridge_module.app_update, "check_latest", return_value=release), \
+                patch.object(bridge_module.app_update, "download_installer", side_effect=fake_download):
+            token_field = find(root.contentItem(), "updateTokenField")
+            token_field.setProperty("text", "ui-update-token")
+            assert token_field.property("displayText") != "ui-update-token"
+            reveal_update_control("saveUpdateTokenButton")
+            click("saveUpdateTokenButton")
+            assert bridge.appUpdate["hasToken"] and token_field.property("text") == ""
+            root.setProperty("toastText", "")
+            reveal_update_control("checkAppUpdateButton")
+            click("checkAppUpdateButton")
+            wait_update("available")
+            reveal_update_control("downloadAppUpdateButton")
+            click("downloadAppUpdateButton")
+            wait_update("downloading")
+            deadline = time.time() + 2
+            while bridge.appUpdate["progress"] != 37 and time.time() < deadline:
+                QTest.qWait(25)
+            assert find(root.contentItem(), "appUpdateProgress").property("value") == 37
+            assert not find(root.contentItem(), "checkAppUpdateButton").property("enabled")
+            reveal_update_control("cancelAppUpdateButton")
+            if len(sys.argv) > 1:
+                reveal_update_control("appUpdateMessage")
+                root.grabWindow().save(str(Path(sys.argv[1]) / "app-update-progress-140.png"))
+            click("cancelAppUpdateButton")
+            wait_update("available")
+            reveal_update_control("downloadAppUpdateButton")
+            click("downloadAppUpdateButton")
+            download_finish.set()
+            wait_update("downloaded")
+            assert find(root.contentItem(), "installAppUpdateButton").isVisible()
+            reveal_update_control("installAppUpdateButton")
+            reveal_update_control("removeUpdateTokenButton")
+            click("removeUpdateTokenButton")
+            assert not bridge.appUpdate["hasToken"] and credentials == {}
+            root.setProperty("toastText", "")
+            with patch.object(bridge_module.app_update, "check_latest", side_effect=bridge_module.app_update.UpdateError("رفض GitHub الرمز. راجع صلاحيات المستودع.")):
+                reveal_update_control("checkAppUpdateButton")
+                click("checkAppUpdateButton")
+                wait_update("error")
+            assert "رفض GitHub" in find(root.contentItem(), "appUpdateMessage").property("text")
+            assert find(root.contentItem(), "checkAppUpdateButton").property("enabled")
+            if len(sys.argv) > 1:
+                reveal_update_control("appUpdateMessage")
+                root.grabWindow().save(str(Path(sys.argv[1]) / "app-update-error-140.png"))
         root.close()
         bridge.timer.stop()
         harness.shutdown_and_join()
@@ -508,7 +650,8 @@ def main():
     print("Native UI passed: 6 pages, range selection, reorder, enqueue, templates, auto-stop toggle, worker toggles, "
           "provider override, library organise/list/delete, stage pause, automatic-block re-check, scroll pinning, "
           "collapsible rail, UI scale, themes, single/multi/folder TXT import, native TXT drag/drop, "
-          "managed input copies, selected templates/folders, 1060x720, no QML errors.")
+          "managed input copies, selected templates/folders, filtered queue selection/deletion, busy-job protection, "
+          "TXT Word-only stages, update progress/cancel/error/token controls, 1060x720, no QML errors.")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QFileDialog
 
 from . import __version__
+from . import app_update
 from .catalog import deepgram_models, opencode_models
 from .config import (BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
                      provider_info, provider_of)
@@ -37,6 +38,9 @@ class Bridge(QObject):
     youtubeVersionChanged = Signal()
     modelCatalogChanged = Signal()
     _modelCatalogReady = Signal(object, object, str, str)
+    appUpdateChanged = Signal()
+    _appUpdateReady = Signal(str, object)
+    _appUpdateProgress = Signal(int)
 
     def __init__(self, store, config, secrets, scheduler):
         super().__init__()
@@ -55,6 +59,17 @@ class Bridge(QObject):
         self._opencode_models = []
         self._catalog_errors = {"deepgram": "", "opencode": ""}
         self._catalog_busy = False
+        self._update_release = None
+        self._update_installer = None
+        self._update_cancel = threading.Event()
+        self._app_update = {"status": "idle", "version": "", "progress": 0,
+                            "message": "افحص توفر إصدار جديد لتنزيله من GitHub.", "hasToken": False}
+        try:
+            self._app_update["hasToken"] = bool(secrets and secrets.get(app_update.TOKEN_KEY))
+        except Exception:
+            pass
+        self._appUpdateReady.connect(self._apply_app_update)
+        self._appUpdateProgress.connect(self._apply_app_update_progress)
         self._modelCatalogReady.connect(self._apply_model_catalogs)
         # QML ListViews bind to these instead of the QVariantList properties:
         # rows are updated in place (dataChanged) so scroll position survives
@@ -182,6 +197,130 @@ class Bridge(QObject):
     @Property(str, constant=True)
     def version(self): return __version__
 
+    @Property("QVariantMap", notify=appUpdateChanged)
+    def appUpdate(self): return dict(self._app_update)
+
+    def _set_app_update(self, **values):
+        self._app_update.update(values)
+        self.appUpdateChanged.emit()
+
+    @Slot(str)
+    def saveUpdateToken(self, token):
+        if self._app_update["status"] in ("checking", "downloading"):
+            self.notice.emit("انتظر انتهاء عملية التحديث قبل تغيير رمز GitHub.", True)
+            return
+        try:
+            if not self.secrets:
+                raise RuntimeError("مخزن بيانات الاعتماد غير متاح.")
+            token = str(token).strip()
+            if token:
+                self.secrets.set(app_update.TOKEN_KEY, token)
+            else:
+                self.secrets.delete(app_update.TOKEN_KEY)
+            self._set_app_update(hasToken=bool(token))
+            self.notice.emit("حُفظ رمز GitHub في مخزن بيانات الاعتماد." if token else "أُزيل رمز GitHub المحفوظ.", False)
+        except Exception:
+            self.notice.emit("تعذر تعديل رمز GitHub في مخزن بيانات الاعتماد.", True)
+
+    @Slot()
+    def checkAppUpdate(self):
+        if self._app_update["status"] in ("checking", "downloading"):
+            return
+        self._update_release = self._update_installer = None
+        self._set_app_update(status="checking", progress=0, version="", message="جارٍ فحص آخر إصدار منشور…")
+        def work():
+            try:
+                token = self.secrets.get(app_update.TOKEN_KEY) if self.secrets else ""
+                release = app_update.check_latest(self.version, token)
+                self._appUpdateReady.emit("checked", release)
+            except app_update.UpdateError as exc:
+                self._appUpdateReady.emit("error", str(exc))
+            except Exception:
+                self._appUpdateReady.emit("error", "تعذر فحص التحديث أو قراءة رمز GitHub. تحقق من الاتصال ومخزن بيانات الاعتماد.")
+        try:
+            threading.Thread(target=work, daemon=True, name="app-update-check").start()
+        except Exception:
+            self._apply_app_update("error", "تعذر بدء فحص التحديث. أعد المحاولة.")
+
+    @Slot()
+    def downloadAppUpdate(self):
+        if self._app_update["status"] != "available" or not self._update_release:
+            return
+        release = dict(self._update_release)
+        self._update_cancel = threading.Event()
+        cancel = self._update_cancel
+        self._set_app_update(status="downloading", progress=0, message="جارٍ تنزيل مُثبّت الإصدار " + release["version"] + "…")
+        def work():
+            try:
+                token = self.secrets.get(app_update.TOKEN_KEY) if self.secrets else ""
+                path = app_update.download_installer(self.config.home, release, cancel,
+                                                     self._appUpdateProgress.emit, token)
+                self._appUpdateReady.emit("downloaded", str(path))
+            except app_update.UpdateCancelled as exc:
+                self._appUpdateReady.emit("cancelled", str(exc))
+            except app_update.UpdateError as exc:
+                self._appUpdateReady.emit("error", str(exc))
+            except Exception:
+                self._appUpdateReady.emit("error", "تعذر تنزيل التحديث. تحقق من الاتصال والمساحة ومخزن بيانات الاعتماد.")
+        try:
+            threading.Thread(target=work, daemon=True, name="app-update-download").start()
+        except Exception:
+            self._apply_app_update("error", "تعذر بدء تنزيل التحديث. أعد فحص الإصدار.")
+
+    @Slot()
+    def cancelAppUpdate(self):
+        if self._app_update["status"] == "downloading":
+            self._update_cancel.set()
+            self._set_app_update(message="جارٍ إلغاء التنزيل…")
+
+    @Slot(int)
+    def _apply_app_update_progress(self, progress):
+        if self._app_update["status"] == "downloading":
+            self._set_app_update(progress=max(0, min(100, progress)))
+
+    @Slot(str, object)
+    def _apply_app_update(self, action, result):
+        if action == "checked":
+            self._update_release = result if result["available"] else None
+            version = result["version"]
+            self._set_app_update(status="available" if result["available"] else "up_to_date", version=version,
+                                 message="يتوفر الإصدار " + version + " للتنزيل." if result["available"] else "نسختك الحالية هي الأحدث.")
+        elif action == "downloaded":
+            self._update_installer = Path(result)
+            self._set_app_update(status="downloaded", progress=100,
+                                 message="اكتمل التنزيل والتحقق. أوقف المعالجة ثم شغّل المُثبّت؛ سيُغلق التطبيق وتُحفظ بياناتك.")
+        elif action == "cancelled":
+            self._set_app_update(status="available", progress=0, message=str(result))
+        else:
+            self._set_app_update(status="error", message=str(result))
+
+    @Slot()
+    def installAppUpdate(self):
+        if self._app_update["status"] != "downloaded" or not self._update_installer or not self._update_release:
+            return
+        # Pause prevents new dispatch; active captures publication after completion.
+        if self.scheduler.running or not self.scheduler.idle() or self._busy or self._library_busy or self._youtube_updating:
+            self.notice.emit("أوقف الطابور وانتظر انتهاء العمليات النشطة قبل تشغيل مُثبّت التحديث.", True)
+            return
+        if os.name != "nt":
+            self.notice.emit("تشغيل مُثبّت التحديث متاح على Windows فقط.", True)
+            return
+        try:
+            app_update.verify_installer(self._update_installer, self._update_release)
+            if self.scheduler.running or not self.scheduler.idle() or self._busy or self._library_busy or self._youtube_updating:
+                self.notice.emit("بدأت عملية معالجة أثناء التحقق؛ انتظر توقفها ثم أعد تثبيت التحديث.", True)
+                return
+            os.startfile(str(self._update_installer), "runas")
+        except app_update.UpdateError as exc:
+            self._set_app_update(status="error", message=str(exc))
+            return
+        except Exception:
+            self.notice.emit("تعذر تشغيل المُثبّت أو أُلغي طلب صلاحيات Windows. يمكنك المحاولة مرة أخرى.", True)
+            return
+        self.discovery_cancel.set()
+        self.scheduler.shutdown()
+        QGuiApplication.quit()
+
     @Property(float, notify=settingsChanged)
     def uiScale(self): return float(self.config.snapshot().get("ui_scale", 1.0))
 
@@ -293,7 +432,8 @@ class Bridge(QObject):
                 "retryAt": self.retry_at(stages[current]["next_retry"])
                            if state == "pending" and stages[current]["next_retry"] > time.time() else "",
                 "template": j["config"].get("template_name", ""),
-                "steps": [{"name": name, "label": STAGE_LABELS[name], "status": stages[name]["status"]} for name in STAGES],
+                "steps": [{"name": name, "label": STAGE_LABELS[name], "status": stages[name]["status"]}
+                          for name in (("opencode",) if str(j.get("input_path", "")).lower().endswith(".txt") else STAGES)],
             })
         workers = self.scheduler.workers()
         for w in workers:
@@ -622,6 +762,21 @@ class Bridge(QObject):
         self.scheduler.cancel_job(ident)
         self.refresh()
 
+    @Slot("QVariantList", result=int)
+    def deleteJobs(self, idents):
+        try:
+            result = self.scheduler.delete_jobs(idents)
+            count = len(result["deleted"])
+            self.refresh()
+            message = f"حُذف {count} عنصر من الطابور. الملفات والمخرجات محفوظة."
+            if result["busy"]:
+                message += f" تعذر حذف {len(result['busy'])} عنصر نشط؛ ألغِه وانتظر توقفه ثم أعد الحذف."
+            self.notice.emit(message, bool(result["busy"]))
+            return count
+        except Exception as exc:
+            self.notice.emit("تعذر حذف عناصر الطابور: " + str(exc), True)
+            return 0
+
     @Slot(str, str, bool)
     def retry(self, ident, stage, rerun):
         try:
@@ -645,7 +800,7 @@ class Bridge(QObject):
             self.notice.emit(str(exc), True)
 
     def _retry_one(self, ident, stage, rerun=False):
-        self.store.retry(ident, stage, rerun)
+        self.scheduler.retry_job(ident, stage, rerun)
         if not rerun:
             job = self.store.get(ident)
             for name in STAGES[STAGES.index(stage) + 1:]:
@@ -903,6 +1058,7 @@ class Bridge(QObject):
             if answer != QMessageBox.StandardButton.Yes:
                 return False
         self.discovery_cancel.set()
+        self._update_cancel.set()
         self.scheduler.shutdown()
         return True
 

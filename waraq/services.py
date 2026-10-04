@@ -122,44 +122,74 @@ def validate_docx(path):
 
 def run_process(command, cwd, cancel, timeout, log=lambda s: None, env=None):
     """No shell; stream output, bound runtime and terminate child process trees."""
+    checkpoint(cancel)
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             creationflags=flags, text=True, encoding="utf-8", errors="replace")
     lines = queue.Queue()
+    reader_done = threading.Event()
     def reader():
-        for line in proc.stdout:
-            lines.put(line.rstrip())
-    threading.Thread(target=reader, daemon=True).start()
+        try:
+            for line in proc.stdout:
+                lines.put((line.rstrip(), None))
+        except Exception as exc:
+            lines.put((None, exc))
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception as exc:
+                lines.put((None, exc))
+            finally:
+                reader_done.set()
     started = time.monotonic()
     tail = []
+    reader_thread = None
     try:
-        while proc.poll() is None or not lines.empty():
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+        # Process exit can precede the reader's last queued line. Only EOF
+        # proves that stdout was drained, including quota/permission notices.
+        while proc.poll() is None or not reader_done.is_set() or not lines.empty():
             checkpoint(cancel)
             if time.monotonic() - started > timeout:
                 raise ServiceError("تجاوزت العملية المهلة المحددة.")
             try:
-                line = lines.get(timeout=0.15)
+                line, error = lines.get(timeout=0.15)
+                if error is not None:
+                    raise ServiceError("تعذر قراءة مخرجات العملية الخارجية: " + str(error)) from error
                 tail.append(line)
                 tail = tail[-30:]
                 log(line)
             except queue.Empty:
                 pass
+        checkpoint(cancel)
         if proc.returncode:
             raise ServiceError("فشلت العملية الخارجية:\n" + "\n".join(tail)[-2500:])
         return "\n".join(tail)
     finally:
         if proc.poll() is None:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               capture_output=True, creationflags=flags, timeout=15)
-            else:
-                proc.terminate()
+            try:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   capture_output=True, creationflags=flags, timeout=15)
+                else:
+                    proc.terminate()
+            except (OSError, subprocess.TimeoutExpired):
+                # Preserve cancellation/timeout if tree termination itself
+                # fails, and still attempt to reap the immediate process.
+                pass
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        if proc.stdout:
+                proc.wait(timeout=10)
+        if reader_thread is not None and reader_thread.ident is not None:
+            reader_thread.join(timeout=1)
+        # A descendant can inherit stdout after the parent exits. Closing a
+        # buffered stream from here would hang on the reader's I/O lock; its
+        # daemon thread owns closing until EOF. Return within the timeout.
+        if proc.stdout and (reader_thread is None or reader_thread.ident is None):
             proc.stdout.close()
 
 
