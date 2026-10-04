@@ -184,18 +184,31 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
     peaks = counts.copy()
     seen_keys, downloads = [], []
     lock = threading.Lock()
-    def activity(stage, delay):
+    targets = {"deepgram": 2, "opencode": 3}
+    overlap = {stage: threading.Event() for stage in targets}
+    def activity(stage):
         with lock:
             counts[stage] += 1
             peaks[stage] = max(peaks[stage], counts[stage])
-        time.sleep(delay)
-        with lock:
-            counts[stage] -= 1
+            if stage in targets and counts[stage] >= targets[stage]:
+                overlap[stage].set()
+        try:
+            # Keep the first workers in flight until the required concurrency
+            # is observed. Fixed service sleeps depend on runner/disk speed and
+            # can miss overlap even when the pool dispatches correctly.
+            if stage in overlap:
+                if not overlap[stage].wait(10):
+                    raise TimeoutError("Required worker overlap was not reached: " + stage)
+            else:
+                time.sleep(0.03)
+        finally:
+            with lock:
+                counts[stage] -= 1
     class FakeYoutube:
         cooldown_until = 0
         def download(self, job, cfg, cancel, progress):
             downloads.append(job["position"])
-            activity("download", 0.03)
+            activity("download")
             p = Path(job["folder"]) / "audio.mp3"
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(b"test audio")
@@ -203,19 +216,19 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
     class FakeDG:
         def transcribe(self, job, worker, cfg, secret, cancel, progress):
             seen_keys.append((worker["id"], secret))
-            activity("deepgram", 0.4)
+            activity("deepgram")
             p = Path(job["folder"]) / "transcript.txt"
             p.write_text("تفريغ اختباري", encoding="utf-8")
             return p
     class FakeOC:
         def process(self, job, worker, cfg, secret, cancel, log):
-            activity("opencode", 0.5)
+            activity("opencode")
             return make_docx(Path(job["folder"]) / "result.docx")
     class Keys:
         def get(self, worker): return {"dg1": "key-one", "dg2": "key-two"}.get(worker, "")
     scheduler = Scheduler(store, cfg, Keys(), FakeYoutube(), FakeDG(), FakeOC())
-    deadline = time.time() + 8
-    while time.time() < deadline:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
         scheduler.tick()
         if all(j["stages"]["opencode"]["status"] == "completed" for j in store.jobs()) and scheduler.idle():
             break
