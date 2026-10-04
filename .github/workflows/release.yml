@@ -113,7 +113,7 @@ jobs:
         run: |
           ./Windows/WaraqStudio/WaraqStudio.exe --check-environment env-report.json
           cat env-report.json
-          python -c "import json, os; d=json.load(open('env-report.json')); assert d['version']==os.environ['VERSION'], (d['version'], os.environ['VERSION']); assert d['ffmpeg_exists'], d"
+          python -c "import json, os; d=json.load(open('env-report.json', encoding='utf-8')); assert d['version']==os.environ['VERSION'], (d['version'], os.environ['VERSION']); assert d['ffmpeg_exists'], d"
 
       - name: Smoke test bundled exe (UI launch)
         run: ./Windows/WaraqStudio/WaraqStudio.exe --smoke
