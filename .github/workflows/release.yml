@@ -14,6 +14,9 @@ permissions:
   # and the account's artifact storage stays full.
   actions: write
 
+env:
+  OPENCODE_TEST_VERSION: "2.0.27"
+
 defaults:
   run:
     shell: bash
@@ -45,6 +48,12 @@ jobs:
 
       - name: Engine and service tests
         run: python -m pytest tests -v --tb=short
+
+      - name: Install OpenCode 2 for native acceptance
+        run: npm install -g "@opencode/cli@$OPENCODE_TEST_VERSION"
+
+      - name: Native OpenCode 2 acceptance (local model, no paid requests)
+        run: python tests/verify_opencode_v2.py
 
       - name: Native UI interaction checks
         run: python tests/verify_ui.py
@@ -104,6 +113,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Install OpenCode 2 for packaged app checks
+        run: npm install -g "@opencode/cli@$OPENCODE_TEST_VERSION"
+
       - name: Build Windows bundle (PyInstaller)
         run: python build_windows.py
 
@@ -116,7 +128,7 @@ jobs:
         run: |
           ./Windows/WaraqStudio/WaraqStudio.exe --check-environment env-report.json
           cat env-report.json
-          python -c "import json, os; d=json.load(open('env-report.json', encoding='utf-8')); assert d['version']==os.environ['VERSION'], (d['version'], os.environ['VERSION']); assert d['ffmpeg_exists'], d"
+          python -c "import json, os; d=json.load(open('env-report.json', encoding='utf-8')); assert d['version']==os.environ['VERSION'], (d['version'], os.environ['VERSION']); assert d['ffmpeg_exists'], d; assert d.get('opencode_version')==os.environ['OPENCODE_TEST_VERSION'], d.get('opencode_error', d)"
 
       - name: Smoke test bundled exe (UI launch)
         run: ./Windows/WaraqStudio/WaraqStudio.exe --smoke
@@ -142,6 +154,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem dist
 
+      - name: Verify installer (install, launch and uninstall)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          ./tests/verify_installer.ps1 -InstallerPath "dist/WaraqStudio-$env:VERSION-setup.exe" -ExpectedVersion $env:VERSION -ExpectedOpenCodeVersion $env:OPENCODE_TEST_VERSION
+
       - name: Write release notes
         run: |
           cat > RELEASE_NOTES.md <<EOF
@@ -153,6 +171,8 @@ jobs:
           - \`WaraqStudio-$TAG-source.zip\` — نسخة مضغوطة من الكود المصدري.
 
           ## ملاحظات
+          - يدعم هذا الإصدار OpenCode 2 مع اكتشاف ملفه التنفيذي تلقائيًا، وصيغة مستوى التفكير الجديدة، وخوادم مستقلة للعمال. اترك مسار OpenCode في الإعدادات بقيمة \`opencode\` للاكتشاف التلقائي.
+          - اجتاز المُثبّت اختبار التثبيت والتشغيل والإزالة على Windows داخل GitHub Actions قبل النشر، واختُبر OpenCode 2 بمزود محلي دون طلبات مدفوعة.
           - إنتاج Word يحتاج OpenCode وإعداد مزوّد النموذج ومهارة التنسيق المستخدمة؛ تنزيل YouTube يحتاج Node.js أو Deno مناسبًا. هذه الأدوات وحساباتها خارج الحزمة.
           - يمكنك تحديد عناصر الطابور وحذف سجلاتها مع الاحتفاظ بالملفات. التفريغات TXT المستوردة تعرض مرحلة Word وحدها.
           - تظهر خيارات قالب البرومبت والمادة ومسار النتائج أعلى صفحة إضافة المصدر، قبل استيراد ملفات TXT أو مجلد التفريغات.

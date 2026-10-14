@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import queue
 import random
 import re
@@ -11,6 +12,7 @@ import subprocess
 import threading
 import time
 import zipfile
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
@@ -87,8 +89,11 @@ def limit_reached(line):
         except ValueError:
             return False
         error = event.get("error") if isinstance(event, dict) else None
-        payload = error.get("data") if isinstance(error, dict) else None
-        return isinstance(payload, dict) and payload.get("statusCode") == 429
+        if not isinstance(error, dict):
+            return False
+        payload = error.get("data")
+        # V2 emits flat structured errors; V1 stores HTTP status in data.
+        return error.get("status") == 429 or (isinstance(payload, dict) and payload.get("statusCode") == 429)
     return False
 
 
@@ -567,15 +572,123 @@ class Deepgram:
 
 
 def resolve_opencode(value):
-    path = Path(value) if Path(value).is_file() else Path(shutil.which(value) or "__missing__")
-    if path.suffix.lower() in (".cmd", ".bat", ".ps1"):
-        candidate = path.parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
-        if candidate.is_file():
-            return candidate
-        raise ServiceError("اختر ملف opencode.exe التنفيذي مباشرة بدل ملف BAT/CMD.", "blocked")
+    """Resolve native binaries, including npm shims, without executing a shell.
+
+    Automatic lookup follows PATH, then common per-user installs. Explicit paths
+    never silently switch to another installation when missing or broken.
+    """
+    value = os.path.expandvars(str(value or "opencode").strip().strip('"'))
+    automatic = value.lower() in ("opencode", "opencode.exe", "opencode2", "opencode2.exe")
+    path = Path(value).expanduser()
+    if path.is_file():
+        found = _opencode_binary(path)
+        if found:
+            return found
+        if not automatic:
+            raise ServiceError("تعذر العثور على ملف OpenCode التنفيذي خلف ملف التشغيل المحدد؛ "
+                               "اكتب opencode للاكتشاف التلقائي أو اختر opencode.exe مباشرة.", "blocked")
+    else:
+        located = shutil.which(value)
+        if located:
+            found = _opencode_binary(Path(located))
+            if found:
+                return found
+    if automatic:
+        # GUI apps can inherit an older PATH than a newly opened terminal.
+        roots = [Path(p) for p in os.get_exec_path() if p]
+        if os.environ.get("APPDATA"):
+            roots.append(Path(os.environ["APPDATA"]) / "npm")
+        roots += [Path.home() / ".opencode" / "bin", Path.home() / ".bun" / "bin",
+                  Path.home() / "scoop" / "apps" / "opencode" / "current"]
+        for root in dict.fromkeys(roots):
+            for name in ("opencode.exe", "opencode.cmd", "opencode.ps1", "opencode"):
+                found = _opencode_binary(root / name)
+                if found:
+                    return found
+            for candidate in _opencode_npm_binaries(root / "node_modules"):
+                if candidate.is_file():
+                    return candidate.resolve()
+    raise ServiceError("لم يُعثر على OpenCode. ثبّت OpenCode 2 بالأمر npm install -g @opencode/cli، "
+                       "ثم اكتب opencode في الإعدادات أو اختر ملف opencode.exe.", "blocked")
+
+
+def _opencode_npm_binaries(modules, preferred="@opencode/cli"):
+    # V2 postinstall installs a native file in @opencode/cli/bin; V1 can
+    # leave it in its platform dependency, nested or hoisted by npm.
+    packages = (preferred, "opencode-ai" if preferred == "@opencode/cli" else "@opencode/cli")
+    arches = ("arm64",) if platform.machine().lower() in ("arm64", "aarch64") else ("x64-baseline", "x64")
+    for name in packages:
+        package = modules / name
+        yield package / "bin" / "opencode.exe"
+        yield package / "bin" / ".opencode.exe"
+        for deps in (package / "node_modules", modules):
+            prefix = "@opencode/cli-windows-" if name == "@opencode/cli" else "opencode-windows-"
+            for arch in arches:
+                yield deps / (prefix + arch) / "bin" / "opencode.exe"
+
+
+def _opencode_binary(path):
     if not path.is_file():
-        raise ServiceError("لم يُعثر على OpenCode؛ حدد مسار opencode.exe.", "blocked")
-    return path.resolve()
+        return None
+    if path.suffix.lower() == ".exe":
+        return path.resolve()
+    if path.suffix.lower() in (".cmd", ".bat", ".ps1") or (os.name == "nt" and not path.suffix):
+        modules = path.parent.parent if path.parent.name == ".bin" else path.parent / "node_modules"
+        # Read only a bounded prefix of the shim to respect its package choice.
+        # Never execute it or interpolate its contents into a command.
+        try:
+            with path.open("rb") as shim:
+                content = shim.read(16_384).decode("utf-8", errors="replace").replace("\\", "/")
+        except OSError:
+            content = ""
+        preferred = "opencode-ai" if "opencode-ai/" in content else "@opencode/cli"
+        return next((p.resolve() for p in _opencode_npm_binaries(modules, preferred) if p.is_file()), None)
+    if os.name != "nt":
+        return path.resolve()
+    return None
+
+
+_opencode_probe_lock = threading.Lock()
+
+
+def opencode_version(executable):
+    """Cache a bounded version probe; replacing/upgrading the file invalidates it."""
+    try:
+        path = Path(executable).resolve()
+        stat = path.stat()
+        with _opencode_probe_lock:
+            return _opencode_version_cached(str(path), stat.st_mtime_ns, stat.st_size)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ServiceError("تعذر تشغيل OpenCode للتحقق من إصداره؛ راجع الملف التنفيذي وصلاحياته.", "blocked") from exc
+
+
+@lru_cache(maxsize=16)
+def _opencode_version_cached(executable, modified, size):
+    result = subprocess.run([executable, "--version"], capture_output=True, stdin=subprocess.DEVNULL,
+                            text=True, encoding="utf-8", errors="replace", timeout=10, check=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    match = re.search(r"\b(?:v)?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\b", result.stdout)
+    if not match:
+        raise ServiceError("تعذر التعرف على إصدار OpenCode من الملف المحدد.", "blocked")
+    version = match.group(1)
+    if version.split(".")[0] not in ("1", "2"):
+        raise ServiceError("إصدار OpenCode غير مدعوم: " + version + "؛ حدّث ورق لدعم هذا الإصدار.", "blocked")
+    return version
+
+
+def opencode_run_command(executable, version, worker, model, work, prompt):
+    """Keep V1 compatibility while using V2's private server and model syntax."""
+    variant = str(worker.get("variant", "")).strip()
+    if version.startswith("2."):
+        if variant:
+            model = model.split("#", 1)[0] + "#" + variant
+        command = [str(executable), "run", "--standalone", "--auto", "--model", model]
+    else:
+        command = [str(executable), "run", "--model", model]
+        if variant:
+            command += ["--variant", variant]
+        command += ["--dir", str(work)]
+    return command + ["--agent", worker["agent"], "--format", "json", "--", prompt]
 
 
 class OpenCode:
@@ -615,10 +728,8 @@ class OpenCode:
             # Only a committed validation record qualifies for automatic reuse.
             output.rename(work / ("unverified-" + str(time.time_ns()) + ".docx"))
         module_paths = self.prepare_context(work, cfg)
-        # The session is sandboxed to --dir: reads outside it hit OpenCode's
-        # external_directory permission, which headless runs auto-reject. The
-        # agent therefore works on a copy inside its workspace; the original
-        # TXT stays out of reach and its hash is still verified after the run.
+        # Work on a local copy. OpenCode has the account's host permissions;
+        # the original TXT's hash is independently verified after the run.
         local_transcript = work / transcript.name
         shutil.copyfile(transcript, local_transcript)
         prompt = cfg["prompt"]
@@ -633,12 +744,17 @@ class OpenCode:
         provider = provider_of(worker, cfg)
         model = compose_model(provider, worker["model"])
         env.update(worker_env(worker, provider, secret, cfg))
-        log(f"المزود: {provider} · النموذج: {model}")
-        command = [str(resolve_opencode(cfg["opencode_executable"])), "run", "--model", model]
-        if str(worker.get("variant", "")).strip():
-            # Reasoning effort is provider specific; empty means the flag is left out.
-            command += ["--variant", worker["variant"]]
-        command += ["--agent", worker["agent"], "--dir", str(work), "--format", "json", prompt]
+        executable = resolve_opencode(cfg["opencode_executable"])
+        cli_version = opencode_version(executable)
+        # V2 uses PWD before process.cwd(); an inherited PWD can otherwise
+        # send a task into the directory of the terminal that launched Waraq.
+        env["PWD"] = str(work.resolve())
+        if cli_version.startswith("2."):
+            # An inherited OPENCODE_DB bypasses XDG worker isolation.
+            if provider_isolated(provider, cfg) and cfg.get("opencode_data_root"):
+                env.pop("OPENCODE_DB", None)
+        log(f"OpenCode {cli_version} · المزود: {provider} · النموذج: {model}")
+        command = opencode_run_command(executable, cli_version, worker, model, work, prompt)
         denied = []
         limited = []
         def track(line):

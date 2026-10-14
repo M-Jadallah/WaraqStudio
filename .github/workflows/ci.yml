@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  OPENCODE_TEST_VERSION: "2.0.27"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -38,6 +41,12 @@ jobs:
 
       - name: Engine and service tests
         run: python -m pytest tests -v --tb=short
+
+      - name: Install OpenCode 2 for native acceptance
+        run: npm install -g "@opencode/cli@$OPENCODE_TEST_VERSION"
+
+      - name: Native OpenCode 2 acceptance (local model, no paid requests)
+        run: python tests/verify_opencode_v2.py
 
       - name: Native UI interaction checks
         run: python tests/verify_ui.py

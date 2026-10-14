@@ -460,6 +460,7 @@ def test_opencode_only_reuses_committed_validated_document(env, tmp_path, monkey
     job = store.get(ident)
     calls = []
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     def run(command, work, *args):
         calls.append(1)
@@ -494,6 +495,7 @@ def test_opencode_works_on_transcript_copy_inside_workspace(env, tmp_path, monke
     job = store.get(ident)
     captured = {}
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     def run(command, cwd, *args):
         captured["cwd"] = Path(cwd)
@@ -520,6 +522,7 @@ def test_opencode_permission_rejection_diagnosed(env, tmp_path, monkeypatch):
     ident = store.add(items(), cfg.snapshot(), input_path=str(txt))[0]
     job = store.get(ident)
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     def run(command, cwd, cancel, timeout, log, process_env=None):
         log("permission requested: external_directory (C:\\blocked\\*); auto-rejecting")
@@ -825,14 +828,16 @@ def test_quota_line_matching():
 
 
 @pytest.mark.parametrize("raises", [True, False])
-def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises):
+@pytest.mark.parametrize("error", [{"data": {"statusCode": 429}}, {"type": "api", "status": 429, "message": "Too many requests"}])
+def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises, error):
     import waraq.services as services
     store, cfg = env
     ident = local_txt_job(store, cfg, tmp_path)
     job = store.get(ident)
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
-    quota = '{"type":"error","sessionID":"ses_x","error":{"data":{"statusCode":429,"message":"The usage limit has been reached"}}}'
+    quota = json.dumps({"type": "error", "sessionID": "ses_x", "error": error})
     def run(command, cwd, cancel, timeout, log, process_env=None):
         log(quota)
         if raises:
@@ -968,6 +973,7 @@ def test_opencode_command_carries_provider_model_and_isolated_env(env, tmp_path,
     job = store.get(ident)
     captured = {}
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     def run(command, cwd, cancel, timeout, log, process_env=None):
         captured["command"] = command
@@ -986,8 +992,11 @@ def test_opencode_command_carries_provider_model_and_isolated_env(env, tmp_path,
     login = {"id": "oc1", "name": "OpenCode 01", "provider": "login",
              "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"}
     services.OpenCode().process(job, login, cfg.data, "", threading.Event(), lambda _: None)
-    assert captured["command"][captured["command"].index("--model") + 1] == "openai/gpt-6-astra"
-    assert captured["command"][captured["command"].index("--variant") + 1] == "high"
+    assert captured["command"][captured["command"].index("--model") + 1] == "openai/gpt-6-astra#high"
+    assert "--variant" not in captured["command"]
+    assert "--dir" not in captured["command"]
+    assert "--standalone" in captured["command"]
+    assert "--auto" in captured["command"]
     assert "OPENROUTER_API_KEY" not in captured["env"]
     assert "XDG_DATA_HOME" not in captured["env"]
 

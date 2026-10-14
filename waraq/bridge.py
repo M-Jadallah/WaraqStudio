@@ -17,7 +17,7 @@ from .catalog import deepgram_models, opencode_models
 from .config import (BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
                      provider_info, provider_of)
 from .models import DictListModel
-from .services import resolve_opencode
+from .services import opencode_version, resolve_opencode
 from .store import STAGES
 
 LABELS = {"pending": "في الانتظار", "running": "قيد التنفيذ", "completed": "مكتمل", "skipped": "متجاوز",
@@ -1056,7 +1056,8 @@ class Bridge(QObject):
                 messages.append(name + (": جاهز" if importlib.util.find_spec(name) else ": غير مثبت"))
             messages.append("JavaScript: " + (shutil.which("node") or shutil.which("deno") or "غير موجود"))
             try:
-                messages.append("OpenCode: " + str(resolve_opencode(self.config.data["opencode_executable"])))
+                executable = resolve_opencode(self.config.data["opencode_executable"])
+                messages.append("OpenCode " + opencode_version(executable) + ": " + str(executable))
             except Exception as exc:
                 messages.append(str(exc))
             self.backgroundError.emit("\n".join(messages))

@@ -267,6 +267,7 @@ def test_deleted_original_still_produces_word_through_scheduler(imports, tmp_pat
     monkeypatch.setattr(scheduler.youtube, "download", forbidden)
     monkeypatch.setattr(scheduler.deepgram, "transcribe", forbidden)
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     calls = []
     def run(command, work, *args):

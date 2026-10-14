@@ -23,7 +23,7 @@
   "split_after_minutes": 90,
   "http_timeout": 1800,
   "max_retries": 3,
-  "opencode_executable": "opencode.exe",
+  "opencode_executable": "opencode",
   "opencode_timeout": 3600,
   "opencode_context": "",
   "opencode_data_root": "C:/WaraqStudio/opencode-workers",

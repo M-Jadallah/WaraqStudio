@@ -7,7 +7,7 @@ from pathlib import Path
 
 import requests
 
-from .services import resolve_opencode
+from .services import opencode_version, resolve_opencode
 
 
 def deepgram_models():
@@ -35,8 +35,15 @@ def opencode_models(executable, context=""):
     """Read the installed CLI's configured model list; never use a shell."""
     cwd = str(Path(context)) if context and Path(context).is_dir() else None
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    executable = resolve_opencode(executable)
+    version = opencode_version(executable)
+    command = [str(executable), "models"]
+    if version.startswith("2."):
+        command.append("--standalone")
+    env = os.environ.copy()
+    env["PWD"] = str(Path(cwd or os.getcwd()).resolve())
     result = subprocess.run(
-        [str(resolve_opencode(executable)), "models"], cwd=cwd, capture_output=True,
+        command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
         text=True, encoding="utf-8", errors="replace", timeout=20,
         creationflags=flags, check=True,
     )

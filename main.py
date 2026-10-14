@@ -62,13 +62,15 @@ def main():
         import keyring
         import openpyxl
         import requests
-        from waraq.services import resolve_opencode
+        from waraq.services import opencode_version, resolve_opencode
         report = {"version": __version__, "ffmpeg": str(imageio_ffmpeg.get_ffmpeg_exe()), "yt_dlp": yt_dlp.version.__version__,
                   "keyring": type(keyring.get_keyring()).__name__, "node": shutil.which("node"),
                   "requests": requests.__version__, "openpyxl": openpyxl.__version__, "ejs": True}
         report["ffmpeg_exists"] = Path(report["ffmpeg"]).is_file()
         try:
-            report["opencode"] = str(resolve_opencode(config.data["opencode_executable"]))
+            executable = resolve_opencode(config.data["opencode_executable"])
+            report["opencode"] = str(executable)
+            report["opencode_version"] = opencode_version(executable)
         except Exception as exc:
             report["opencode_error"] = str(exc)
         Path(args.check_environment).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
