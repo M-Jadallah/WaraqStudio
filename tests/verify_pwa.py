@@ -186,7 +186,10 @@ def main():
                 # A failed precache keeps the existing active cache intact.
                 record['version']=2;record['fail_asset']=True
                 page.evaluate("async()=>await(await navigator.serviceWorker.getRegistration()).update()")
-                page.wait_for_timeout(500)
+                page.wait_for_function("""async()=>{
+                    const reg=await navigator.serviceWorker.getRegistration();
+                    return !reg.installing && JSON.stringify(await caches.keys())===JSON.stringify(['waraq-public-test-1']);
+                }""",timeout=30000)
                 assert page.evaluate("async()=>await caches.keys()") == ['waraq-public-test-1']
                 record['fail_asset']=False;record['version']=3
                 page.evaluate("async()=>await(await navigator.serviceWorker.getRegistration()).update()")
