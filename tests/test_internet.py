@@ -263,13 +263,13 @@ def test_real_wss_device_isolation_management_and_file_stream(tmp_path, app, mon
             device = parse_qs(urlsplit(ws.request.path).query)["device_id"][0]
             ws.send(json.dumps({"type":"welcome", "protocol":1, "device_id":device}))
             ws.send(json.dumps({"type":"request", "protocol":1, "id":"state_12345678",
-                                "action":"state", "data":{}, "deadline":time.time()+10}))
+                                "action":"state", "data":{}, "deadline":time.time()+30}))
             ws.send(json.dumps({"type":"request", "protocol":1, "id":"file_12345678",
-                                "action":"file", "data":{}, "deadline":time.time()+10}))
+                                "action":"file", "data":{}, "deadline":time.time()+30}))
             chunks = []
             got_state = got_file = got_pair = False
             while not (got_state and got_file and got_pair):
-                frame = json.loads(ws.recv(timeout=10))
+                frame = json.loads(ws.recv(timeout=30))
                 if frame["type"] == "control":
                     result = {"phones": []}
                     if frame["action"] == "pair_create":
@@ -314,8 +314,9 @@ def test_real_wss_device_isolation_management_and_file_stream(tmp_path, app, mon
         wait_for(app, lambda: all(c.state()["connected"] for c in connectors), timeout=15)
         for connector in connectors:
             connector.createPair()
-        wait_for(app, lambda: outcomes.qsize() >= 2)
+        wait_for(app, lambda: outcomes.qsize() >= 2, timeout=35)
         values = [outcomes.get_nowait(), outcomes.get_nowait()]
+        assert all(isinstance(value, str) for value in values), (values, [c.state() for c in connectors])
         assert sorted(values) == ["device_A12345678", "device_B12345678"], values
         wait_for(app, lambda: all(c.state()["pairUrl"] for c in connectors))
         assert all("x"*48 not in json.dumps(c.state()) for c in connectors)

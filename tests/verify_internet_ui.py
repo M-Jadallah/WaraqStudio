@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import QObject, QPoint, QPointF, Qt, QMetaObject, QUrl, qInstallMessageHandler
+from PySide6.QtGui import QFont
 from PySide6.QtQml import QQmlApplicationEngine, QQmlExpression
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtTest import QTest
@@ -51,6 +52,7 @@ def main():
         output.mkdir(parents=True, exist_ok=True)
     QQuickStyle.setStyle("Basic")
     app = QApplication([])
+    app.setFont(QFont("Segoe UI", 10))
     messages = []
     qInstallMessageHandler(lambda kind, context, message: messages.append(message))
     with tempfile.TemporaryDirectory(prefix="waraq-internet-native-") as temporary, ExitStack() as mocks:
@@ -124,6 +126,16 @@ def main():
             connector.changed.emit()
             QTest.qWait(100)
 
+        def quick_click():
+            button = control("quickInternetButton")
+            assert button.isVisible() and button.property("enabled")
+            origin = button.mapToScene(QPointF(0, 0))
+            assert origin.x() >= 0 and origin.y() >= 0
+            assert origin.x()+button.width() <= root.width() and origin.y()+button.height() <= root.height()
+            point = button.mapToScene(button.boundingRect().center())
+            QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(round(point.x()), round(point.y())))
+            QTest.qWait(100)
+
         def bounds():
             card = control("internetAccessCard")
             for item in walk(card):
@@ -145,6 +157,11 @@ def main():
 
         try:
             assert not connector.state()["registered"] and not connector.state()["connected"]
+            root.setProperty("page", 0)
+            QTest.qWait(100)
+            assert control("quickInternetButton").property("text") == "إعداد ربط الهاتف"
+            quick_click()
+            assert root.property("page") == 5 and not calls
             gateway, name, enrollment = (control(n) for n in ("internetGateway", "internetDeviceName", "internetEnrollment"))
             assert gateway.isVisible() and name.isVisible() and enrollment.isVisible()
             assert gateway.property("text") == "https://waraqstudio.jadallah.work"
@@ -174,6 +191,21 @@ def main():
             connector._error = ""
             publish()
             assert not gateway.isVisible() and not name.isVisible() and not enrollment.isVisible()
+            root.setProperty("page", 0)
+            QTest.qWait(100)
+            assert control("quickInternetButton").property("text") == "تفعيل اتصال الإنترنت"
+            quick_click()
+            assert calls[-1] == ("start", ()) and root.property("page") == 0
+            # The quick toggle can stop a connecting/reconnecting socket too.
+            connector._stop.clear()
+            connector._status = "جارٍ الاتصال"
+            publish()
+            assert control("quickInternetButton").property("text") == "إيقاف اتصال الإنترنت"
+            assert "جارٍ الاتصال" in control("quickInternetStatus").property("text")
+            quick_click()
+            assert not connector.state()["enabled"] and connector.state()["registered"]
+            root.setProperty("page", 5)
+            QTest.qWait(100)
             assert control("startInternetButton").isVisible()
             click("startInternetButton")
             assert calls[-1] == ("start", ())
@@ -222,12 +254,24 @@ def main():
                     tuned.update(theme=theme, ui_scale=scale)
                     assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
                     QTest.qWait(160)
+                    root.setProperty("toastText", "")
                     assert root.property("dark") == (theme == "dark")
                     bounds()
                     for object_name in ("internetStatus", "pairInternetButton", "internetQr", "approveInternetPhoneButton"):
                         reveal(control(object_name))
                     if output:
                         root.grabWindow().save(str(output / f"internet-native-{theme}-{round(scale * 100)}.png"))
+                    root.setProperty("page", 0)
+                    QTest.qWait(100)
+                    for object_name in ("quickInternetButton", "quickInternetStatus", "runButton", "autoStopBox"):
+                        item = control(object_name)
+                        origin = item.mapToScene(QPointF(0, 0))
+                        assert origin.x() >= -1 and origin.x()+item.width() <= root.width()+1, object_name
+                        assert origin.y() >= -1 and origin.y()+item.height() <= root.height()+1, object_name
+                    if output:
+                        root.grabWindow().save(str(output / f"internet-main-{theme}-{round(scale * 100)}.png"))
+                    root.setProperty("page", 5)
+                    QTest.qWait(100)
 
             identity, claims, phones, pair_url = connector._identity, connector._claims, connector._phones, connector._pair_url
             connector._identity, connector._claims, connector._phones, connector._pair_url = {}, [], [], ""
@@ -267,7 +311,7 @@ def main():
     failures = [message for message in messages if any(token in message for token in (
         "ReferenceError", "TypeError", "Cannot", "Unable", "binding loop", "failed to load"))]
     assert not failures, failures
-    print("Native Internet UI passed: enrollment fields/masking/clear, Bridge action wiring, status/error, "
+    print("Native Internet UI passed: main-header setup/start/stop including connecting, enrollment fields/masking/clear, Bridge action wiring, status/error, "
           "registered form hiding, QR ready, claim name/code approval/rejection, phone revoke, native forget "
           "confirmation, independent Internet stop preserving LAN+queue, minimum 1060x720, 100/140% scale, "
           "light/dark layout boundaries, no QML errors or external calls.")

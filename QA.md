@@ -1,5 +1,9 @@
 # Verification — 2026-09-19 · منطق إعادة تنزيل YouTube + ضغط الواجهة
 
+## Main-window Internet shortcut — 2026-10-16
+
+Added a global header button for Internet start/stop with adjacent connection status. An unregistered desktop opens Settings, a registered offline desktop starts the saved connector, and an enabled connecting/reconnecting connector can be stopped. Native acceptance exercises each path on the operations page, preserves the registered identity, and checks the header bounds/screenshots at 1060×720 in light/dark at 100%/140%. No automatic startup or pairing change is introduced.
+
 ## QR navigation regression — 2026-10-16
 
 The deployed gateway returned 200 for direct `/pair` GET but 403 for the same page with `Sec-Fetch-Site: cross-site`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`, reproducing the Android QR report. The middleware now allows that GET navigation only for public HTML-shell routes; Host/Origin validation, cross-site API/assets/WebSocket rejection, mutation headers, pairing approval and device grants remain enforced. Added five gateway cases covering public routes, iframe/script/object/fetch rejection and protected requests. The real TLS/Edge acceptance now follows a link from an actual different site on both pairings, checks the browser's cross-site metadata and completes approval and A/B isolation.

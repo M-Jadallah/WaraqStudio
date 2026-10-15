@@ -378,6 +378,31 @@ ApplicationWindow {
                             SubText { text: "من الفيديو إلى مستند يستحق القراءة"; Layout.alignment: Qt.AlignRight }
                         }
                     }
+                    // Reconnect the already paired phone without leaving the main page.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        AppButton {
+                            objectName: "quickInternetButton"
+                            readonly property bool active: win.internetState.enabled === true || win.internetState.connected
+                            text: active ? "إيقاف اتصال الإنترنت" : (win.internetState.registered ? "تفعيل اتصال الإنترنت" : "إعداد ربط الهاتف")
+                            primary: !active
+                            enabled: !win.internetState.busy
+                            Accessible.name: text
+                            onClicked: {
+                                if (active) backend.stopInternet()
+                                else if (win.internetState.registered) backend.startInternet()
+                                else win.page = 5
+                            }
+                        }
+                        LabelText {
+                            objectName: "quickInternetStatus"
+                            text: "ربط الهاتف: " + win.internetState.status + (win.internetState.name ? " · " + win.internetState.name : "") + (win.internetState.error ? " · " + win.internetState.error : "")
+                            color: win.internetState.error ? (win.dark ? "#ffba82" : "#9a4409") : (win.internetState.connected ? (win.dark ? "#61ddbb" : "#08765b") : win.muted)
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                        }
+                    }
                     // Optional per-run settings: forcing one overrides every OpenCode worker.
                     RowLayout {
                         Layout.fillWidth: true

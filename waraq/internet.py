@@ -131,6 +131,7 @@ class InternetAccess(QObject):
             now = time.time()
             self._claims = [c for c in self._claims if c.get("expires_at", 0) > now]
             return {"registered": bool(self._identity), "connected": self._connected,
+                    "enabled": not self._stop.is_set(),
                     "status": self._status, "deviceId": self._identity.get("device_id", ""),
                     "name": self._identity.get("name", ""), "url": self._identity.get("url", ""),
                     "error": self._error, "pairUrl": self._pair_url, "matchCode": self._match_code,
