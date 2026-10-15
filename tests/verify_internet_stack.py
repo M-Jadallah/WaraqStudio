@@ -9,6 +9,7 @@ from __future__ import annotations
 from concurrent.futures import Future
 import asyncio
 import datetime
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -80,7 +81,8 @@ def certificate(home):
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
             .serial_number(x509.random_serial_number()).not_valid_before(now-datetime.timedelta(minutes=1))
             .not_valid_after(now+datetime.timedelta(days=1))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True).sign(key, hashes.SHA256()))
     certificate_path, key_path = home/"test-ca.pem", home/"test-key.pem"
     certificate_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -230,7 +232,7 @@ def main():
         listener=socket.socket()
         listener.bind(("127.0.0.1",0))
         port=listener.getsockname()[1]
-        base=f"https://localhost:{port}"
+        base=f"https://127.0.0.1:{port}"
         database=Database("sqlite:///"+(home/"relay.sqlite3").as_posix())
         database.initialize()
         relay=create_app(Settings(base,database_url="sqlite:///"+(home/"relay.sqlite3").as_posix()),database)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from concurrent.futures import Future, ThreadPoolExecutor
 import datetime
+import ipaddress
 import json
 from pathlib import Path
 import queue
@@ -230,7 +231,8 @@ def tls_contexts(tmp_path):
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
             .serial_number(x509.random_serial_number()).not_valid_before(now-datetime.timedelta(minutes=1))
             .not_valid_after(now+datetime.timedelta(days=1))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True).sign(key, hashes.SHA256()))
     certificate, keyfile = tmp_path/"test.pem", tmp_path/"test.key"
     certificate.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -293,7 +295,9 @@ def test_real_wss_device_isolation_management_and_file_stream(tmp_path, app, mon
         except Exception as exc:
             outcomes.put(exc)
 
-    server = serve(handler, "localhost", 0, ssl=server_tls)
+    # Bind/connect the same address family on Windows runners; localhost may
+    # resolve IPv6 first while the ephemeral listener is IPv4 (or vice versa).
+    server = serve(handler, "127.0.0.1", 0, ssl=server_tls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.socket.getsockname()[1]
@@ -303,11 +307,11 @@ def test_real_wss_device_isolation_management_and_file_stream(tmp_path, app, mon
             def execute(action, data, device=name):
                 assert QThread.currentThread() == app.thread()
                 return document if action == "file" else {"device":device}
-            connector, bridge, vault = make_connector(tmp_path/name, execute, device=name, url=f"https://localhost:{port}")
+            connector, bridge, vault = make_connector(tmp_path/name, execute, device=name, url=f"https://127.0.0.1:{port}")
             connectors.append(connector)
             bridges.append(bridge)
             connector.start()
-        wait_for(app, lambda: all(c.state()["connected"] for c in connectors))
+        wait_for(app, lambda: all(c.state()["connected"] for c in connectors), timeout=15)
         for connector in connectors:
             connector.createPair()
         wait_for(app, lambda: outcomes.qsize() >= 2)
@@ -320,7 +324,7 @@ def test_real_wss_device_isolation_management_and_file_stream(tmp_path, app, mon
             connector.stop()
         server.shutdown()
         thread.join(timeout=3)
-        wait_for(app, lambda: all(not c._thread.is_alive() for c in connectors), timeout=5)
+        wait_for(app, lambda: all(not c._thread.is_alive() for c in connectors), timeout=12)
 
 
 def test_enrollment_is_async_and_identity_contains_no_credential(tmp_path, app, monkeypatch):
