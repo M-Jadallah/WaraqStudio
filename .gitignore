@@ -22,3 +22,8 @@ node_modules/
 .next/
 coverage/
 env-report.json
+.env
+.env.*
+!.env.example
+internet-device.json
+internet-requests.json

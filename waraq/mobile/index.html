@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0d1422" />
+    <title>ورق · الهاتف</title>
+    <link rel="icon" href="/assets/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/style.css" />
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/assets/icon.svg" width="40" height="40" alt="" />
+        <div><strong>ورق</strong><span>لوحة الهاتف</span></div>
+      </div>
+      <span id="connection" role="status">جارٍ الاتصال…</span>
+      <button id="logout" class="quiet" hidden>قطع الاتصال</button>
+    </header>
+    <main>
+      <section id="internet-home" class="login panel" hidden aria-labelledby="internet-title">
+        <span class="eyebrow">ورق عبر الإنترنت</span>
+        <h1 id="internet-title">اختر الكمبيوتر المقترن.</h1>
+        <p class="muted">يقبل كل كمبيوتر هاتفًا واحدًا فقط. يمكنك ربط هاتفك بأكثر من كمبيوتر باقتران مستقل لكل واحد، واختيار الكمبيوتر المطلوب هنا.</p>
+        <p class="muted">لربط كمبيوتر جديد، افتح ورق عليه ثم امسح رمز QR من إعدادات الوصول عبر الإنترنت. لاستبدال هاتف مقترن، ألغِ اقترانه أولًا من الكمبيوتر.</p>
+        <div id="device-list" class="cards" aria-live="polite"></div>
+        <p id="device-error" class="error" role="alert"></p>
+        <button id="devices-refresh" class="quiet">تحديث الأجهزة</button>
+      </section>
+      <section id="internet-pair" class="login panel" hidden aria-labelledby="internet-pair-title">
+        <span class="eyebrow">اقتران بهذا الكمبيوتر</span>
+        <h1 id="internet-pair-title">اربط هاتفك بورق.</h1>
+        <p id="internet-pair-policy" class="muted">يقبل هذا الكمبيوتر هاتفًا واحدًا فقط. لاستبداله، ألغِ اقتران الهاتف الحالي من ورق على الكمبيوتر، ثم أنشئ رمز QR جديدًا.</p>
+        <form id="internet-pair-form">
+          <label for="phone-name">اسم الهاتف الذي يظهر على الكمبيوتر</label>
+          <input id="phone-name" maxlength="80" value="هاتفي" required autocomplete="off" />
+          <p class="muted">بعد الإرسال، طابق اسم الكمبيوتر والرمز ثم وافق على الطلب من ورق على الكمبيوتر نفسه.</p>
+          <button id="internet-pair-button" class="primary" type="submit">طلب الاقتران</button>
+        </form>
+        <div id="pair-waiting" hidden aria-live="polite" role="status">
+          <p>الكمبيوتر المطلوب: <strong id="pair-device-name"></strong></p>
+          <p>رمز المطابقة: <strong id="pair-match-code" class="match-code" dir="ltr"></strong></p>
+          <p id="pair-waiting-message">بانتظار موافقتك على الكمبيوتر…</p>
+        </div>
+        <p id="internet-pair-error" class="error" role="alert"></p>
+        <a href="/internet">العودة إلى أجهزتي</a>
+      </section>
+      <aside id="device-context" class="panel device-context" hidden aria-label="الكمبيوتر الحالي">
+        <div><span class="eyebrow">التحكم بهذا الكمبيوتر فقط</span><strong id="device-name"></strong><span id="device-last-seen" class="muted"></span></div>
+        <a href="/internet" id="change-device">أجهزتي</a>
+      </aside>
+      <section
+        id="login"
+        class="login panel"
+        hidden
+        aria-labelledby="login-title"
+      >
+        <span class="eyebrow">ورق على شبكتك</span>
+        <h1 id="login-title">مكتبك، من هاتفك.</h1>
+        <p class="muted">تابع دروسك وأضف مهامك، وسيكمل الكمبيوتر العمل.</p>
+        <form id="pair-form">
+          <label for="code">رمز الدخول من الكمبيوتر</label>
+          <input
+            id="code"
+            name="code"
+            class="code"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            maxlength="12"
+            required
+            aria-describedby="code-help pair-error"
+            dir="ltr"
+          />
+          <p id="code-help" class="muted">
+            ستجده في ورق ← الإعدادات ← الوصول من الهاتف. الرمز صالح لعشر دقائق.
+          </p>
+          <p id="pair-error" class="error" role="alert"></p>
+          <button id="pair-button" class="primary" type="submit">
+            الاتصال بورق
+          </button>
+        </form>
+        <p class="footnote">
+          استخدم شبكة Wi-Fi موثوقة، وأبقِ ورق مفتوحًا والكمبيوتر مستيقظًا.
+        </p>
+      </section>
+
+      <div id="workspace" hidden>
+        <div id="offline" class="banner" role="alert" hidden>
+          انقطع الاتصال بالكمبيوتر. تحقق من الشبكة ومن بقاء ورق مفتوحًا. نحاول
+          الاتصال مجددًا…
+        </div>
+        <section
+          id="queue-page"
+          data-page="queue"
+          aria-labelledby="queue-title"
+        >
+          <div class="section-head">
+            <div>
+              <span class="eyebrow">كل مهمة في مكانها</span>
+              <h1 id="queue-title">مركز العمليات</h1>
+            </div>
+            <button id="refresh" class="quiet">تحديث</button>
+          </div>
+          <div class="stats" aria-label="إحصاءات الطابور">
+            <div><strong id="total">0</strong><span>مهمة</span></div>
+            <div><strong id="active">0</strong><span>قيد التنفيذ</span></div>
+            <div><strong id="done">0</strong><span>مكتملة</span></div>
+            <div><strong id="attention">0</strong><span>تحتاج إجراء</span></div>
+          </div>
+          <div class="panel queue-control">
+            <div>
+              <strong id="queue-state">الطابور متوقف</strong>
+              <p class="muted">الإيقاف يترك المهام الحالية تكمل عملها.</p>
+            </div>
+            <button id="queue-toggle" class="primary" data-mutate>
+              تشغيل الطابور
+            </button>
+          </div>
+          <p id="auto-stop" class="banner" hidden>
+            الإغلاق التلقائي مفعّل على الكمبيوتر؛ سينقطع الوصول عند اكتمال
+            الطابور.
+          </p>
+          <div class="filters">
+            <div>
+              <label for="search">البحث في المهام</label
+              ><input id="search" type="search" placeholder="عنوان الدرس…" />
+            </div>
+            <div>
+              <label for="filter">الحالة</label
+              ><select id="filter">
+                <option value="all">كل المهام</option>
+                <option value="running">قيد التنفيذ</option>
+                <option value="pending">في الانتظار</option>
+                <option value="attention">تحتاج إجراء</option>
+                <option value="completed">مكتملة</option>
+                <option value="cancelled">ملغاة</option>
+              </select>
+            </div>
+          </div>
+          <p id="job-count" class="muted"></p>
+          <div id="jobs" class="cards"></div>
+          <button id="more" class="wide quiet" hidden>عرض المزيد</button>
+        </section>
+
+        <section
+          id="source-page"
+          data-page="source"
+          hidden
+          aria-labelledby="source-title"
+        >
+          <span class="eyebrow">أضف، ودع ورق يكمل</span>
+          <h1 id="source-title">مصدر جديد</h1>
+          <div class="panel">
+            <h2>إعدادات المهام الجديدة</h2>
+            <label for="template">قالب البرومبت</label
+            ><select id="template"></select>
+            <label for="folder">مجلد المادة أو الدرس</label
+            ><select id="folder"></select>
+            <p class="muted">
+              تُحفظ النتائج في مجلد النتائج المحدد على الكمبيوتر.
+            </p>
+          </div>
+          <form id="youtube-form" class="panel">
+            <h2>من YouTube</h2>
+            <label for="url">رابط الفيديو أو قائمة التشغيل</label>
+            <input
+              id="url"
+              type="url"
+              dir="ltr"
+              placeholder="https://www.youtube.com/…"
+              required
+              maxlength="2048"
+            />
+            <label for="preset">مراحل المعالجة</label
+            ><select id="preset">
+              <option value="full">تنزيل ← تفريغ ← Word</option>
+              <option value="transcribe">تنزيل ← تفريغ</option>
+              <option value="download">تنزيل الصوت فقط</option>
+            </select>
+            <button id="discover" class="primary" type="submit" data-mutate>
+              قراءة المصدر
+            </button>
+            <p id="source-status" class="muted" role="status"></p>
+            <div id="source-selection" hidden>
+              <h3 id="source-name"></h3>
+              <div class="actions">
+                <button id="select-all" class="quiet" type="button">
+                  تحديد الكل</button
+                ><button id="select-none" class="quiet" type="button">
+                  إلغاء التحديد
+                </button>
+              </div>
+              <div id="source-items" class="source-items"></div>
+              <button
+                id="enqueue"
+                class="primary wide"
+                type="button"
+                data-mutate
+              >
+                إضافة المحدد إلى الطابور
+              </button>
+            </div>
+          </form>
+          <form id="upload-form" class="panel">
+            <h2>من تفريغات جاهزة</h2>
+            <p class="muted">
+              ارفع ملفات TXT من هاتفك لإنتاج Word. تُنسخ إلى الكمبيوتر قبل
+              إضافتها للطابور.
+            </p>
+            <label for="transcripts">ملفات التفريغ</label
+            ><input
+              id="transcripts"
+              type="file"
+              accept=".txt,text/plain"
+              multiple
+              required
+              aria-describedby="upload-help"
+            />
+            <p id="upload-help" class="muted">
+              ترميز UTF-8 · حتى 20 ملفًا و10 ميغابايت إجمالًا.
+            </p>
+            <button id="upload" class="primary" type="submit" data-mutate>
+              رفع التفريغات وإضافتها
+            </button>
+          </form>
+          <p class="footnote">
+            إذا كان الطابور يعمل، يبدأ تنفيذ المهام المضافة تلقائيًا.
+          </p>
+        </section>
+
+        <section
+          id="workers-page"
+          data-page="workers"
+          hidden
+          aria-labelledby="workers-title"
+        >
+          <span class="eyebrow">التنفيذ على الكمبيوتر</span>
+          <h1 id="workers-title">العمال والخدمات</h1>
+          <p class="muted">
+            أوقف استقبال مهام جديدة لأي خدمة، ودع عمالها النشطين يكملون عملهم.
+          </p>
+          <div id="services" class="cards"></div>
+          <h2>العمال</h2>
+          <div id="workers" class="cards"></div>
+        </section>
+
+        <section
+          id="files-page"
+          data-page="files"
+          hidden
+          aria-labelledby="files-title"
+        >
+          <span class="eyebrow">ثمرة العمل</span>
+          <h1 id="files-title">النتائج</h1>
+          <p class="muted">
+            نزّل مستندات Word والتفريغات الجاهزة مباشرة على هاتفك.
+          </p>
+          <label for="file-search">البحث في النتائج</label
+          ><input id="file-search" type="search" placeholder="عنوان الدرس…" />
+          <div id="files" class="cards"></div>
+          <button id="more-files" class="wide quiet" hidden>عرض المزيد</button>
+        </section>
+      </div>
+    </main>
+    <nav id="navigation" class="navigation" hidden aria-label="صفحات ورق">
+      <button data-tab="queue" aria-current="page">العمليات</button
+      ><button data-tab="source">إضافة مصدر</button
+      ><button data-tab="workers">العمال</button
+      ><button data-tab="files">النتائج</button>
+    </nav>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <dialog
+      id="confirmation"
+      aria-labelledby="confirm-title"
+      aria-describedby="confirm-message"
+    >
+      <h2 id="confirm-title">تأكيد الإجراء</h2>
+      <p id="confirm-message"></p>
+      <div class="actions">
+        <button id="confirm-no" class="quiet">رجوع</button
+        ><button id="confirm-yes" class="primary">تأكيد</button>
+      </div>
+    </dialog>
+  </body>
+</html>

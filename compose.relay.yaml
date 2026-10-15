@@ -1,0 +1,51 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/relay/Dockerfile
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://waraqstudio.jadallah.work}
+      # Coolify v4.4.6 generates and persists this magic variable once. Both
+      # services reuse the same value; DATABASE_URL needs no manual entry.
+      DATABASE_URL: postgresql+psycopg://waraq:${SERVICE_HEX_64_WARAQDB:?Coolify generates this secret; plain Docker Compose requires 64 random hex characters}@postgres:5432/waraq?connect_timeout=5
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-m", "deploy.relay.healthcheck"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: waraq
+      POSTGRES_USER: waraq
+      # Existing-volume upgrade: set this magic variable to the CURRENT DB
+      # password before redeploying. Generating a new secret does not rotate
+      # an existing PostgreSQL role password; never delete the volume to fix it.
+      POSTGRES_PASSWORD: ${SERVICE_HEX_64_WARAQDB:?Coolify generates this secret; plain Docker Compose requires 64 random hex characters}
+    volumes:
+      - relay-db:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U waraq -d waraq"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  relay-db:

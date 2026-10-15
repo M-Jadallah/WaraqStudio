@@ -19,6 +19,7 @@ version_file.write_text(version, encoding="utf-8")
 command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--name", "WaraqStudio",
            "--distpath", str(root / "Windows"), "--workpath", str(work / "build"),
            "--specpath", str(work), "--add-data", str(root / "waraq/qml") + ";waraq/qml",
+           "--add-data", str(root / "waraq/mobile") + ";waraq/mobile",
            "--add-data", str(version_file) + ";waraq",
            "--add-data", str(root / "waraq/icon.svg") + ";waraq", "--icon", str(root / "waraq/icon.ico"),
            "--collect-all", "yt_dlp_ejs", "--collect-all", "imageio_ffmpeg",

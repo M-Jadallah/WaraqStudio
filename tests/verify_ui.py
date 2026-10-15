@@ -1,6 +1,7 @@
 """Native Qt interaction checks; synthetic entries exist only in a temp test database."""
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -85,6 +86,27 @@ def main():
             assert root.property("page") == index
             if index == 5:
                 assert find(root.contentItem(), "youtubeUpdateButton") is not None
+        # LAN controls operate the same Bridge and remain opt-in every launch.
+        assert not bridge.remoteAccess["enabled"]
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            remote_port = probe.getsockname()[1]
+        find(root.contentItem(), "remotePort").setProperty("value", remote_port)
+        click("startRemoteButton")
+        assert bridge.remoteAccess["enabled"] and bridge.remoteAccess["port"] == remote_port
+        assert len(bridge.remoteAccess["code"]) == 8
+        if bridge.remoteAccess["urls"]:
+            assert find(root.contentItem(), "remoteQr").property("source").toString().startswith("data:image/svg+xml,")
+        # A paired device is revoked immediately when the desktop rotates its code.
+        token = bridge.remote.pair(bridge.remoteAccess["code"], "127.0.0.1")
+        assert bridge.remote.authorize(token)
+        click("renewRemoteCodeButton")
+        assert not bridge.remote.authorize(token)
+        if len(sys.argv) > 1:
+            QTest.qWait(150)
+            root.grabWindow().save(str(Path(sys.argv[1]) / "remote-access-desktop.png"))
+        click("stopRemoteButton")
+        assert not bridge.remoteAccess["enabled"]
         click("nav1")
         assert find(root.contentItem(), "sourceFolderCombo") is not None
         assert bridge.createFolder("مادة اختبار")
@@ -683,7 +705,7 @@ def main():
           "provider override, library organise/list/delete, stage pause, automatic-block re-check, scroll pinning, "
           "collapsible rail, UI scale, themes, single/multi/folder TXT import, native TXT drag/drop, "
           "managed input copies, selected templates/folders, filtered queue selection/deletion, busy-job protection, "
-          "TXT Word-only stages, update progress/cancel/error/token controls, 1060x720, no QML errors.")
+          "TXT Word-only stages, update progress/cancel/error/token controls, LAN start/QR/pair/revoke/stop, 1060x720, no QML errors.")
 
 
 if __name__ == "__main__":

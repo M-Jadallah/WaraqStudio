@@ -21,6 +21,12 @@ defaults:
     shell: bash
 
 jobs:
+  relay:
+    name: Relay container gate
+    uses: ./.github/workflows/relay.yml
+    permissions:
+      contents: read
+
   tests:
     name: Engine, services and native UI checks
     runs-on: windows-latest
@@ -53,3 +59,15 @@ jobs:
 
       - name: Native queue scrolling stress
         run: python tests/verify_queue_scroll.py
+
+      - name: Native Internet pairing controls
+        run: python tests/verify_internet_ui.py
+
+      - name: Ensure phone browser is available
+        run: python -m playwright install msedge
+
+      - name: LAN and Internet phone acceptance
+        run: |
+          python tests/verify_mobile.py
+          python tests/verify_mobile_internet.py
+          python tests/verify_internet_stack.py

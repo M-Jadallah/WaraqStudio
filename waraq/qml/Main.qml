@@ -16,6 +16,8 @@ ApplicationWindow {
     readonly property string savedOutputRoot: JSON.parse(backend.settingsJson).output_root || ""
     readonly property var queueSnapshot: JSON.parse(backend.jobsJson)
     readonly property var appUpdateState: backend.appUpdate || ({status: "idle", version: "", progress: 0, message: "", hasToken: false})
+    readonly property var remoteState: backend.remoteAccess || ({enabled: false, port: 8765, urls: [], code: "", qr: "", clients: 0, error: ""})
+    readonly property var internetState: backend.internetAccess || ({registered: false, connected: false, busy: false, name: "", url: "", status: "متوقف", error: "", pairUrl: "", pendingPhones: [], phones: []})
     property bool dark: settings.theme !== "light"
     readonly property color bg: dark ? "#0d1422" : "#f3f6fa"
     readonly property color panel: dark ? "#151f30" : "#ffffff"
@@ -892,6 +894,124 @@ ApplicationWindow {
                         ColumnLayout {
                             width: settingsScroll.availableWidth; spacing: 12
                             Box {
+                                objectName: "remoteAccessCard"
+                                Layout.fillWidth: true; Layout.minimumWidth: 0
+                                implicitHeight: remoteColumn.implicitHeight + 28
+                                ColumnLayout {
+                                    id: remoteColumn; anchors.fill: parent; anchors.margins: 14; spacing: win.rs(10)
+                                    LabelText { text: "الوصول من الهاتف · Wi-Fi"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                    SubText { text: "تحكّم في هذه النسخة من متصفح هاتفك على شبكة Wi-Fi نفسها. أبقِ ورق مفتوحًا والكمبيوتر مستيقظًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    Flow {
+                                        Layout.fillWidth: true; Layout.preferredHeight: childrenRect.height; spacing: win.rs(8)
+                                        AppButton { objectName: "startRemoteButton"; text: "تفعيل الوصول من الهاتف"; primary: true; visible: !win.remoteState.enabled; onClicked: backend.startRemote(remotePort.value) }
+                                        AppButton { objectName: "stopRemoteButton"; text: "إيقاف الوصول وقطع الاتصالات"; visible: win.remoteState.enabled; onClicked: backend.stopRemote() }
+                                        AppButton { objectName: "renewRemoteCodeButton"; text: "تجديد الرمز وقطع الاتصالات"; visible: win.remoteState.enabled; onClicked: backend.renewRemoteCode() }
+                                        AppButton { text: "تحديث عناوين الشبكة"; visible: win.remoteState.enabled; onClicked: backend.refreshRemoteAddresses() }
+                                    }
+                                    RowLayout {
+                                        visible: !win.remoteState.enabled; Layout.fillWidth: true
+                                        Item { Layout.fillWidth: true }
+                                        SpinBox { id: remotePort; objectName: "remotePort"; from: 1024; to: 65535; value: 8765; editable: true; Accessible.name: "منفذ الوصول من الهاتف" }
+                                        LabelText { text: "المنفذ" }
+                                    }
+                                    LabelText { text: win.remoteState.error || ""; visible: text.length > 0; color: win.dark ? "#ffba82" : "#9a4409"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    RowLayout {
+                                        visible: win.remoteState.enabled; Layout.fillWidth: true; spacing: 16
+                                        Rectangle {
+                                            visible: win.remoteState.qr.length > 0; color: "white"; radius: 8
+                                            Layout.preferredWidth: 140; Layout.preferredHeight: 140
+                                            Image { objectName: "remoteQr"; anchors.fill: parent; anchors.margins: 4; source: win.remoteState.qr; sourceSize.width: 240; sourceSize.height: 240; fillMode: Image.PreserveAspectFit; Accessible.name: "رمز QR لفتح لوحة الهاتف" }
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: 6
+                                            LabelText { text: "امسح QR أو اكتب أحد الروابط في متصفح الهاتف، ثم أدخل رمز الدخول:"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            LabelText { objectName: "remotePairCode"; text: win.remoteState.code; font.pixelSize: win.fs(28); font.letterSpacing: 4; font.bold: true; Layout.fillWidth: true; Accessible.name: "رمز الدخول " + text }
+                                            SubText { text: "صالح حتى " + (win.remoteState.codeExpires || "") + " · الأجهزة المتصلة: " + win.remoteState.clients; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            Repeater {
+                                                model: win.remoteState.urls
+                                                delegate: RowLayout {
+                                                    required property string modelData
+                                                    Layout.fillWidth: true
+                                                    AppButton { text: "نسخ"; onClicked: backend.copyText(modelData) }
+                                                    TextField { text: modelData; readOnly: true; selectByMouse: true; Layout.fillWidth: true; Layout.minimumWidth: 0; horizontalAlignment: TextInput.AlignLeft; color: win.ink; Accessible.name: "رابط لوحة الهاتف" }
+                                                }
+                                            }
+                                            SubText { visible: win.remoteState.urls.length === 0; text: "لم يُعثر على عنوان شبكة محلية. اتصل بشبكة Wi-Fi ثم اضغط تحديث عناوين الشبكة."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                        }
+                                    }
+                                    SubText { visible: win.remoteState.enabled; text: "إذا طلب جدار حماية Windows إذنًا، اسمح لورق على الشبكات الخاصة فقط. إن لم يفتح الرابط، تحقق من أن الجهازين خارج شبكة الضيوف ومن تعطيل عزل الأجهزة في الراوتر. الاتصال HTTP مخصص لشبكتك الموثوقة؛ لا تفتح المنفذ على الإنترنت."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                }
+                            }
+                            Box {
+                                objectName: "internetAccessCard"
+                                Layout.fillWidth: true; Layout.minimumWidth: 0
+                                implicitHeight: internetColumn.implicitHeight + 28
+                                ColumnLayout {
+                                    id: internetColumn; anchors.fill: parent; anchors.margins: 14; spacing: win.rs(10)
+                                    LabelText { text: "الوصول من الهاتف · الإنترنت"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                    SubText { text: "اربط هذه النسخة ببوابتك على VPS، ثم اقترن بالهاتف. كل جهاز له هوية وصلاحيات مستقلة، والتنفيذ يبقى على هذا الكمبيوتر."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    SubText { objectName: "internetOnePhonePolicy"; text: "هاتف واحد لكل جهاز. لتبديل الهاتف، ألغِ ربط الهاتف الحالي أولًا، ثم أنشئ رابط اقتران جديدًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { objectName: "internetStatus"; text: win.internetState.status + (win.internetState.name ? " · " + win.internetState.name : ""); color: win.internetState.connected ? (win.dark ? "#61ddbb" : "#08765b") : win.ink; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { objectName: "internetError"; text: win.internetState.error || ""; visible: text.length > 0; color: win.dark ? "#ffba82" : "#9a4409"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    GridLayout {
+                                        visible: !win.internetState.registered; columns: 2; Layout.fillWidth: true; columnSpacing: 12; rowSpacing: 8
+                                        AppField { id: internetGateway; objectName: "internetGateway"; Layout.fillWidth: true; Layout.minimumWidth: 0; text: win.internetState.url || "https://waraqstudio.jadallah.work"; placeholderText: "https://waraqstudio.jadallah.work"; Accessible.name: "عنوان بوابة ورق على الإنترنت" }
+                                        LabelText { text: "عنوان البوابة" }
+                                        AppField { id: internetDeviceName; objectName: "internetDeviceName"; Layout.fillWidth: true; Layout.minimumWidth: 0; placeholderText: "كمبيوتر المنزل"; maximumLength: 120; Accessible.name: "اسم هذا الجهاز" }
+                                        LabelText { text: "اسم الجهاز" }
+                                        AppField { id: internetEnrollment; objectName: "internetEnrollment"; Layout.fillWidth: true; Layout.minimumWidth: 0; echoMode: TextInput.Password; placeholderText: "رمز تسجيل أحادي الاستخدام"; maximumLength: 256; Accessible.name: "رمز تسجيل الجهاز الصادر من الخادم" }
+                                        LabelText { text: "رمز التسجيل" }
+                                    }
+                                    Flow {
+                                        Layout.fillWidth: true; Layout.preferredHeight: childrenRect.height; spacing: win.rs(8)
+                                        AppButton { objectName: "registerInternetButton"; text: win.internetState.busy ? "جارٍ التسجيل…" : "تسجيل هذا الجهاز"; primary: true; visible: !win.internetState.registered; enabled: !win.internetState.busy && internetGateway.text.trim().length > 0 && internetDeviceName.text.trim().length > 0 && internetEnrollment.text.length > 0; onClicked: { backend.registerInternet(internetGateway.text.trim(), internetEnrollment.text, internetDeviceName.text.trim()); internetEnrollment.text = "" } }
+                                        AppButton { objectName: "startInternetButton"; text: "تفعيل اتصال الإنترنت"; primary: true; visible: win.internetState.registered && !win.internetState.connected; enabled: !win.internetState.busy; onClicked: backend.startInternet() }
+                                        AppButton { objectName: "stopInternetButton"; text: "إيقاف اتصال الإنترنت"; visible: win.internetState.registered; onClicked: backend.stopInternet() }
+                                        AppButton { objectName: "pairInternetButton"; text: "ربط هاتف جديد"; primary: true; visible: win.internetState.connected; onClicked: backend.createInternetPair() }
+                                        AppButton { objectName: "refreshInternetPhonesButton"; text: "تحديث الهواتف المقترنة"; visible: win.internetState.connected; onClicked: backend.refreshInternetPhones() }
+                                        AppButton { objectName: "forgetInternetButton"; text: "إلغاء تسجيل هذا الجهاز"; visible: win.internetState.registered; enabled: win.internetState.connected; onClicked: forgetInternetDialog.open() }
+                                    }
+                                    SubText { visible: win.internetState.registered; text: win.internetState.url + "\nمعرّف هذه النسخة: " + (win.internetState.deviceId || ""); Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
+                                    RowLayout {
+                                        visible: win.internetState.pairUrl.length > 0 && win.internetState.connected; Layout.fillWidth: true; spacing: 16
+                                        Rectangle {
+                                            color: "white"; radius: 8; Layout.preferredWidth: 160; Layout.preferredHeight: 160
+                                            Image { objectName: "internetQr"; anchors.fill: parent; anchors.margins: 4; source: backend.internetQr; sourceSize.width: 320; sourceSize.height: 320; fillMode: Image.PreserveAspectFit; Accessible.name: "رمز QR لاقتران الهاتف بهذا الكمبيوتر عبر الإنترنت" }
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                                            LabelText { text: "امسح QR بهاتفك، ثم راجع اسم الجهاز ورمز المطابقة قبل الموافقة على طلب الربط أدناه."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            AppButton { text: "نسخ رابط الاقتران"; onClicked: backend.copyText(win.internetState.pairUrl) }
+                                            SubText { text: "الرابط مؤقت وأحادي الاستخدام. لا تشاركه مع هاتف غير مقصود."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                        }
+                                    }
+                                    Repeater {
+                                        model: win.internetState.pendingPhones || []
+                                        delegate: ColumnLayout {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            LabelText { text: "طلب اقتران: " + modelData.phone_name + " · رمز المطابقة: " + modelData.match_code; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                AppButton { text: "رفض"; onClicked: backend.rejectInternetPhone(modelData.claim_id) }
+                                                AppButton { objectName: "approveInternetPhoneButton"; text: "موافقة على ربط هذا الهاتف"; primary: true; onClicked: backend.approveInternetPhone(modelData.claim_id) }
+                                                Item { Layout.fillWidth: true }
+                                            }
+                                        }
+                                    }
+                                    Repeater {
+                                        model: win.internetState.phones || []
+                                        delegate: RowLayout {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            AppButton { text: "إلغاء الربط"; enabled: win.internetState.connected; onClicked: backend.revokeInternetPhone(modelData.id) }
+                                            LabelText { text: modelData.name || "هاتف مقترن"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                        }
+                                    }
+                                    SubText { text: "يتطلب بوابة منشورة على دومين HTTPS. يتوقف التحكم عند إغلاق ورق أو نوم الكمبيوتر؛ يبقى الطابور يعمل عند انقطاع الإنترنت. الاتصال معطّل عند كل تشغيل حتى تفعّله."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                }
+                            }
+                            Box {
                                 Layout.fillWidth: true; implicitHeight: storageColumn.implicitHeight + 40
                                 ColumnLayout {
                                     id: storageColumn; anchors.fill: parent; anchors.margins: 14; spacing: 10
@@ -1114,6 +1234,14 @@ ApplicationWindow {
         TapHandler { onTapped: win.toastText = "" }
     }
 
+    Dialog {
+        id: forgetInternetDialog
+        anchors.centerIn: parent; width: Math.min(520, win.width - 80); modal: true
+        title: "إلغاء تسجيل هذا الجهاز"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        contentItem: LabelText { text: "سيُلغى اعتماد الإنترنت لهذا الكمبيوتر واقترانات هواتفه على البوابة. تستمر مهام ورق المحلية، وستحتاج إلى رمز تسجيل جديد لإعادة ربطه. هل تريد المتابعة؟"; wrapMode: Text.WordWrap; padding: 14 }
+        onAccepted: backend.forgetInternetDevice()
+    }
     Dialog {
         id: folderDialog
         anchors.centerIn: parent; width: 460; modal: true; title: "مجلد مادة أو درس"

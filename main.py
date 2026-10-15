@@ -66,6 +66,16 @@ def main():
         report = {"version": __version__, "ffmpeg": str(imageio_ffmpeg.get_ffmpeg_exe()), "yt_dlp": yt_dlp.version.__version__,
                   "keyring": type(keyring.get_keyring()).__name__, "node": shutil.which("node"),
                   "requests": requests.__version__, "openpyxl": openpyxl.__version__, "ejs": True}
+        from flask import Flask
+        from waitress import create_server
+        import qrcode
+        import qrcode.image.svg
+        from waraq.remote import ASSETS
+        report["mobile"] = {"assets": all((ASSETS / name).is_file() for name in ("index.html", "app.js", "style.css")),
+                            "flask": bool(Flask), "waitress": callable(create_server),
+                            "qr_svg": bool(qrcode.make("http://127.0.0.1:8765", image_factory=qrcode.image.svg.SvgPathImage).to_string())}
+        from websockets.sync.client import connect as internet_connect
+        report["internet_connector"] = callable(internet_connect)
         report["ffmpeg_exists"] = Path(report["ffmpeg"]).is_file()
         try:
             executable = resolve_opencode(config.data["opencode_executable"])
@@ -95,6 +105,8 @@ def main():
     root = engine.rootObjects()[0]
     root.setProperty("page", args.page)
     app.aboutToQuit.connect(scheduler.shutdown)
+    app.aboutToQuit.connect(bridge.stopRemote)
+    app.aboutToQuit.connect(bridge.stopInternet)
     if args.screenshot:
         def capture():
             try:

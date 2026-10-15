@@ -17,6 +17,9 @@ from .catalog import deepgram_models, opencode_models
 from .config import (BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
                      provider_info, provider_of)
 from .models import DictListModel
+from .remote import RemoteAccess
+from .remote_commands import RemoteCommands
+from .internet import InternetAccess
 from .services import opencode_version, resolve_opencode
 from .store import STAGES
 
@@ -42,6 +45,8 @@ class Bridge(QObject):
     appUpdateChanged = Signal()
     _appUpdateReady = Signal(str, object)
     _appUpdateProgress = Signal(int)
+    remoteAccessChanged = Signal()
+    internetAccessChanged = Signal()
 
     def __init__(self, store, config, secrets, scheduler):
         super().__init__()
@@ -72,6 +77,12 @@ class Bridge(QObject):
             pass
         self._appUpdateReady.connect(self._apply_app_update)
         self._appUpdateProgress.connect(self._apply_app_update_progress)
+        self.remote = RemoteAccess(self)
+        self.remote.changed.connect(self.remoteAccessChanged)
+        self.internet_commands = RemoteCommands(self)
+        self.internet = InternetAccess(self, self.internet_commands.execute)
+        self.internet.changed.connect(self.internetAccessChanged)
+        self._internet_qr_url, self._internet_qr = "", ""
         self._modelCatalogReady.connect(self._apply_model_catalogs)
         # QML ListViews bind to these instead of the QVariantList properties:
         # rows are updated in place (dataChanged) so scroll position survives
@@ -206,6 +217,80 @@ class Bridge(QObject):
 
     @Property("QVariantMap", notify=appUpdateChanged)
     def appUpdate(self): return dict(self._app_update)
+
+    @Property("QVariantMap", notify=remoteAccessChanged)
+    def remoteAccess(self): return self.remote.state()
+
+    @Property("QVariantMap", notify=internetAccessChanged)
+    def internetAccess(self): return self.internet.state()
+
+    @Property(str, notify=internetAccessChanged)
+    def internetQr(self):
+        url = self.internet.state().get("pairUrl", "")
+        if url != self._internet_qr_url:
+            self._internet_qr_url, self._internet_qr = url, ""
+            if url:
+                import qrcode
+                import qrcode.image.svg
+                from urllib.parse import quote
+                svg = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, border=4).to_string().decode("utf-8")
+                self._internet_qr = "data:image/svg+xml," + quote(svg, safe="")
+        return self._internet_qr
+
+    @Slot(str, str, str)
+    def registerInternet(self, url, code, name):
+        self.internet.register(url, code, name)
+
+    @Slot()
+    def startInternet(self):
+        self.internet.start()
+
+    @Slot()
+    def stopInternet(self):
+        self.internet.stop()
+        self.internet_commands.stop()
+
+    @Slot()
+    def createInternetPair(self):
+        self.internet.createPair()
+
+    @Slot(str)
+    def approveInternetPhone(self, claim_id):
+        self.internet.approvePair(claim_id)
+
+    @Slot(str)
+    def rejectInternetPhone(self, claim_id):
+        self.internet.rejectPair(claim_id)
+
+    @Slot()
+    def refreshInternetPhones(self):
+        self.internet.refreshPhones()
+
+    @Slot(str)
+    def revokeInternetPhone(self, phone_id):
+        self.internet.revokePhone(phone_id)
+
+    @Slot()
+    def forgetInternetDevice(self):
+        self.internet.forgetDevice()
+
+    @Slot(int)
+    def startRemote(self, port):
+        self.remote.start(port)
+
+    @Slot()
+    def stopRemote(self):
+        self.remote.stop()
+
+    @Slot()
+    def renewRemoteCode(self):
+        if self.remote.state()["enabled"]:
+            self.remote.rotate_code()
+
+    @Slot()
+    def refreshRemoteAddresses(self):
+        if self.remote.state()["enabled"]:
+            self.remote.refresh_addresses()
 
     def _set_app_update(self, **values):
         self._app_update.update(values)
@@ -450,7 +535,8 @@ class Bridge(QObject):
         if self._auto_stop and not self._auto_stop_fired:
             if self.store.queue_drained():
                 # Fire only after real work was seen, so arming on an empty queue never quits immediately.
-                if self._auto_stop_seen and running and not self._busy and self.scheduler.idle():
+                if (self._auto_stop_seen and running and not self._busy and not self.remote.busy
+                        and not self.internet_commands.busy and not self.internet.busy and self.scheduler.idle()):
                     self._auto_stop_fired = True
                     self.store.event("", "اكتمل تنفيذ الطابور؛ سيُغلق التطبيق تلقائيًا.", "info")
                     self.autoStopReached.emit()
@@ -1066,12 +1152,14 @@ class Bridge(QObject):
     @Slot(result=bool)
     def prepareClose(self):
         from PySide6.QtWidgets import QMessageBox
-        if not self.scheduler.idle() or self._busy:
+        if not self.scheduler.idle() or self._busy or self.remote.busy or self.internet_commands.busy or self.internet.busy:
             answer = QMessageBox.question(None, "إغلاق ورق", "توجد عمليات نشطة. الإغلاق يوقف العمليات المحلية وقد يترك طلب Deepgram بنتيجة غير مؤكدة. هل تريد الإغلاق؟")
             if answer != QMessageBox.StandardButton.Yes:
                 return False
         self.discovery_cancel.set()
         self._update_cancel.set()
+        self.remote.stop()
+        self.stopInternet()
         self.scheduler.shutdown()
         return True
 
