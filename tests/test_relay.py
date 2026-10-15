@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from starlette.websockets import WebSocketDisconnect
+from waraq.mobile_assets import ASSET_TYPES, PWA_PAGES
 
 from relay.app import COOKIE, MAX_MESSAGE, PENDING_COOKIE, Connection, Gateway, SecurityMiddleware, create_app
 from relay.config import Settings
@@ -96,6 +97,70 @@ def test_host_origin_csrf_and_json_are_strict(setup_gateway):
     assert client.get('/api/devices').status_code == 401
     assert client.get('/assets/config.py').status_code == 404
     assert client.get('/api/bootstrap').headers['cache-control'] == 'no-store'
+
+
+def test_pwa_public_assets_are_explicit_without_authenticated_cache(setup_gateway):
+    client, _ = setup_gateway
+    for name, mime in ASSET_TYPES.items():
+        result = client.get('/assets/'+name)
+        assert result.status_code == 200, name
+        assert result.headers['content-type'].startswith(mime)
+        assert 'worker-src' in result.headers['content-security-policy']
+        assert COOKIE not in result.cookies
+    for path, (_, mime) in PWA_PAGES.items():
+        result = client.get(path)
+        assert result.status_code == 200, path
+        assert result.headers['content-type'].startswith(mime)
+        assert result.headers['cache-control'] == 'no-store'
+    assert client.get('/sw.js').headers['service-worker-allowed'] == '/'
+    for path in ('/assets/vendor/other.js', '/assets/icons/no.png', '/api/devices/fake/library/files'):
+        assert client.get(path).status_code in (401, 404)
+
+
+def test_library_requests_streams_and_mutations_are_device_scoped(setup_gateway):
+    client, gateway = setup_gateway
+    a, b = enroll(client, gateway), enroll(client, gateway, 'B')
+    ident = a['device_id']
+    base = '/api/devices/'+ident+'/library/files'
+    with connect(client, a) as ws:
+        ws.receive_json()
+        pair(client, ws)
+        for suffix in ('', '/opaque/preview', '/opaque/download'):
+            assert client.get('/api/devices/'+b['device_id']+'/library/files'+suffix).status_code == 403
+        for op in ('library_delete', 'library_organize'):
+            assert client.post('/api/devices/'+b['device_id']+'/action/'+op, json={}, headers=HEADERS).status_code == 403
+        for query in ('limit=x', 'limit=-1', 'refresh=true'):
+            assert client.get(base+'?'+query).status_code == 400
+        with ThreadPoolExecutor() as pool:
+            response = pool.submit(client.get, base+'?limit=50&refresh=1&kind=transcript')
+            request = ws.receive_json()
+            assert request['action'] == 'library_list'
+            assert request['data'] == {'limit':50, 'refresh':True, 'kind':'transcript'}
+            ws.send_json({'type':'response','id':request['id'],'ok':True,'result':{'files':[], 'revision':'r1'}})
+            assert response.result().json()['revision'] == 'r1'
+            response = pool.submit(client.get, base+'/opaque/preview?expected_version=v1')
+            request = ws.receive_json()
+            assert request['action'] == 'library_preview'
+            assert request['data'] == {'file_id':'opaque','expected_version':'v1'}
+            ws.send_json({'type':'response','id':request['id'],'ok':True,'result':{'text':'نص عربي'}})
+            assert response.result().json()['text'] == 'نص عربي'
+            response = pool.submit(client.get, base+'/opaque/download?expected_version=v1')
+            request = ws.receive_json()
+            assert request['action'] == 'library_file' and request['data']['expected_version'] == 'v1'
+            payload = 'ملف عربي'.encode()
+            ws.send_json({'type':'file_start','id':request['id'],'name':'ملف.txt','size':len(payload)})
+            ws.send_json({'type':'file_chunk','id':request['id'],'data':base64.b64encode(payload).decode()})
+            ws.send_json({'type':'file_end','id':request['id']})
+            assert response.result().content == payload
+            assert ws.receive_json()['type'] == 'cancel'
+            body = {'file_id':'opaque','expected_version':'v1','confirm':True}
+            response = pool.submit(client.post, '/api/devices/'+ident+'/action/library_delete', json=body, headers=HEADERS)
+            request = ws.receive_json()
+            assert request['action'] == 'library_delete' and request['data'] == body
+            ws.send_json({'type':'response','id':request['id'],'ok':True,'result':{'message':'حُذف'}})
+            assert response.result().status_code == 200
+        control(ws, 'revoke', {'phone_id': gateway.phone(type('R', (), {'cookies':client.cookies})(), ident)})
+        assert client.get(base).status_code == 403
 
 
 @pytest.mark.parametrize('path', ['/', '/internet', '/pair', '/devices/device-A'])

@@ -71,3 +71,6 @@ jobs:
           python tests/verify_mobile.py
           python tests/verify_mobile_internet.py
           python tests/verify_internet_stack.py
+
+      - name: PWA HTTPS service worker and pairing acceptance
+        run: python tests/verify_pwa.py

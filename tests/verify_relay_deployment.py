@@ -36,6 +36,7 @@ from sqlalchemy import func, inspect, select
 from relay.config import Settings
 from relay.db import Database, Device, Grant, Phone
 from websockets.sync.client import connect
+from waraq.mobile_assets import ASSET_TYPES, PWA_PAGES
 
 settings = Settings.from_env()
 host = urlsplit(settings.public_base_url).netloc
@@ -81,8 +82,13 @@ assert http('/internet')[0] == 200
 qr_navigation = {'Sec-Fetch-Site':'cross-site', 'Sec-Fetch-Mode':'navigate', 'Sec-Fetch-Dest':'document'}
 assert http('/pair', extra_headers=qr_navigation)[0] == 200
 assert http('/api/devices', extra_headers=qr_navigation)[0] == 403
-for asset in ('app.js', 'style.css', 'icon.svg'):
+for asset in ASSET_TYPES:
     assert http('/assets/'+asset)[0] == 200
+for path in PWA_PAGES:
+    assert http(path)[0] == 200
+manifest = json.loads(http('/manifest.webmanifest')[1])
+assert manifest['start_url'] == '/internet' and manifest['display'] == 'standalone'
+assert http('/assets/config.py')[0] == 404
 
 def enroll(name):
     code = subprocess.check_output([sys.executable,'-m','relay','enroll-code','--minutes','10'], text=True).splitlines()[0]
@@ -126,6 +132,8 @@ with connection(a) as wa, connection(b) as wb:
     assert http(target+'/state',phone_a)[0] == 403
     assert http(target+'/action/queue',phone_a,{'running':True})[0] == 403
     assert http(target+'/files/no-job/document',phone_a)[0] == 403
+    for path in ('/library/files', '/library/files/opaque/preview', '/library/files/opaque/download'):
+        assert http(target+path,phone_a)[0] == 403
     denied = control(wa,'pair_create')
     assert not denied['ok'] and denied['status'] == 409
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -134,6 +142,11 @@ with connection(a) as wa, connection(b) as wb:
         assert request['type'] == 'request' and request['action'] == 'state'
         wa.send(json.dumps({'type':'response','id':request['id'],'ok':True,'result':{'desktop':'A'}}))
         assert response.result(15) == (200, {'desktop':'A'})
+        response = pool.submit(http,'/api/devices/'+a['device_id']+'/library/files?limit=50&refresh=1',phone_a)
+        request = json.loads(wa.recv(timeout=10))
+        assert request['action'] == 'library_list' and request['data'] == {'limit':50,'refresh':True}
+        wa.send(json.dumps({'type':'response','id':request['id'],'ok':True,'result':{'files':[],'revision':'r1'}}))
+        assert response.result(15) == (200, {'files':[],'revision':'r1'})
 print('Production image: assets, operator enrollment, PostgreSQL, WS routing, two phones, A/B denial and one-phone rule passed.')
 '''
 

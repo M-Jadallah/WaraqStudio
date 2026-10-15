@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 from pathlib import Path
 import socket
@@ -17,6 +17,7 @@ from waraq.config import Config
 from waraq.remote import RemoteError, create_app, local_address
 from waraq.scheduler import Scheduler
 from waraq.store import Store
+from waraq.mobile_assets import ASSET_TYPES, PWA_PAGES
 
 
 @pytest.fixture
@@ -59,6 +60,7 @@ def remote_env(tmp_path, scheduler_harness, monkeypatch):
         yield bridge, remote, store, config, client, request, pair, base, app
     finally:
         remote.stop()
+        bridge.closeRemoteLibrary()
         pool.shutdown(wait=True)
         scheduler_harness.shutdown_and_join()
         bridge.deleteLater()
@@ -84,6 +86,70 @@ def test_opt_in_and_assets_do_not_expose_state(remote_env):
     assert request("/api/action/queue", {"running": True}).status_code == 401
     assert not bridge.running
     assert remote.state()["qr"].startswith("data:image/svg+xml,") or not remote.state()["urls"]
+
+
+def test_library_routes_paginate_preview_download_delete_and_revoke(remote_env):
+    bridge, remote, store, config, client, request, pair, base, app = remote_env
+    root = Path(config.data['library_root'])/'التفريغات'
+    root.mkdir(parents=True)
+    content = b'\xef\xbb\xbf'+ 'نص آمن <script>not executed</script>'.encode()
+    path = root/'نص عربي.txt'
+    path.write_bytes(content)
+    assert request('/api/library/files').status_code == 401
+    pair()
+    for query in ('limit=x','refresh=true'):
+        assert request('/api/library/files?'+query).status_code == 400
+    until = time.monotonic()+10
+    while True:
+        result = request('/api/library/files?limit=1').json
+        if not result['busy']: break
+        assert time.monotonic() < until
+        time.sleep(.01)
+    assert result['total'] == 1, result
+    row = result['files'][0]
+    endpoint = '/api/library/files/'+row['file_id']
+    assert request(endpoint+'/preview?expected_version='+row['version']).json['text'] == content.decode('utf-8-sig')
+    downloaded = request(endpoint+'/download?expected_version='+row['version'])
+    assert b''.join(downloaded.response) == content
+    downloaded.close()
+    assert request(endpoint+'/preview?expected_version=stale').status_code == 409
+    removed = request('/api/action/library_delete', {'file_id':row['file_id'],'expected_version':row['version'],'confirm':True})
+    assert removed.status_code == 200, removed.json
+    assert not path.exists()
+    remote.rotate_code()
+    assert request(endpoint+'/download').status_code == 401
+
+
+def test_shared_pwa_asset_routes_use_explicit_allowlist(remote_env):
+    _, _, _, _, _, request, _, _, _ = remote_env
+    for name, mime in ASSET_TYPES.items():
+        response = request('/assets/'+name)
+        assert response.status_code == 200, name
+        assert response.content_type.startswith(mime)
+    for path, (_, mime) in PWA_PAGES.items():
+        response = request(path)
+        assert response.status_code == 200 and response.content_type.startswith(mime)
+    assert request('/sw.js').headers['Service-Worker-Allowed'] == '/'
+
+
+def test_expired_running_request_cannot_lose_library_cancellation_context(remote_env, monkeypatch):
+    _, remote, _, _, _, _, pair, _, _ = remote_env
+    pair()
+    token = next(iter(remote._sessions))
+    context = {'cancel':threading.Event(), 'deadline':time.time()+5, 'token':token}
+    calls = []
+    class RaceFuture(Future):
+        def set_running_or_notify_cancel(self):
+            result = super().set_running_or_notify_cancel()
+            context['cancel'].set()
+            remote._contexts.pop(self, None)
+            return result
+    future = RaceFuture()
+    remote._contexts[future] = context
+    monkeypatch.setattr(remote, '_execute', lambda *args: calls.append(args))
+    remote._dispatch((future,remote._generation,token,'library_delete',{},context))
+    with pytest.raises(RemoteError) as error: future.result()
+    assert error.value.status == 503 and calls == []
 
 
 def test_pair_cookie_expiry_revocation_and_arabic_digits(remote_env):

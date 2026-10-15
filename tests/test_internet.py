@@ -17,7 +17,7 @@ from PySide6.QtCore import QCoreApplication, QObject, QThread
 
 from waraq.config import atomic_json
 from waraq.internet import InternetAccess, gateway_url
-from waraq.remote_common import RemoteError
+from waraq.remote_common import RemoteError, REQUEST_CONTEXT
 
 
 class Vault:
@@ -71,6 +71,47 @@ def dispatch(obj, app, action, data, ident="request_12345678", deadline=None):
     obj._request.emit((ident, future, cancel, obj._generation, action, data, deadline or time.time()+5))
     wait_for(app, future.done)
     return future
+
+
+def test_async_library_result_is_journaled_after_completion_and_replayed(tmp_path, app):
+    child = Future()
+    contexts = []
+    def execute(action, data):
+        contexts.append(REQUEST_CONTEXT.get())
+        return child
+    obj, bridge, vault = make_connector(tmp_path, execute)
+    activate(obj)
+    outer, cancel = Future(), threading.Event()
+    obj._request.emit(('library_delete_123', outer, cancel, obj._generation, 'library_delete',
+                       {'file_id':'opaque','expected_version':'v1','confirm':True}, time.time()+5))
+    wait_for(app, lambda: bool(contexts))
+    key = obj._identity['device_id']+':library_delete_123'
+    assert not outer.done() and not obj._journal[key]['done']
+    assert contexts[0]['cancel'] is cancel
+    assert REQUEST_CONTEXT.get() is None
+    child.set_result({'message':'حُذف','revision':'r2'})
+    assert outer.result(1)['revision'] == 'r2'
+    assert obj._journal[key]['done']
+    assert dispatch(obj, app, 'library_delete', {'file_id':'opaque','expected_version':'v1','confirm':True},
+                    ident='library_delete_123').result()['revision'] == 'r2'
+    assert len(contexts) == 1
+    obj.stop()
+
+
+def test_async_library_known_failure_is_replayed_without_mutating_again(tmp_path, app):
+    child = Future()
+    obj, bridge, vault = make_connector(tmp_path, lambda *_:child)
+    activate(obj)
+    outer, cancel = Future(), threading.Event()
+    obj._request.emit(('library_delete_456', outer, cancel, obj._generation, 'library_delete', {}, time.time()+5))
+    wait_for(app, lambda: hasattr(outer, '_waraq_child'))
+    child.set_exception(RemoteError('تغير الملف',409))
+    with pytest.raises(RemoteError): outer.result()
+    assert obj._journal[obj._identity['device_id']+':library_delete_456']['done']
+    with pytest.raises(RemoteError) as error:
+        dispatch(obj, app, 'library_delete', {}, ident='library_delete_456').result()
+    assert error.value.status == 409
+    obj.stop()
 
 
 @pytest.mark.parametrize("url", ["http://example.com", "http://127.0.0.1", "https://user:pass@example.com",

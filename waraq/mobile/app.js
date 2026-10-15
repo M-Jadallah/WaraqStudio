@@ -9,6 +9,7 @@ let ready = false;
 let pageActive = true;
 let pairClaim = null;
 let pairStatusBusy = false;
+let pairingBusy = false;
 let pairingTicket = location.pathname.replace(/\/$/, "") === "/pair"
   ? location.hash.slice(1) : "";
 if (pairingTicket) history.replaceState(null, "", location.pathname + location.search);
@@ -21,6 +22,7 @@ const ui = {
   state: null,
   online: false,
   pending: false,
+  updateLocked: false,
   preparing: false,
   polling: false,
   limit: 60,
@@ -28,6 +30,9 @@ const ui = {
   sourceRevision: null,
   selected: new Set(),
   signatures: new WeakMap(),
+  library: { files: [], loaded: false, loading: false, sequence: 0, revision: null, next: null, busy: false, organizing: false, mustRefresh: false },
+  previewSequence: 0,
+  sessionEpoch: 0,
 };
 let toastTimer;
 function text(id, value) {
@@ -53,11 +58,13 @@ function enableActions() {
     .forEach(
       (button) =>
         (button.disabled =
-          ui.pending || !ui.online || (ui.preparing && button.id === "upload")),
+          ui.updateLocked || ui.pending || !ui.online || (ui.preparing && button.id === "upload")),
     );
-  $("discover").disabled = ui.pending || !ui.online || !!ui.state?.source.busy;
+  $("discover").disabled = ui.updateLocked || ui.pending || !ui.online || !!ui.state?.source.busy;
+  $("library-organize").disabled ||= !ui.state?.capabilities?.library_organize;
 }
 function showLogin() {
+  ui.sessionEpoch++;
   ui.state = null;
   ui.online = false;
   $("workspace").hidden = true;
@@ -66,14 +73,31 @@ function showLogin() {
   $("login").hidden = internetMode;
   $("connection").classList.remove("online");
   text("connection", "يلزم الاقتران");
-  for (const id of ["jobs", "workers", "services", "files", "source-items"])
+  for (const id of ["jobs", "workers", "services", "files", "source-items", "library-files"])
     $(id).replaceChildren();
   ui.sourceRevision = null;
   ui.selected.clear();
+  ui.library.sequence++;
+  ui.library.files = [];
+  ui.library.loaded = false;
+  ui.library.loading = false;
+  ui.library.busy = false;
+  ui.library.organizing = false;
+  ui.previewSequence++;
+  $("preview-text").textContent = "";
+  $("file-preview").close();
+  if ($("confirmation").open) $("confirm-no").click();
+  for (const id of ["template", "folder", "library-group"]) {
+    $(id).replaceChildren();
+    delete $(id).dataset.signature;
+  }
+  for (const id of ["source-name", "source-status", "library-status", "library-error", "preview-name", "preview-status"]) text(id, "");
   if (internetMode) {
     $("device-context").hidden = true;
     $("internet-home").hidden = false;
     text("device-error", "يلزم اقتران هذا الهاتف بهذا الكمبيوتر. افتح إعدادات ورق على الكمبيوتر وامسح رمز QR جديدًا.");
+    $("device-list").replaceChildren();
+    loadDevices();
   }
 }
 async function api(path, data) {
@@ -104,7 +128,7 @@ async function api(path, data) {
     const error = new Error(result.error || "تعذر تنفيذ الطلب.");
     error.status = response.status;
     if ((response.status === 401 || response.status === 403) &&
-        (path === "/api/state" || path.startsWith("/api/devices/")) && pageActive)
+        (path === "/api/state" || path.startsWith("/api/devices/") || path.startsWith("/api/library/")) && pageActive)
       showLogin();
     throw error;
   }
@@ -159,7 +183,7 @@ async function poll() {
   }
 }
 async function mutate(action, data = {}) {
-  if (!pageActive || ui.pending || !ui.online) return false;
+  if (!pageActive || ui.updateLocked || ui.pending || !ui.online) return false;
   ui.pending = true;
   enableActions();
   try {
@@ -181,6 +205,7 @@ async function mutate(action, data = {}) {
   }
 }
 function confirmAction(message) {
+  if (ui.updateLocked) return Promise.resolve(false);
   text("confirm-message", message);
   const dialog = $("confirmation");
   dialog.showModal();
@@ -237,7 +262,7 @@ function reconcile(container, items, key, create, signature = JSON.stringify) {
     existing.delete(id);
     if (!node || ui.signatures.get(node) !== sig) {
       // Preserve keyboard focus and an expanded error while progress updates arrive.
-      if (node?.contains(document.activeElement)) return;
+      if (node?.contains(document.activeElement) && (!node.dataset.version || node.dataset.version === String(item.version))) return;
       const open = !!node?.querySelector("details[open]");
       const next = create(item);
       next.dataset.key = id;
@@ -260,15 +285,31 @@ function empty(container, message) {
     (item) => el("p", "empty", item.message),
   );
 }
+function compactCard(title, status, cls = "") {
+  const card = el("article", "compact-row " + cls), main = el("div", "row-main");
+  const heading = el("div", "row-heading"), name = el("h3", "row-title", title);
+  name.title = title;
+  heading.append(name, el("span", "badge", status));
+  const details = el("details", "row-more"), summary = el("summary", "", "المزيد");
+  summary.setAttribute("aria-label", "المزيد — " + title);
+  const content = el("div", "row-detail");
+  content.append(el("h3", "full-title", title));
+  details.append(summary, content);
+  main.append(heading);
+  card.append(main, details);
+  return {card, main, content, details};
+}
+function viewButton(details, title) {
+  const button = el("button", "quiet row-action", "عرض");
+  button.setAttribute("aria-label", "عرض تفاصيل — " + title);
+  button.onclick = () => { details.open = !details.open; };
+  return button;
+}
 function jobCard(job) {
-  const card = el("article", "job"),
-    top = el("div", "card-top");
-  top.append(
-    el("h3", "", job.title),
-    el("span", "badge " + job.status, job.statusLabel),
-  );
-  card.append(top);
-  card.append(
+  const {card, main, content, details} = compactCard(job.title, job.statusLabel, "job");
+  card.querySelector(".badge").classList.add(job.status);
+  main.append(viewButton(details, job.title));
+  content.append(
     el(
       "div",
       "meta",
@@ -282,14 +323,14 @@ function jobCard(job) {
     progress.max = 100;
     if (job.progress >= 0) progress.value = Math.min(100, job.progress);
     progress.setAttribute("aria-label", "تقدم " + job.title);
-    card.append(progress);
+    content.append(progress);
   }
   if (job.retryAt)
-    card.append(el("div", "meta", "المحاولة القادمة: " + job.retryAt));
+    content.append(el("div", "meta", "المحاولة القادمة: " + job.retryAt));
   if (job.error) {
     const details = el("details");
     details.append(el("summary", "", "عرض سبب التوقف"), el("p", "", job.error));
-    card.append(details);
+    content.append(details);
   }
   const actions = fileLinks(job);
   if (
@@ -333,7 +374,7 @@ function jobCard(job) {
         true,
       ),
     );
-  if (actions.childElementCount) card.append(actions);
+  if (actions.childElementCount) content.append(actions);
   return card;
 }
 function renderJobs() {
@@ -405,6 +446,8 @@ function renderSource() {
     checkbox.disabled = !item.available;
     checkbox.checked = !!item.available;
     checkbox.dataset.index = index;
+    label.title = item.title;
+    checkbox.setAttribute("aria-label", "تحديد — " + item.title);
     if (item.available) ui.selected.add(index);
     checkbox.onchange = () => {
       if (checkbox.checked) ui.selected.add(index);
@@ -444,20 +487,15 @@ function renderWorkers() {
     })),
     (s) => s.stage,
     (service) => {
-      const card = el("article", "service"),
-        top = el("div", "card-top");
-      top.append(
-        el("h3", "", labels[service.stage]),
-        el("span", "badge", service.paused ? "متوقفة يدويًا" : "تستقبل المهام"),
-      );
-      card.append(
-        top,
+      const {card, main, content} = compactCard(labels[service.stage], service.paused ? "متوقفة يدويًا" : "تستقبل المهام", "service");
+      main.append(
         actionButton(
-          service.paused ? "استئناف الخدمة" : "إيقاف بعد المهام الحالية",
+          service.paused ? "استئناف" : "إيقاف",
           () =>
             mutate("stage", { stage: service.stage, paused: !service.paused }),
         ),
       );
+      content.append(el("p", "muted", "الإيقاف يمنع استقبال مهام جديدة؛ العمال يكملون مهامهم الحالية."));
       return card;
     },
   );
@@ -466,8 +504,6 @@ function renderWorkers() {
     ui.state.workers,
     (w) => w.id,
     (worker) => {
-      const card = el("article", "worker"),
-        top = el("div", "card-top");
       const state = worker.job_id
         ? "يعمل · " + worker.elapsed + " ث"
         : worker.error
@@ -477,9 +513,9 @@ function renderWorkers() {
             : worker.paused
               ? "متوقف"
               : "جاهز";
-      top.append(el("h3", "", worker.name), el("span", "badge", state));
-      card.append(
-        top,
+      const {card, main, content, details} = compactCard(worker.name, state, "worker");
+      main.append(viewButton(details, worker.name));
+      content.append(
         el(
           "p",
           "meta",
@@ -489,7 +525,7 @@ function renderWorkers() {
         ),
       );
       if (worker.cooldownSeconds > 0)
-        card.append(
+        content.append(
           el(
             "p",
             "meta",
@@ -501,7 +537,7 @@ function renderWorkers() {
       if (worker.error) {
         const detail = el("details");
         detail.append(el("summary", "", "التفاصيل"), el("p", "", worker.error));
-        card.append(detail);
+        content.append(detail);
       }
       return card;
     },
@@ -527,15 +563,17 @@ function renderFiles() {
       jobs.slice(0, ui.fileLimit),
       (job) => job.id,
       (job) => {
-        const card = el("article", "result");
-        card.append(
-          el("h3", "", job.title),
+        const {card, main, content} = compactCard(job.title, "نتيجة مهمة", "result");
+        const links = fileLinks(job);
+        const primary = links.firstElementChild;
+        if (primary) { primary.className = "row-action"; primary.textContent = "تنزيل"; main.append(primary); }
+        content.append(
           el(
             "p",
             "meta",
             [job.template, job.folder_name].filter(Boolean).join(" · "),
           ),
-          fileLinks(job),
+          links,
         );
         return card;
       },
@@ -550,6 +588,144 @@ function renderFiles() {
     );
   $("more-files").hidden = jobs.length <= ui.fileLimit;
 }
+function libraryVisible() {
+  return !document.hidden && !$("files-page").hidden && !$("library-panel").hidden;
+}
+function fileSize(bytes) {
+  return bytes < 1024 * 1024 ? Math.ceil(bytes / 1024) + " كيلوبايت" : (bytes / (1024 * 1024)).toFixed(1) + " ميغابايت";
+}
+function libraryFilePath(file, operation) {
+  return devicePath("/library/files/" + encodeURIComponent(file.file_id) + "/" + operation)
+    + "?expected_version=" + encodeURIComponent(file.version);
+}
+function libraryRow(file) {
+  const kinds = {document: "Word", transcript: "TXT", audio: "صوت"};
+  const {card, main, content, details} = compactCard(file.name, (kinds[file.kind] || file.kind) + " · " + fileSize(file.size), "library-file");
+  card.dataset.version = file.version;
+  if (file.can_download) {
+    const link = el("a", "row-action", "تنزيل");
+    link.href = libraryFilePath(file, "download");
+    link.download = "";
+    link.setAttribute("aria-label", "تنزيل — " + file.name);
+    main.append(link);
+  } else main.append(viewButton(details, file.name));
+  content.append(el("p", "meta", "المادة: " + (file.group_name || "غير مصنف")));
+  const modified = new Date(typeof file.modified === "number" ? file.modified * 1000 : file.modified);
+  if (!Number.isNaN(modified.getTime())) content.append(el("p", "meta", "التعديل: " + modified.toLocaleString("ar-JO")));
+  const actions = el("div", "actions");
+  const copy = el("button", "quiet", "نسخ اسم الملف");
+  copy.onclick = async () => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(file.name);
+      else {
+        const input = el("textarea"); input.value = file.name; document.body.append(input); input.select();
+        let copied;
+        try { copied = document.execCommand("copy"); } finally { input.remove(); }
+        if (!copied) throw new Error();
+      }
+      toast("نُسخ اسم الملف.");
+    } catch { toast("تعذر النسخ. الاسم الكامل ظاهر في التفاصيل.", true); }
+  };
+  actions.append(copy);
+  if (file.can_preview && ui.state?.capabilities?.library_preview) {
+    const button = el("button", "quiet", "معاينة النص");
+    button.onclick = () => previewFile(file);
+    actions.append(button);
+  }
+  if (file.can_delete && ui.state?.capabilities?.library_delete) {
+    const button = actionButton("حذف نسخة المكتبة", async () => {
+      if (ui.library.mustRefresh) {
+        toast("حدّث المكتبة أولًا للتحقق من نتيجة الطلب السابق.", true);
+        return;
+      }
+      const device = internetMode ? $("device-name").textContent : "هذا الكمبيوتر";
+      if (!(await confirmAction("حذف نسخة المكتبة «" + file.name + "» من «" + device + "»؟ يبقى أصل المهمة محفوظًا."))) return;
+      if (!ui.online) return;
+      ui.library.mustRefresh = true;
+      const success = await mutate("library_delete", {file_id: file.file_id, expected_version: file.version, confirm: true});
+      if (success) { ui.library.mustRefresh = false; await loadLibrary({refresh: true}); }
+      else text("library-error", "قد تكون نتيجة الحذف غير مؤكدة. حدّث المكتبة قبل أي محاولة جديدة.");
+    }, true);
+    actions.append(button);
+  }
+  content.append(actions);
+  return card;
+}
+async function previewFile(file) {
+  if (ui.updateLocked) return;
+  const sequence = ++ui.previewSequence;
+  text("preview-name", file.name);
+  text("preview-text", "");
+  text("preview-status", "جارٍ قراءة النص…");
+  $("file-preview").showModal();
+  try {
+    const result = await api(libraryFilePath(file, "preview"));
+    if (!pageActive || sequence !== ui.previewSequence || !ui.state) return;
+    text("preview-name", result.name);
+    text("preview-text", result.text);
+    text("preview-status", result.truncated ? "معاينة مختصرة؛ نزّل الملف لقراءة النص كاملًا." : fileSize(result.size));
+  } catch (error) {
+    if (sequence === ui.previewSequence) text("preview-status", error.message);
+  }
+}
+$("preview-close").onclick = () => $("file-preview").close();
+$("file-preview").addEventListener("close", () => { ui.previewSequence++; text("preview-text", ""); });
+async function loadLibrary({append = false, refresh = false} = {}) {
+  if (!ui.state?.capabilities?.library || !ui.online || !pageActive || ui.pending) return;
+  if (append && (!ui.library.next || ui.library.loading)) return;
+  const sequence = ++ui.library.sequence;
+  ui.library.loading = true;
+  text("library-error", "");
+  text("library-status", refresh ? "جارٍ تحديث فهرس المكتبة…" : "جارٍ قراءة المكتبة…");
+  $("library-more").disabled = true;
+  const params = new URLSearchParams({kind: $("library-kind").value, group_id: $("library-group").value || "all", query: $("library-search").value.trim(), limit: "50"});
+  if (append) params.set("cursor", ui.library.next);
+  if (refresh) params.set("refresh", "1");
+  try {
+    const result = await api(devicePath("/library/files") + "?" + params);
+    if (!pageActive || sequence !== ui.library.sequence || !ui.state) return;
+    ui.library.busy = !!result.busy;
+    ui.library.organizing = !!result.organizing;
+    if (!result.busy) {
+      const files = append ? [...ui.library.files, ...result.files] : result.files;
+      ui.library.files = [...new Map(files.map((file) => [file.file_id, file])).values()];
+      ui.library.loaded = true;
+      ui.library.next = result.next_cursor;
+      ui.library.revision = result.revision;
+      if (refresh && !ui.pending) ui.library.mustRefresh = false;
+      updateOptions("library-group", result.groups || [], "كل المواد");
+      if (ui.library.files.length) reconcile($("library-files"), ui.library.files, (file) => file.file_id, libraryRow);
+      else empty($("library-files"), "لا توجد ملفات تطابق البحث. جرّب تنظيم النتائج أو تغيير التصفية.");
+    }
+    text("library-status", result.busy ? "جارٍ فهرسة ملفات الكمبيوتر…" : (result.organizing ? "جارٍ تنظيم النتائج… " : "") + "عرض " + ui.library.files.length + " من " + result.total + " ملف");
+    text("library-error", result.error || "");
+    $("library-more").hidden = !ui.library.next || !!result.busy;
+  } catch (error) {
+    if (sequence !== ui.library.sequence) return;
+    text("library-error", error.message + (error.status === 409 ? " حدّث المكتبة للبدء من قائمة جديدة." : ""));
+  } finally {
+    if (sequence === ui.library.sequence) {
+      ui.library.loading = false;
+      $("library-more").disabled = false;
+      enableActions();
+    }
+  }
+}
+function selectFilesView(library) {
+  $("library-panel").hidden = !library;
+  $("results-panel").hidden = library;
+  $("library-tab").setAttribute("aria-pressed", String(library));
+  $("results-tab").setAttribute("aria-pressed", String(!library));
+  if (library && !ui.library.loaded) loadLibrary();
+}
+$("library-tab").onclick = () => selectFilesView(true);
+$("results-tab").onclick = () => selectFilesView(false);
+$("library-refresh").onclick = () => loadLibrary({refresh: true});
+$("library-more").onclick = () => loadLibrary({append: true});
+let librarySearchTimer;
+$("library-search").oninput = () => { clearTimeout(librarySearchTimer); librarySearchTimer = setTimeout(() => loadLibrary(), 300); };
+for (const id of ["library-kind", "library-group"]) $(id).onchange = () => loadLibrary();
+$("library-organize").onclick = async () => { if (await mutate("library_organize")) await loadLibrary(); };
 function render() {
   for (const key of ["total", "active", "done", "attention"])
     text(key, ui.state.stats[key]);
@@ -565,6 +741,10 @@ function render() {
   renderWorkers();
   renderFiles();
   renderSource();
+  const libraryAvailable = !!ui.state.capabilities?.library;
+  $("library-compat").hidden = libraryAvailable;
+  $("library-controls").hidden = !libraryAvailable;
+  $("library-organize").hidden = !ui.state.capabilities?.library_organize;
   enableActions();
 }
 $("pair-form").onsubmit = async (event) => {
@@ -585,13 +765,16 @@ $("pair-form").onsubmit = async (event) => {
   }
 };
 $("logout").onclick = async () => {
+  if (ui.updateLocked || ui.pending) return;
+  ui.pending = true;
+  enableActions();
   try {
     await api(internetMode ? devicePath("/logout") : "/api/logout", {});
     if (internetMode) location.replace("/internet");
     else showLogin();
   } catch (error) {
     toast(error.message, true);
-  }
+  } finally { ui.pending = false; enableActions(); }
 };
 $("queue-toggle").onclick = async () => {
   const desired = !ui.state.running;
@@ -664,7 +847,7 @@ for (const [id, checked] of [
   };
 $("upload-form").onsubmit = async (event) => {
   event.preventDefault();
-  if (ui.preparing || ui.pending) return;
+  if (ui.updateLocked || ui.preparing || ui.pending) return;
   const files = [...$("transcripts").files];
   if (
     !files.length ||
@@ -714,6 +897,7 @@ document.querySelectorAll("[data-tab]").forEach(
       const heading = $(button.dataset.tab + "-title");
       heading.tabIndex = -1;
       heading.focus({ preventScroll: true });
+      if (button.dataset.tab === "files" && !ui.library.loaded) loadLibrary();
     }),
 );
 document.addEventListener("visibilitychange", () => {
@@ -724,19 +908,25 @@ boot();
 setInterval(() => {
   if (ui.state || (internetMode && targetDevice)) poll();
   if (pairClaim) pollPairStatus();
+  if (libraryVisible() && (ui.library.busy || ui.library.organizing) && !ui.library.loading) loadLibrary();
 }, 2500);
 
 async function loadDevices() {
+  const epoch = ui.sessionEpoch;
   $("devices-refresh").disabled = true;
   try {
     const result = await api("/api/devices");
-    if (!pageActive) return;
+    if (!pageActive || epoch !== ui.sessionEpoch) return;
     $("device-list").replaceChildren();
     for (const device of result.devices || []) {
-      const card = el("article", "result");
+      const {card, main, content} = compactCard(device.name || device.device_name || "كمبيوتر ورق", device.online ? "متصل" : "غير متصل", "device-row");
       const link = el("a", "device-link", device.name || device.device_name || "كمبيوتر ورق");
       link.href = "/devices/" + encodeURIComponent(device.device_id);
-      card.append(link, el("p", "muted", device.online ? "متصل" : "غير متصل — أبقِ ورق مفتوحًا على هذا الكمبيوتر"));
+      link.textContent = "فتح";
+      link.setAttribute("aria-label", device.name || device.device_name || "كمبيوتر ورق");
+      link.className = "row-action";
+      main.append(link);
+      content.append(el("p", "muted", "أبقِ ورق مفتوحًا والكمبيوتر مستيقظًا."));
       $("device-list").append(card);
     }
     if (!result.devices?.length) empty($("device-list"), "لم يقترن هذا المتصفح بأي كمبيوتر بعد.");
@@ -759,12 +949,14 @@ $("devices-refresh").onclick = () => { text("device-error", ""); loadDevices(); 
 
 $("internet-pair-form").onsubmit = async (event) => {
   event.preventDefault();
-  if (!pairingTicket || pairClaim) return;
+  if (ui.updateLocked || !pairingTicket || pairClaim) return;
+  pairingBusy = true;
   $("internet-pair-button").disabled = true;
   text("internet-pair-error", "");
   try {
-    const result = await api("/api/pair/start", { ticket: pairingTicket, phone_name: $("phone-name").value.trim() });
+    const ticket = pairingTicket;
     pairingTicket = "";
+    const result = await api("/api/pair/start", { ticket, phone_name: $("phone-name").value.trim() });
     pairClaim = result.claim_id;
     text("pair-device-name", result.device_name);
     text("pair-match-code", result.match_code);
@@ -777,7 +969,7 @@ $("internet-pair-form").onsubmit = async (event) => {
     text("internet-pair-error", error.message + (error.status === 409
       ? " راجع حالة الاقتران في ورق على الكمبيوتر قبل المحاولة من جديد."
       : " راجع إعدادات الاقتران على الكمبيوتر، ثم امسح رمز QR جديدًا للمحاولة مجددًا."));
-  }
+  } finally { pairingBusy = false; }
 };
 async function pollPairStatus() {
   if (!pairClaim || pairStatusBusy || document.hidden || !pageActive) return;
@@ -798,6 +990,26 @@ async function pollPairStatus() {
     if (error.status && error.status < 500) pairClaim = null;
   } finally { pairStatusBusy = false; }
 }
+window.waraqPwaBridge = {
+  isBusy: () => ui.pending || ui.preparing || $("confirmation").open || $("file-preview").open || pairingBusy || !!pairClaim,
+  setUpdateLock: (locked) => { ui.updateLocked = !!locked; enableActions(); },
+  acceptPairLink: async (value) => {
+    if (!internetMode || targetDevice || ui.updateLocked || window.waraqPwaBridge.isBusy()) return false;
+    let url;
+    try { url = new URL(value); } catch { return false; }
+    if (url.origin !== location.origin || url.username || url.password || url.pathname !== "/pair" || url.search || !/^[A-Za-z0-9_-]{20,200}$/.test(url.hash.slice(1))) return false;
+    pairingTicket = url.hash.slice(1);
+    history.replaceState(null, "", "/internet");
+    $("internet-home").hidden = true;
+    $("internet-pair").hidden = false;
+    $("internet-pair-form").hidden = false;
+    $("pair-waiting").hidden = true;
+    $("internet-pair-button").disabled = false;
+    text("internet-pair-error", "");
+    $("phone-name").focus();
+    return true;
+  },
+};
 async function boot() {
   if (!internetMode) {
     try { internetMode = (await api("/api/bootstrap")).mode === "internet"; }

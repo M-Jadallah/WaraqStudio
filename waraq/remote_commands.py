@@ -15,7 +15,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from . import __version__
-from .remote_common import MAX_UPLOAD, RemoteError
+from .remote_common import MAX_UPLOAD, RemoteError, REQUEST_CONTEXT
+from .remote_library import RemoteLibrary, CAPABILITIES
 from .store import STAGES
 
 
@@ -25,6 +26,9 @@ class RemoteCommands(QObject):
     def __init__(self, bridge):
         super().__init__(bridge)
         self.bridge = bridge
+        if not hasattr(bridge, "_remote_library"):
+            bridge._remote_library = RemoteLibrary(bridge)
+        self.library = bridge._remote_library
         self._generation = secrets.token_hex(16)
         self._source = {"revision": "", "busy": False, "title": "", "items": [], "error": ""}
         self._discovery_cancel = threading.Event()
@@ -32,7 +36,7 @@ class RemoteCommands(QObject):
 
     @property
     def busy(self):
-        return self._source["busy"]
+        return self._source["busy"] or self.library.busy
 
     def stop(self):
         self._discovery_cancel.set()
@@ -46,7 +50,7 @@ class RemoteCommands(QObject):
                   "progress", "retryAt", "template", "folder_name", "steps")
         workers = ("id", "name", "stage", "stageLabel", "enabled", "paused", "autoBlocked", "job_id",
                    "elapsed", "error", "cooldownSeconds", "providerLabel", "modelResolved")
-        return {"version": __version__, "running": b.running, "autoStop": b._auto_stop, "stats": b.stats,
+        return {"capabilities": dict(CAPABILITIES), "version": __version__, "running": b.running, "autoStop": b._auto_stop, "stats": b.stats,
                 "jobs": [{**{key: job.get(key, "") for key in fields},
                           "files": [kind for kind in ("document", "transcript") if job.get(kind)]} for job in b.jobs],
                 "workers": [{key: worker.get(key, "") for key in workers} for worker in b.workers],
@@ -55,6 +59,14 @@ class RemoteCommands(QObject):
 
     def execute(self, action, data):
         b = self.bridge
+        if action.startswith("library_"):
+            cfg = b.config.snapshot()
+            context = REQUEST_CONTEXT.get()
+            if action == "library_list": return self.library.list(data, cfg, context)
+            if action == "library_file": return self.library.file(data, cfg, context)
+            if action == "library_preview": return self.library.preview(data, cfg, context)
+            if action == "library_delete": return self.library.delete(data, cfg, context)
+            if action == "library_organize": return self.library.organize(cfg, context)
         if action == "state":
             return self._snapshot()
         if action == "file":

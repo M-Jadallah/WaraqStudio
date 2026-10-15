@@ -71,9 +71,12 @@ def main():
         import qrcode
         import qrcode.image.svg
         from waraq.remote import ASSETS
+        from waraq.mobile_assets import ASSET_TYPES, PWA_PAGES
         report["mobile"] = {"assets": all((ASSETS / name).is_file() for name in ("index.html", "app.js", "style.css")),
                             "flask": bool(Flask), "waitress": callable(create_server),
                             "qr_svg": bool(qrcode.make("http://127.0.0.1:8765", image_factory=qrcode.image.svg.SvgPathImage).to_string())}
+        report["mobile"]["pwa_assets"] = all((ASSETS / name).is_file() for name in
+            {*(name for name in ASSET_TYPES if name != "icon.svg"), *(name for name, _ in PWA_PAGES.values())})
         from websockets.sync.client import connect as internet_connect
         report["internet_connector"] = callable(internet_connect)
         report["ffmpeg_exists"] = Path(report["ffmpeg"]).is_file()
@@ -107,6 +110,7 @@ def main():
     app.aboutToQuit.connect(scheduler.shutdown)
     app.aboutToQuit.connect(bridge.stopRemote)
     app.aboutToQuit.connect(bridge.stopInternet)
+    app.aboutToQuit.connect(bridge.closeRemoteLibrary)
     if args.screenshot:
         def capture():
             try:

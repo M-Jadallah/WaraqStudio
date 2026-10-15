@@ -79,6 +79,9 @@ jobs:
           python tests/verify_mobile_internet.py
           python tests/verify_internet_stack.py
 
+      - name: PWA HTTPS service worker and pairing acceptance
+        run: python tests/verify_pwa.py
+
   build-release:
     name: Build exe and publish release
     needs: [tests, relay]
@@ -146,7 +149,7 @@ jobs:
         run: |
           ./Windows/WaraqStudio/WaraqStudio.exe --check-environment env-report.json
           cat env-report.json
-          python -c "import json, os; d=json.load(open('env-report.json', encoding='utf-8')); assert d['version']==os.environ['VERSION'], (d['version'], os.environ['VERSION']); assert d['ffmpeg_exists'], d; assert d.get('opencode_version')==os.environ['OPENCODE_TEST_VERSION'], d.get('opencode_error', d)"
+          python -c "import json, os; d=json.load(open('env-report.json', encoding='utf-8')); assert d['version']==os.environ['VERSION'], (d['version'], os.environ['VERSION']); assert d['ffmpeg_exists'], d; assert d['mobile']['pwa_assets'], d; assert d.get('opencode_version')==os.environ['OPENCODE_TEST_VERSION'], d.get('opencode_error', d)"
 
       - name: Smoke test bundled exe (UI launch)
         run: ./Windows/WaraqStudio/WaraqStudio.exe --smoke

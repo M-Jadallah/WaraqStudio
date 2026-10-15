@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from concurrent.futures import CancelledError, Future, TimeoutError
 from collections import deque
+from contextlib import ExitStack
 import hmac
 import ipaddress
+import mimetypes
+import os
 import secrets
 import threading
 import time
@@ -19,8 +22,9 @@ from urllib.parse import quote, urlsplit
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
 
-from .remote_common import DEFAULT_PORT, MAX_REQUEST, RemoteError
+from .remote_common import DEFAULT_PORT, MAX_REQUEST, RemoteError, REQUEST_CONTEXT
 from .remote_commands import RemoteCommands
+from .mobile_assets import ASSET_TYPES, PWA_PAGES, MOBILE_CSP, library_query
 
 
 LOCAL_NETWORKS = tuple(ipaddress.ip_network(n) for n in
@@ -65,6 +69,7 @@ class RemoteAccess(QObject):
         self._stop = threading.Event()
         self._generation = ""
         self._pending = set()
+        self._contexts = {}
         self._sessions = {}
         self._attempts = {}
         self._global_attempts = deque()
@@ -113,6 +118,8 @@ class RemoteAccess(QObject):
             # Wall time is only for display; expiry decisions use a monotonic clock.
             self._display_until = time.time() + 600
             self._sessions.clear()
+            for context in self._contexts.values():
+                context["cancel"].set()
             self._attempts.clear()
             self._global_attempts.clear()
         self.changed.emit()
@@ -173,6 +180,8 @@ class RemoteAccess(QObject):
             self._code = ""
             for future in self._pending:
                 future.cancel()
+            for context in self._contexts.values():
+                context["cancel"].set()
             self._pending.clear()
         self.commands.stop()
         if self._thread is not None:
@@ -217,40 +226,66 @@ class RemoteAccess(QObject):
     def logout(self, token):
         with self._lock:
             self._sessions.pop(token, None)
+            for context in self._contexts.values():
+                if context["token"] == token:
+                    context["cancel"].set()
         self._auth_changed.emit()
 
     def call(self, action, data, token, timeout=10):
         future = Future()
+        context = {"cancel": threading.Event(), "deadline": time.time()+timeout, "token": token}
         with self._lock:
             if not self._server or self._stop.is_set() or not self.authorize(token):
                 raise RemoteError("انتهت جلسة الاتصال. أدخل رمز الدخول مجددًا.", 401)
             if len(self._pending) >= 16:
                 raise RemoteError("التطبيق مشغول. حاول بعد لحظات.", 503)
             self._pending.add(future)
+            self._contexts[future] = context
             generation = self._generation
-        self._request.emit((future, generation, token, action, data))
+        self._request.emit((future, generation, token, action, data, context))
         try:
             return future.result(timeout)
         except CancelledError:
             raise RemoteError("قُطع الاتصال من الكمبيوتر؛ لم يُنفذ الطلب.", 503) from None
         except TimeoutError:
+            context["cancel"].set()
+            child = getattr(future, "_waraq_child", None)
+            if child is not None:
+                child.cancel()
             cancelled = future.cancel()
             raise RemoteError("الكمبيوتر مشغول. " + ("لم يُنفذ الطلب؛ حاول بعد لحظات." if cancelled else
                               "تحقق من حالة المهمة قبل إعادة إرسال الأمر."), 503) from None
         finally:
             with self._lock:
                 self._pending.discard(future)
+                self._contexts.pop(future, None)
 
     @Slot(object)
     def _dispatch(self, request):
-        future, generation, token, action, data = request
+        future, generation, token, action, data, context = request
         if not future.set_running_or_notify_cancel():
             return
         try:
             if generation != self._generation or not self.authorize(token):
                 raise RemoteError("انتهت جلسة الاتصال. أدخل رمز الدخول مجددًا.", 401)
-            result = self._execute(action, data)
-            future.set_result(result)
+            if context['cancel'].is_set() or time.time() >= context['deadline']:
+                raise RemoteError("انتهت مهلة الطلب أو أُلغي؛ لم ينفذ الطلب.", 503)
+            context_token = REQUEST_CONTEXT.set(context)
+            try:
+                result = self._execute(action, data)
+            finally:
+                REQUEST_CONTEXT.reset(context_token)
+            if isinstance(result, Future):
+                future._waraq_child = result
+                def complete(child):
+                    try:
+                        future.set_result(child.result())
+                    except Exception as exc:
+                        if not future.done():
+                            future.set_exception(exc)
+                result.add_done_callback(complete)
+            else:
+                future.set_result(result)
         except Exception as exc:
             future.set_exception(exc)
 
@@ -259,7 +294,7 @@ class RemoteAccess(QObject):
 
 
 def create_app(remote):
-    from flask import Flask, jsonify, request, send_file, g
+    from flask import Flask, Response, jsonify, request, send_file, g
     from werkzeug.exceptions import HTTPException
     app = Flask(__name__, static_folder=None)
     app.config.update(MAX_CONTENT_LENGTH=MAX_REQUEST)
@@ -294,8 +329,7 @@ def create_app(remote):
         response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                                  "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
                                  "Cross-Origin-Resource-Policy": "same-origin",
-                                 "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
-                                 "img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"})
+                                 "Content-Security-Policy": MOBILE_CSP})
         return response
 
     @app.errorhandler(RemoteError)
@@ -318,11 +352,21 @@ def create_app(remote):
     def index():
         return send_file(ASSETS / "index.html")
 
-    @app.get("/assets/<name>")
+    @app.get("/assets/<path:name>")
     def asset(name):
-        if name not in ("app.js", "style.css", "icon.svg"):
+        if name not in ASSET_TYPES:
             raise RemoteError("الملف غير موجود.", 404)
-        return send_file(Path(__file__).with_name("icon.svg") if name == "icon.svg" else ASSETS / name)
+        return send_file(Path(__file__).with_name("icon.svg") if name == "icon.svg" else ASSETS / name,
+                         mimetype=ASSET_TYPES[name])
+
+    def pwa_asset():
+        name, mimetype = PWA_PAGES[request.path]
+        response = send_file(ASSETS / name, mimetype=mimetype)
+        if request.path == "/sw.js":
+            response.headers["Service-Worker-Allowed"] = "/"
+        return response
+    for path in PWA_PAGES:
+        app.add_url_rule(path, "pwa"+path, pwa_asset, methods=["GET"])
 
     def body():
         value = request.get_json()
@@ -350,7 +394,7 @@ def create_app(remote):
 
     @app.post("/api/action/<action>")
     def action(action):
-        if action not in ("queue", "cancel", "retry", "stage", "discover", "enqueue", "upload"):
+        if action not in ("queue", "cancel", "retry", "stage", "discover", "enqueue", "upload", "library_delete", "library_organize"):
             raise RemoteError("الأمر غير مدعوم.", 404)
         return jsonify(remote.call(action, body(), g.token))
 
@@ -358,5 +402,46 @@ def create_app(remote):
     def download(ident, kind):
         path = remote.call("file", {"id": ident, "kind": kind}, g.token)
         return send_file(path, as_attachment=True, conditional=False)
+
+    @app.get("/api/library/files")
+    def library_list():
+        return jsonify(remote.call("library_list", library_query(request.args), g.token))
+
+    @app.get("/api/library/files/<file_id>/preview")
+    def library_preview(file_id):
+        return jsonify(remote.call("library_preview", {"file_id": file_id, "expected_version": request.args.get("expected_version")}, g.token))
+
+    @app.get("/api/library/files/<file_id>/download")
+    def library_download(file_id):
+        source = remote.call("library_file", {"file_id": file_id, "expected_version": request.args.get("expected_version")}, g.token)
+        stack = ExitStack()
+        try:
+            stream = stack.enter_context(source.open())
+            size = os.fstat(stream.fileno()).st_size
+            if size > 100*1024*1024:
+                raise RemoteError("الملف يتجاوز حد النقل البالغ 100 ميغابايت.", 413)
+        except BaseException:
+            stack.close()
+            raise
+        def chunks():
+            remaining = size
+            until = time.monotonic() + 60
+            try:
+                while remaining:
+                    if not remote.authorize(g_token) or remote._stop.is_set() or time.monotonic() >= until:
+                        return
+                    chunk = stream.read(min(65536, remaining))
+                    if not chunk:
+                        return
+                    remaining -= len(chunk)
+                    yield chunk
+            finally:
+                stack.close()
+        g_token = g.token
+        response = Response(chunks(), mimetype=mimetypes.guess_type(source.name)[0] or "application/octet-stream",
+                            headers={"Content-Length": str(size), "Content-Disposition":
+                                     "attachment; filename*=UTF-8''"+quote(source.name, safe="")})
+        response.call_on_close(stack.close)
+        return response
 
     return app

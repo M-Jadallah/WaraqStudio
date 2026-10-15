@@ -53,10 +53,11 @@ def browser_checks(base, code, output):
         page.locator("#queue-toggle").click()
         expect(page.locator("#queue-state")).to_have_text("الطابور متوقف")
 
+        page.locator("#queue-page > .filter-disclosure > summary").click()
         page.locator("#filter").select_option("attention")
         expect(page.locator("#jobs article")).to_have_count(1)
-        page.locator("#jobs summary").click()
-        expect(page.locator("#jobs details")).to_have_attribute("open", "")
+        page.locator("#jobs > article > details > summary").click()
+        expect(page.locator("#jobs > article > details")).to_have_attribute("open", "")
         page.locator("#jobs").get_by_role("button", name="إعادة المحاولة").click()
         expect(page.locator("#jobs .empty")).to_be_visible()
         page.locator("#filter").select_option("all")
@@ -86,6 +87,7 @@ def browser_checks(base, code, output):
         expect(service.locator(".badge")).to_have_text("تستقبل المهام")
 
         page.locator('[data-tab="files"]').click()
+        page.locator("#results-tab").click()
         with page.expect_download() as download_info:
             page.get_by_role("link", name="تنزيل Word — درس مكتمل").click()
         assert Path(download_info.value.path()).read_bytes() == b"synthetic-docx-output"
@@ -96,7 +98,7 @@ def browser_checks(base, code, output):
         # Check every page in both themes and small, tablet, landscape and desktop widths.
         for scheme in ("dark", "light"):
             page.emulate_media(color_scheme=scheme)
-            for width, height in ((360, 740), (375, 812), (768, 1024), (844, 390), (1440, 900)):
+            for width, height in ((320, 740), (360, 740), (375, 812), (768, 1024), (844, 390), (1440, 900)):
                 page.set_viewport_size({"width": width, "height": height})
                 for tab in ("queue", "source", "workers", "files"):
                     page.locator(f'[data-tab="{tab}"]').click()
@@ -105,7 +107,8 @@ def browser_checks(base, code, output):
             page.locator('[data-tab="source"]').click()
             if output:
                 page.screenshot(path=str(output / f"mobile-source-{scheme}.png"), full_page=True)
-        page.evaluate("document.documentElement.style.fontSize='24px'")
+        page.set_viewport_size({"width": 320, "height": 740})
+        page.evaluate("document.documentElement.style.fontSize='32px'")
         for tab in ("queue", "source", "workers", "files"):
             page.locator(f'[data-tab="{tab}"]').click()
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), ("large text", tab)
@@ -188,7 +191,7 @@ def main():
         store.db.close()
     print("Mobile browser passed: pairing, queue start/pause, retry, YouTube selection/enqueue, UTF-8 upload, "
           "service pause/resume, Word/TXT download, XSS text safety, reload/logout, offline/reconnect, "
-          "5 viewport sizes in both themes, large text, no horizontal overflow or JavaScript errors.")
+          "6 viewport sizes including320px in both themes, 200% text, no horizontal overflow or JavaScript errors.")
 
 
 if __name__ == "__main__":

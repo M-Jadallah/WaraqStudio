@@ -9,10 +9,16 @@ def main():
     files = [root / "compose.relay.yaml", root / ".dockerignore",
              root / "deploy/relay/Dockerfile", root / "deploy/relay/.env.example",
              root / "deploy/relay/README_AR.md", root / "deploy/relay/COOLIFY_SETUP_AR.md", root / "relay/requirements.txt",
-             root / "waraq/icon.svg"]
+             root / "waraq/icon.svg", root / "waraq/mobile_assets.py"]
     files.extend(sorted((root / "relay").glob("*.py")))
     files.extend(sorted((root / "deploy/relay").glob("*.py")))
-    files.extend(root / "waraq/mobile" / name for name in ("index.html", "app.js", "style.css"))
+    # Only explicitly published assets are packaged, never local caches/state.
+    import sys
+    sys.path.insert(0, str(root))
+    from waraq.mobile_assets import ASSET_TYPES, PWA_PAGES
+    names = {"index.html", *(name for name in ASSET_TYPES if name != "icon.svg"),
+             *(name for name, _ in PWA_PAGES.values())}
+    files.extend(root / "waraq/mobile" / name for name in sorted(names))
     for path in files:
         if not path.is_file():
             raise FileNotFoundError(path)

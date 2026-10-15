@@ -13,6 +13,7 @@ RUN python -m pip install --no-cache-dir -r /app/relay-requirements.txt \
 COPY --chown=10001:10001 relay /app/relay
 COPY --chown=10001:10001 deploy/relay /app/deploy/relay
 COPY --chown=10001:10001 waraq/mobile /app/waraq/mobile
+COPY --chown=10001:10001 waraq/mobile_assets.py /app/waraq/mobile_assets.py
 COPY --chown=10001:10001 waraq/icon.svg /app/waraq/icon.svg
 
 USER 10001:10001

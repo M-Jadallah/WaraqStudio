@@ -11,6 +11,7 @@
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/assets/style.css" />
     <script src="/assets/app.js" defer></script>
+    <script src="/assets/pwa.js" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -125,7 +126,7 @@
             الإغلاق التلقائي مفعّل على الكمبيوتر؛ سينقطع الوصول عند اكتمال
             الطابور.
           </p>
-          <div class="filters">
+          <details class="filter-disclosure"><summary>البحث والتصفية</summary><div class="filters">
             <div>
               <label for="search">البحث في المهام</label
               ><input id="search" type="search" placeholder="عنوان الدرس…" />
@@ -141,7 +142,7 @@
                 <option value="cancelled">ملغاة</option>
               </select>
             </div>
-          </div>
+          </div></details>
           <p id="job-count" class="muted"></p>
           <div id="jobs" class="cards"></div>
           <button id="more" class="wide quiet" hidden>عرض المزيد</button>
@@ -256,24 +257,48 @@
           aria-labelledby="files-title"
         >
           <span class="eyebrow">ثمرة العمل</span>
-          <h1 id="files-title">النتائج</h1>
-          <p class="muted">
-            نزّل مستندات Word والتفريغات الجاهزة مباشرة على هاتفك.
-          </p>
+          <h1 id="files-title">الملفات</h1>
+          <div class="subtabs" aria-label="مصدر الملفات">
+            <button id="library-tab" aria-pressed="true">المكتبة</button>
+            <button id="results-tab" aria-pressed="false">نتائج المهام</button>
+          </div>
+          <div id="library-panel">
+            <p id="library-compat" class="banner" hidden>حدّث ورق على الكمبيوتر لإتاحة المكتبة. تظل نتائج المهام متاحة.</p>
+            <div id="library-controls">
+              <details class="filter-disclosure"><summary>بحث وتصفية المكتبة</summary>
+                <label for="library-search">اسم الملف</label><input id="library-search" type="search" placeholder="ابحث في المكتبة…" />
+                <div class="filters"><div><label for="library-kind">النوع</label><select id="library-kind"><option value="all">الكل</option><option value="document">Word</option><option value="transcript">التفريغات</option><option value="audio">الصوت</option></select></div>
+                <div><label for="library-group">المادة</label><select id="library-group"><option value="">كل المواد</option></select></div></div>
+              </details>
+              <div class="actions"><button id="library-refresh" class="quiet">تحديث المكتبة</button><button id="library-organize" class="quiet" data-mutate>تنظيم الآن</button></div>
+              <p class="muted transfer-help">التنزيل حتى 100 ميغابايت، بمهلة 60 ثانية. الحذف يزيل نسخة المكتبة ويبقي أصل المهمة.</p>
+              <p id="library-status" class="muted" role="status"></p>
+              <p id="library-error" class="error" role="alert"></p>
+              <div id="library-files" class="cards"></div>
+              <button id="library-more" class="wide quiet" hidden>عرض المزيد</button>
+            </div>
+          </div>
+          <div id="results-panel" hidden>
           <label for="file-search">البحث في النتائج</label
           ><input id="file-search" type="search" placeholder="عنوان الدرس…" />
           <div id="files" class="cards"></div>
           <button id="more-files" class="wide quiet" hidden>عرض المزيد</button>
+          </div>
         </section>
       </div>
     </main>
     <nav id="navigation" class="navigation" hidden aria-label="صفحات ورق">
       <button data-tab="queue" aria-current="page">العمليات</button
-      ><button data-tab="source">إضافة مصدر</button
+      ><button data-tab="source">إضافة</button
       ><button data-tab="workers">العمال</button
-      ><button data-tab="files">النتائج</button>
+      ><button data-tab="files">الملفات</button>
     </nav>
     <div id="toast" role="status" aria-live="polite" hidden></div>
+    <dialog
+      id="file-preview" aria-labelledby="preview-name">
+      <h2 id="preview-name"></h2><p id="preview-status" class="muted" role="status"></p>
+      <pre id="preview-text" dir="auto"></pre><button id="preview-close" class="quiet">إغلاق المعاينة</button>
+    </dialog>
     <dialog
       id="confirmation"
       aria-labelledby="confirm-title"

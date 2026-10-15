@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from starlette.requests import ClientDisconnect
+from waraq.mobile_assets import ASSET_TYPES, PWA_PAGES, MOBILE_CSP, library_query
 
 from .config import Settings
 from .db import Claim, Database, Device, Enrollment, Grant, Phone, Ticket, digest, token
@@ -33,7 +34,7 @@ CHUNK_SIZE = 65536
 MAX_MESSAGE = 15 * 1024 * 1024
 MAX_CONTROL = 256 * 1024
 ASSETS = Path(__file__).resolve().parent.parent / 'waraq' / 'mobile'
-ACTIONS = {'queue', 'cancel', 'retry', 'stage', 'discover', 'enqueue', 'upload'}
+ACTIONS = {'queue', 'cancel', 'retry', 'stage', 'discover', 'enqueue', 'upload', 'library_delete', 'library_organize'}
 PHONE_EXISTS = 'هذا الجهاز مرتبط بهاتف بالفعل. ألغِ ربط الهاتف الحالي من ورق ثم أنشئ QR جديدًا.'
 PAIR_RESERVED = 'يوجد اقتران تمت الموافقة عليه ولم يكتمل بعد. انتظر اكتماله أو انتهاء صلاحيته.'
 
@@ -99,7 +100,7 @@ class SecurityMiddleware:
                     (b'referrer-policy', b'no-referrer'), (b'x-frame-options', b'DENY'),
                     (b'cross-origin-resource-policy', b'same-origin'),
                     (b'strict-transport-security', b'max-age=31536000'),
-                    (b'content-security-policy', b"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")])
+                    (b'content-security-policy', MOBILE_CSP.encode('ascii'))])
             await send(message)
         if upload_device:
             # Reject immediately before reading any upload bytes; retain the
@@ -398,12 +399,19 @@ def create_app(settings=None, database=None):
     async def index():
         return FileResponse(ASSETS / 'index.html')
 
-    @app.get('/assets/{name}')
+    @app.get('/assets/{name:path}')
     async def assets(name: str):
-        if name not in ('app.js', 'style.css', 'icon.svg'):
+        if name not in ASSET_TYPES:
             raise HTTPException(404, 'الملف غير موجود.')
         path = ASSETS.parent / 'icon.svg' if name == 'icon.svg' else ASSETS / name
-        return FileResponse(path)
+        return FileResponse(path, media_type=ASSET_TYPES[name])
+
+    async def pwa_asset(request: Request):
+        name, media_type = PWA_PAGES[request.url.path]
+        headers = {'Service-Worker-Allowed': '/'} if name == 'sw.js' else {}
+        return FileResponse(ASSETS / name, media_type=media_type, headers=headers)
+    for path in PWA_PAGES:
+        app.add_api_route(path, pwa_asset, methods=['GET'])
 
     @app.post('/api/enroll')
     async def enroll(body: EnrollBody, request: Request):
@@ -525,6 +533,25 @@ def create_app(settings=None, database=None):
     async def state(device_id: str, request: Request):
         return await perform(request, device_id, 'state', {})
 
+    @app.get('/api/devices/{device_id}/library/files')
+    async def library_list(device_id: str, request: Request):
+        gateway.phone(request, device_id)
+        try:
+            data = library_query(request.query_params)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return await perform(request, device_id, 'library_list', data)
+
+    @app.get('/api/devices/{device_id}/library/files/{file_id}/preview')
+    async def library_preview(device_id: str, file_id: str, request: Request):
+        return await perform(request, device_id, 'library_preview',
+                             {'file_id': file_id, 'expected_version': request.query_params.get('expected_version')})
+
+    @app.get('/api/devices/{device_id}/library/files/{file_id}/download')
+    async def library_download(device_id: str, file_id: str, request: Request):
+        return await stream_download(request, device_id, 'library_file',
+                                     {'file_id': file_id, 'expected_version': request.query_params.get('expected_version')})
+
     @app.post('/api/devices/{device_id}/action/{action}')
     async def action(device_id: str, action: str, request: Request):
         gateway.phone(request, device_id)
@@ -540,11 +567,15 @@ def create_app(settings=None, database=None):
 
     @app.get('/api/devices/{device_id}/files/{job_id}/{kind}')
     async def download(device_id: str, job_id: str, kind: str, request: Request):
-        phone_id = gateway.phone(request, device_id)
+        gateway.phone(request, device_id)
         if kind not in ('document', 'transcript') or len(job_id) > 128:
             raise HTTPException(404, 'الملف غير موجود.')
+        return await stream_download(request, device_id, 'file', {'id': job_id, 'kind': kind})
+
+    async def stream_download(request, device_id, action, data):
+        phone_id = gateway.phone(request, device_id)
         gateway.throttle(('files', phone_id), 30)
-        pending = await gateway.begin(device_id, phone_id, 'file', {'id': job_id, 'kind': kind}, file=True)
+        pending = await gateway.begin(device_id, phone_id, action, data, file=True)
         try:
             metadata = await gateway.wait_ready(request, pending)
         except BaseException:

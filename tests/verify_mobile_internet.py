@@ -10,6 +10,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit, parse_qs
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -21,12 +22,15 @@ def main():
     if output:
         output.mkdir(parents=True, exist_ok=True)
     record = {"approved": False, "offline": False, "uncertain": False, "reject_second_phone": False,
-              "posts": [], "state_requests": [], "grants": ["device-a", "device-b"]}
+              "posts": [], "state_requests": [], "grants": ["device-a", "device-b"],
+              "library_calls": [], "deleted": False, "library_capable": True, "stale": False,
+              "revoke_preview": False}
     names = {"device-a": "كمبيوتر المنزل", "device-b": "كمبيوتر المكتب"}
 
     def state(device):
         return {"stats": {"total": 1, "active": 0, "done": 1, "attention": 0},
                 "running": False, "autoStop": False, "templates": [], "folders": [],
+                "capabilities": {key: record["library_capable"] for key in ("library", "library_preview", "library_delete", "library_organize")},
                 "workers": [], "source": {"busy": False, "error": "", "revision": 1,
                                              "title": "", "items": []},
                 "jobs": [{"id": "job-" + device, "title": "درس " + names[device],
@@ -49,8 +53,7 @@ def main():
             if self.path.startswith("/assets/"):
                 name = self.path.rsplit("/", 1)[1]
                 path = ROOT / "waraq" / ("icon.svg" if name == "icon.svg" else "mobile/" + name)
-                content_type = {"app.js": "text/javascript", "style.css": "text/css",
-                                "icon.svg": "image/svg+xml"}[name]
+                content_type = "text/javascript" if name.endswith(".js") else {"style.css": "text/css", "icon.svg": "image/svg+xml"}[name]
                 self.reply(path.read_bytes(), content_type=content_type)
             elif self.path == "/api/bootstrap":
                 self.reply({"mode": "internet", "protocol": 1})
@@ -71,6 +74,22 @@ def main():
                         self.reply({"error": "الجهاز غير متصل"}, 503)
                     else:
                         self.reply(state(device))
+                elif "/library/files" in self.path:
+                    record["library_calls"].append(self.path)
+                    query = parse_qs(urlsplit(self.path).query)
+                    if "/preview" in self.path:
+                        if record["revoke_preview"]:
+                            self.reply({"error": "أُلغي اقتران الهاتف"}, 403)
+                        else:
+                            self.reply({"name": "نص المكتبة.txt", "text": '<script>window.library_xss=1</script>\nنص محفوظ', "truncated": True, "size": 200})
+                    elif "/download" in self.path:
+                        self.reply(b"library-output", content_type="application/octet-stream")
+                    elif record["stale"] and "cursor" in query:
+                        self.reply({"error": "تغير فهرس المكتبة"}, 409)
+                    else:
+                        second = "cursor" in query
+                        files = [] if record["deleted"] else [{"file_id": "library-2" if second else "library-1", "name": "نص المكتبة.txt", "kind": "transcript", "group_id": "group-1", "group_name": "مادة طويلة " * 8, "size": 1024, "modified": 1700000000, "version": "v1", "can_download": True, "can_preview": True, "can_delete": True}]
+                        self.reply({"files": files, "groups": [{"id": "group-1", "name": "مادة الاختبار"}], "total": 0 if record["deleted"] else 2, "revision": "r1", "next_cursor": None if second or record["deleted"] else "page-two", "busy": False, "error": "", "organizing": False})
                 elif "/files/" in self.path:
                     self.reply(b"result-" + device.encode(), content_type="application/octet-stream")
                 else:
@@ -93,6 +112,8 @@ def main():
             elif record["uncertain"]:
                 self.connection.close()  # Mutation has reached server; do not replay it.
             else:
+                if self.path.endswith("/library_delete"):
+                    record["deleted"] = True
                 self.reply({"message": "تم التنفيذ"})
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -130,6 +151,66 @@ def main():
             page.locator("#confirm-yes").click()
             expect(page.locator("#toast")).to_have_text("تم التنفيذ")
             assert record["posts"][-1][0] == "/api/devices/device-a/action/queue"
+            assert not record["library_calls"], "Queue polling must not scan the library"
+            page.locator('[data-tab="files"]').click()
+            expect(page.locator("#library-files article")).to_have_count(1)
+            assert "/api/devices/device-a/library/files?" in record["library_calls"][-1]
+            first_row = page.locator("#library-files article").first
+            expect(first_row.locator("summary")).to_be_visible()
+            assert first_row.bounding_box()["height"] <= 80
+            if output:
+                page.screenshot(path=str(output / "mobile-library-compact.png"), full_page=True)
+            first_row.locator("summary").click()
+            first_row.get_by_role("button", name="معاينة النص").click()
+            expect(page.locator("#preview-text")).to_contain_text("<script>")
+            expect(page.locator("#preview-status")).to_contain_text("معاينة مختصرة")
+            assert page.evaluate("window.library_xss") is None
+            if output:
+                page.screenshot(path=str(output / "mobile-library-preview.png"), full_page=True)
+            page.locator("#preview-close").click()
+            expect(page.locator("#preview-text")).to_have_text("")
+            record["stale"] = True
+            page.locator("#library-more").click()
+            expect(page.locator("#library-error")).to_contain_text("حدّث المكتبة")
+            record["stale"] = False
+            page.locator("#library-refresh").click()
+            expect(page.locator("#library-error")).to_have_text("")
+            page.locator("#library-more").click()
+            expect(page.locator("#library-files article")).to_have_count(2)
+            # Appending keyed rows preserves expanded content and keyboard context.
+            expect(page.locator("#library-files article").first.locator("details")).to_have_attribute("open", "")
+            record["uncertain"] = True
+            page.locator("#library-files article").first.get_by_role("button", name="حذف نسخة المكتبة").click()
+            page.locator("#confirm-yes").click()
+            expect(page.locator("#library-error")).to_contain_text("غير مؤكدة")
+            record["uncertain"] = False
+            expect(page.locator("#library-organize")).to_be_enabled(timeout=10000)
+            delete_requests = len([path for path, _ in record["posts"] if path.endswith("/library_delete")])
+            page.locator("#library-files article").first.get_by_role("button", name="حذف نسخة المكتبة").click()
+            expect(page.locator("#toast")).to_contain_text("حدّث المكتبة أولًا")
+            expect(page.locator("#confirmation")).to_be_hidden()
+            assert len([path for path, _ in record["posts"] if path.endswith("/library_delete")]) == delete_requests
+            page.locator("#library-refresh").click()
+            expect(page.locator("#library-status")).to_contain_text("عرض 1")
+            page.locator("#library-files article").first.get_by_role("button", name="حذف نسخة المكتبة").click()
+            expect(page.locator("#confirm-message")).to_contain_text(names["device-a"])
+            expect(page.locator("#confirm-message")).to_contain_text("نص المكتبة.txt")
+            expect(page.locator("#confirm-message")).to_contain_text("يبقى أصل المهمة محفوظًا")
+            page.locator("#confirm-yes").click()
+            expect(page.locator("#library-files .empty")).to_be_visible()
+            assert any(path.endswith("/action/library_delete") and data == {"file_id": "library-1", "expected_version": "v1", "confirm": True} for path, data in record["posts"])
+            page.locator("#results-tab").click()
+            expect(page.locator("#files article")).to_have_count(1), "Library delete must preserve job output"
+            record["library_capable"] = False
+            page.locator('[data-tab="queue"]').click()
+            page.locator("#refresh").click()
+            page.locator('[data-tab="files"]').click()
+            page.locator("#library-tab").click()
+            expect(page.locator("#library-compat")).to_contain_text("حدّث ورق")
+            expect(page.locator("#library-controls")).to_be_hidden()
+            page.locator("#results-tab").click()
+            expect(page.locator("#files article")).to_have_count(1)
+            record["library_capable"] = True
             page.locator('[data-tab="source"]').click()
             page.locator("#url").fill("https://youtu.be/for-device-a")
             page.locator("#change-device").click()
@@ -166,13 +247,25 @@ def main():
             record["uncertain"] = False
             for scheme in ("light", "dark"):
                 page.emulate_media(color_scheme=scheme)
-                for width, height in ((375, 812), (844, 390), (768, 1024)):
+                for width, height in ((320, 740), (375, 812), (844, 390), (768, 1024)):
                     page.set_viewport_size({"width": width, "height": height})
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.set_viewport_size({"width": 320, "height": 740})
+                page.evaluate("document.documentElement.style.fontSize='32px'")
+                for tab in ("queue", "source", "workers", "files"):
+                    page.locator(f'[data-tab="{tab}"]').click()
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (scheme, tab, "200% text")
+                page.evaluate("document.documentElement.style.fontSize='16px'")
             page.locator("#logout").click()
             expect(page).to_have_url(base + "/internet")
             expect(page.locator("#device-list a")).to_have_count(1)
             assert record["grants"] == ["device-b"]
+            # Pair-link imports remain inside the current origin and document.
+            assert not page.evaluate("window.waraqPwaBridge.acceptPairLink('https://evil.test/pair#abcdefghijklmnopqrstuvwxyz')")
+            assert page.evaluate("window.waraqPwaBridge.acceptPairLink(location.origin + '/pair#abcdefghijklmnopqrstuvwxyz')")
+            expect(page.locator("#internet-pair")).to_be_visible()
+            assert page.evaluate("location.hash") == ""
+            page.goto(base + "/internet")
             expect(page.locator("#internet-home")).to_contain_text("هاتفًا واحدًا فقط")
             expect(page.locator("#internet-home")).to_contain_text("بأكثر من كمبيوتر")
 
@@ -204,7 +297,9 @@ def main():
     print("Internet mobile browser passed: QR fragment removal, desktop approval waiting, exact target "
           "routing, authorized picker, fresh forms on device navigation, forbidden target, offline/recovery, "
           "no automatic mutation replay, device-specific logout, one-phone refusal with replacement guidance, "
-          "mobile layouts, no JS errors.")
+          "compact rows, library pagination/stale cursor, safe preview, uncertain delete refresh guard, "
+          "original job output retained, legacy capability fallback, PWA pair-link bridge, "
+          "320px/200%text layouts, no JS errors.")
 
 
 if __name__ == "__main__":

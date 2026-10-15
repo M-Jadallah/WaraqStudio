@@ -23,6 +23,7 @@ import threading
 import time
 import traceback
 from unittest.mock import patch
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -170,6 +171,7 @@ def browser_checks(base, bridges, gui, output):
             assert api(f"/api/devices/{id_b}/state")["status"] == 403
             assert api(f"/api/devices/{id_b}/action/queue",{"running":True,"device_id":id_a})["status"] == 403
             assert api(f"/api/devices/{id_b}/files/fake/transcript")["status"] == 403
+            assert api(f"/api/devices/{id_b}/library/files")["status"] == 403
             page.locator("#queue-toggle").click()
             page.locator("#confirm-yes").click()
             expect(page.locator("#queue-state")).to_have_text("الطابور يعمل")
@@ -181,7 +183,38 @@ def browser_checks(base, bridges, gui, output):
             job = gui.call(lambda: a.store.jobs()[0])
             assert gui.call(lambda: Path(a.store.get(job["id"])["transcript"]).read_bytes()) == uploaded_bytes
             assert gui.call(lambda: len(b.store.jobs())) == 0
+            gui.call(lambda: a.scheduler.library.publish(a.store.get(job["id"]), a.config.snapshot()))
             page.locator('[data-tab="files"]').click()
+            expect(page.locator("#library-files article")).to_have_count(50,timeout=15000)
+            listing = api(f"/api/devices/{id_a}/library/files?limit=50")["body"]
+            assert listing["total"] == 54 and listing["next_cursor"]
+            assert len(listing["files"]) == 50
+            assert not any("path" in field for entry in listing["files"] for field in entry)
+            next_listing = api(f"/api/devices/{id_a}/library/files?limit=50&cursor="+quote(listing["next_cursor"],safe=""))
+            assert next_listing["status"] == 200 and len(next_listing["body"]["files"]) == 4
+            assert not ({entry["file_id"] for entry in listing["files"]} & {entry["file_id"] for entry in next_listing["body"]["files"]})
+            page.locator("#library-more").click()
+            expect(page.locator("#library-files article")).to_have_count(54)
+            page.locator("#library-panel > #library-controls > details > summary").click()
+            page.locator("#library-search").fill("درس الإنترنت")
+            expect(page.locator("#library-files article")).to_have_count(1)
+            mirror_row = page.locator("#library-files article")
+            mirror_row.locator("summary").click()
+            mirror_row.get_by_role("button",name="معاينة النص").click()
+            expect(page.locator("#preview-text")).to_have_text(uploaded_bytes.decode("utf-8-sig"))
+            page.locator("#preview-close").click()
+            with page.expect_download() as mirror_download:
+                mirror_row.get_by_role("link").click()
+            assert Path(mirror_download.value.path()).read_bytes() == uploaded_bytes
+            mirror = api(f"/api/devices/{id_a}/library/files?query="+quote("درس الإنترنت"))["body"]["files"][0]
+            assert api(f"/api/devices/{id_b}/library/files/{mirror['file_id']}/preview")["status"] == 403
+            mirror_row.get_by_role("button",name="حذف نسخة المكتبة").click()
+            expect(page.locator("#confirm-message")).to_contain_text("كمبيوتر المنزل")
+            page.locator("#confirm-yes").click()
+            expect(page.locator("#library-files .empty")).to_be_visible(timeout=15000)
+            assert gui.call(lambda: Path(a.store.get(job["id"])["transcript"]).read_bytes()) == uploaded_bytes
+            assert api(f"/api/devices/{id_a}/library/files/{mirror['file_id']}/preview")["status"] == 404
+            page.locator("#results-tab").click()
             with page.expect_download() as transfer:
                 page.get_by_role("link",name="تنزيل التفريغ — درس الإنترنت").click()
             assert Path(transfer.value.path()).read_bytes() == uploaded_bytes
@@ -195,6 +228,13 @@ def browser_checks(base, bridges, gui, output):
             devices = api("/api/devices")
             assert devices["status"] == 200
             assert {d["device_id"] for d in devices["body"]["devices"]} == {id_a,id_b}
+            page.locator('[data-tab="files"]').click()
+            expect(page.locator("#library-files article")).to_have_count(3,timeout=15000)
+            b_files = api(f"/api/devices/{id_b}/library/files")["body"]
+            assert b_files["total"] == 3
+            assert all("جهازB" in entry["name"] for entry in b_files["files"])
+            assert api(f"/api/devices/{id_b}/library/files/{mirror['file_id']}/preview")["status"] == 404
+            assert api(f"/api/devices/{id_a}/library/files/{b_files['files'][0]['file_id']}/preview")["status"] == 404
             page.locator("#change-device").click()
             expect(page.locator("#device-list a")).to_have_count(2)
             page.get_by_role("link",name="كمبيوتر المنزل",exact=True).click()
@@ -218,6 +258,12 @@ def browser_checks(base, bridges, gui, output):
             gui.call(a.internet.start)
             gui.wait(lambda: a.internet.state()["connected"])
             assert api(f"/api/devices/{id_a}/state")["status"] == 200
+            expect(page.locator("#offline")).to_be_hidden(timeout=10000)
+            page.locator('[data-tab="files"]').click()
+            expect(page.locator("#library-files article")).to_have_count(50,timeout=15000)
+            page.locator("#library-files article").first.locator("summary").click()
+            page.locator("#library-files article").first.get_by_role("button",name="معاينة النص").click()
+            expect(page.locator("#preview-text")).to_contain_text("ملف مستقل")
             gui.call(a.internet.refreshPhones)
             phones=gui.wait(lambda: a.internet.state()["phones"])
             assert len(phones)==1
@@ -230,7 +276,15 @@ def browser_checks(base, bridges, gui, output):
             assert denied["status"]==403,denied
             assert api(f"/api/devices/{id_a}/action/queue",{"running":False})["status"]==403
             assert api(f"/api/devices/{id_a}/files/{job['id']}/transcript")["status"]==403
+            assert api(f"/api/devices/{id_a}/library/files")["status"]==403
+            assert api(f"/api/devices/{id_a}/library/files/{mirror['file_id']}/preview")["status"]==403
+            assert api(f"/api/devices/{id_a}/library/files/{mirror['file_id']}/download")["status"]==403
             assert api(f"/api/devices/{id_b}/state")["status"]==200
+            expect(page.locator("#workspace")).to_be_hidden(timeout=10000)
+            expect(page.locator("#file-preview")).to_be_hidden()
+            expect(page.locator("#preview-text")).to_have_text("")
+            expect(page.locator("#library-files article")).to_have_count(0)
+            expect(page.locator("#device-list a")).to_have_count(1)
             page.goto(base+"/internet")
             expect(page.locator("#device-list a")).to_have_count(1)
             page.get_by_role("link",name="كمبيوتر المكتب",exact=True).click()
@@ -286,6 +340,11 @@ def main():
                     desktop=home/f"desktop-{index}"
                     desktop.mkdir()
                     config=Config(desktop)
+                    library_dir = Path(config.snapshot()["library_root"]) / "التفريغات"
+                    library_dir.mkdir(parents=True)
+                    for number in range(53 if index == 0 else 3):
+                        (library_dir / f"جهاز{'A' if index == 0 else 'B'}-{number:03d}.txt").write_text(
+                            f"ملف مستقل عن سجل المهام {index} {number}", encoding="utf-8")
                     store=Store(desktop/"tasks.sqlite3")
                     vault=Vault()
                     scheduler=Scheduler(store,config,vault)
@@ -311,6 +370,7 @@ def main():
             finally:
                 for bridge in bridges:
                     bridge.internet.stop();bridge.internet_commands.stop();bridge.remote.stop();bridge.scheduler.shutdown()
+                    bridge.closeRemoteLibrary()
                 # Continue pumping Qt so already queued commands are cancelled before DB cleanup.
                 until=time.monotonic()+12
                 while time.monotonic()<until and any(b.internet._thread and b.internet._thread.is_alive() for b in bridges):
@@ -330,7 +390,8 @@ def main():
                 app.processEvents()
     print("Full TLS Internet stack passed: external QR/link navigation, real enrollment/WSS, two Qt desktop identities, phone approval, "
           "target tampering denied, queue isolation, BOM TXT byte preservation/download, task cancellation, "
-          "independent second pairing, picker, offline503 without fallback, native phone revocation, cookie "
+          "actual paginated library, bounded safe preview, mirror download/delete preserving original, "
+          "independent file IDs, second pairing, picker, offline503 without fallback, native phone revocation, cookie "
           "reload, no JS errors, and clean connector/relay/browser shutdown.")
 
 

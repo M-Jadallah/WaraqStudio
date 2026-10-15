@@ -25,10 +25,11 @@ from urllib.parse import urlsplit, urlunsplit, urlencode
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from .config import atomic_json
-from .remote_common import RemoteError
+from .remote_common import RemoteError, REQUEST_CONTEXT
 
-ACTIONS = frozenset(("state", "file", "queue", "cancel", "retry", "stage", "discover", "enqueue", "upload"))
-MUTATING = ACTIONS - {"state", "file"}
+ACTIONS = frozenset(("state", "file", "queue", "cancel", "retry", "stage", "discover", "enqueue", "upload",
+                     "library_list", "library_file", "library_preview", "library_delete", "library_organize"))
+MUTATING = ACTIONS - {"state", "file", "library_list", "library_file", "library_preview"}
 MAX_MESSAGE = 15 * 1024 * 1024
 MAX_FILE = 100 * 1024 * 1024
 MAX_JOURNAL = 4096
@@ -227,6 +228,9 @@ class InternetAccess(QObject):
             for future, cancel in self._pending.values():
                 cancel.set()
                 future.cancel()
+                child = getattr(future, "_waraq_child", None)
+                if child is not None:
+                    child.cancel()
             ws, self._ws = self._ws, None
             self._controls.clear()
             while not self._outbox.empty():
@@ -285,6 +289,9 @@ class InternetAccess(QObject):
                                     if pending:
                                         pending[1].set()
                                         pending[0].cancel()
+                                        child = getattr(pending[0], "_waraq_child", None)
+                                        if child is not None:
+                                            child.cancel()
                             elif kind == "control_result":
                                 with self._lock:
                                     entry = self._controls.pop(frame.get("id"), None)
@@ -390,28 +397,67 @@ class InternetAccess(QObject):
                             return
                         raise RemoteError("نتيجة طلب سابق غير مؤكدة. حدّث الحالة قبل إرسال أمر جديد.", 409)
                     self._record(ident, {"action": action, "fingerprint": fingerprint, "at": time.time(), "done": False})
+            device_id = self._identity["device_id"]
+
+            def complete(value=None, error=None):
+                try:
+                    if error is None and isinstance(value, Future):
+                        value = value.result()
+                    response = ({"ok": False, "error": str(error), "status": error.status}
+                                if isinstance(error, RemoteError) else {"ok": True, "result": value})
+                    if error is not None and not isinstance(error, RemoteError):
+                        raise error
+                    if action in MUTATING:
+                        with self._lock:
+                            if self._identity.get("device_id") != device_id:
+                                raise RemoteError("أُلغي تسجيل الجهاز؛ حدّث الحالة.", 503)
+                            self._record(ident, {"action": action, "fingerprint": fingerprint, "at": time.time(),
+                                                "done": True, "result": response})
+                    if error is not None:
+                        raise error
+                    future.set_result(value)
+                except Exception as exc:
+                    if not future.done():
+                        future.set_exception(exc)
+
+            context = REQUEST_CONTEXT.set({"cancel": cancel, "deadline": deadline})
             try:
                 result = self.executor(action, data)
-                response = {"ok": True, "result": result}
-            except RemoteError as exc:
-                response = {"ok": False, "error": str(exc), "status": exc.status}
-                if action in MUTATING:
-                    with self._lock:
-                        self._record(ident, {"action": action, "fingerprint": fingerprint, "at": time.time(), "done": True, "result": response})
-                raise
-            if action in MUTATING:
-                with self._lock:
-                    self._record(ident, {"action": action, "fingerprint": fingerprint, "at": time.time(), "done": True, "result": response})
-            future.set_result(result)
+            except Exception as exc:
+                complete(error=exc)
+                return
+            finally:
+                REQUEST_CONTEXT.reset(context)
+            if isinstance(result, Future):
+                future._waraq_child = result
+                def finished(child):
+                    try:
+                        complete(child.result())
+                    except Exception as exc:
+                        complete(error=exc)
+                result.add_done_callback(finished)
+            else:
+                complete(result)
         except Exception as exc:
             future.set_exception(exc)
 
     def _answer(self, ident, future, cancel, generation, deadline, ws):
         try:
-            result = future.result(max(0, deadline - time.time()))
+            while not future.done():
+                if cancel.is_set() or generation != self._generation:
+                    raise CancelledError()
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError()
+                try:
+                    future.result(min(.2, remaining))
+                except TimeoutError:
+                    if future.done():
+                        raise
+            result = future.result()
             if cancel.is_set() or generation != self._generation or time.time() >= deadline:
                 return
-            if isinstance(result, Path):
+            if isinstance(result, Path) or (callable(getattr(result, "open", None)) and isinstance(getattr(result, "name", None), str)):
                 self._stream_file(ws, ident, result, cancel, generation, deadline)
             else:
                 self._send(ws, {"type": "response", "id": ident, "ok": True, "result": result})
@@ -419,6 +465,9 @@ class InternetAccess(QObject):
             if isinstance(exc, (CancelledError, TimeoutError)):
                 future.cancel()
                 cancel.set()
+                child = getattr(future, "_waraq_child", None)
+                if child is not None:
+                    child.cancel()
             if generation == self._generation:
                 error = str(exc) if isinstance(exc, RemoteError) else "تعذر إكمال الطلب. حدّث الحالة قبل إعادة إرسال الأمر."
                 try:
@@ -432,7 +481,7 @@ class InternetAccess(QObject):
                     self._pending.pop(ident, None)
 
     def _stream_file(self, ws, ident, path, cancel, generation, deadline):
-        with path.open("rb") as stream:
+        with (path.open("rb") if isinstance(path, Path) else path.open()) as stream:
             size = os.fstat(stream.fileno()).st_size
             if size > MAX_FILE:
                 raise RemoteError("الملف يتجاوز حد النقل البالغ 100 ميغابايت.", 413)

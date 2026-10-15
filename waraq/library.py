@@ -62,24 +62,29 @@ class Library:
         with self._lock:
             return self._publish(job, cfg)
 
-    def publish_current(self, store, job_id, cfg):
+    def publish_current(self, store, job_id, cfg, check=None):
         """Read the latest assignment while holding the mirror lock."""
         with self._lock:
+            if check: check()
             job = store.get(job_id)
-            return self._publish(job, cfg) if job else []
+            return self._publish(job, cfg, check) if job else []
 
-    def _publish(self, job, cfg):
+    def _publish(self, job, cfg, check=None):
+        if check: check()
         root = self.root(cfg)
+        if check: check(root)
         root.mkdir(parents=True, exist_ok=True)
         manifest = self._manifest(root)
         copied, dirty = [], False
         for kind in FOLDERS:
+            if check: check()
             if kind == "audio" and not cfg.get("library_copy_audio"):
                 continue
             source = Path(job.get(kind) or "")
             if not source.is_file():
                 continue
             folder = root / self._relative(job, kind)
+            if check: check(folder)
             folder.mkdir(parents=True, exist_ok=True)
             if not folder.resolve().is_relative_to(root.resolve()):
                 raise ValueError("مسار المجلد يخرج من المكتبة.")
@@ -89,30 +94,36 @@ class Library:
             target = folder / name
             if old != target and target.exists():
                 target = folder / self._name(job, source, folder)
+            if check: check(target)
             needs_copy = True
             if target.exists():
                 stat, origin = target.stat(), source.stat()
                 needs_copy = stat.st_size != origin.st_size or stat.st_mtime < origin.st_mtime - 1
             if needs_copy:
+                if check: check()
                 temporary = target.with_name(target.name + ".part")
+                if check: check(temporary)
                 shutil.copy2(source, temporary)
+                if check: check()
                 os.replace(temporary, target)
                 copied.append(target.name)
             if old and old != target and old.is_file():
+                if check: check(old)
                 old.unlink()
             relative = str(target.relative_to(root))
             if manifest.get(key) != relative:
                 manifest[key] = relative
                 dirty = True
         if dirty:
+            if check: check(root / MANIFEST)
             atomic_json(root / MANIFEST, manifest)
         return copied
 
     def organize_all(self, jobs, cfg):
         return sum(len(self.publish(job, cfg)) for job in jobs)
 
-    def organize_current(self, store, cfg):
-        return sum(len(self.publish_current(store, job["id"], cfg)) for job in store.jobs())
+    def organize_current(self, store, cfg, check=None):
+        return sum(len(self.publish_current(store, job["id"], cfg, check)) for job in store.jobs())
 
     def scan(self, cfg, limit=3000):
         root = self.root(cfg)

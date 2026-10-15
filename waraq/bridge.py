@@ -251,6 +251,11 @@ class Bridge(QObject):
         self.internet_commands.stop()
 
     @Slot()
+    def closeRemoteLibrary(self):
+        """Cancel shared library work only when the desktop itself exits."""
+        self._remote_library.close()
+
+    @Slot()
     def createInternetPair(self):
         self.internet.createPair()
 
@@ -1160,6 +1165,7 @@ class Bridge(QObject):
         self._update_cancel.set()
         self.remote.stop()
         self.stopInternet()
+        self.closeRemoteLibrary()
         self.scheduler.shutdown()
         return True
 
