@@ -88,6 +88,14 @@ def _windows_final_path(stream):
     return Path(value)
 
 
+def _canonical_windows_path(path):
+    # absolute() preserves DOS 8.3 names (for example RUNNER~1 in TEMP) and
+    # SUBST drive aliases. The native opened handle reports the normalized
+    # long path, so compare against the equally canonical expected pathname.
+    # Callers still reject every reparse ancestor before reaching this helper.
+    return os.path.normcase(str(Path(path).resolve(strict=True)))
+
+
 def _guard_internal_path(root, path):
     root, path = Path(root).absolute(), Path(path).absolute()
     if not path.is_relative_to(root):
@@ -110,7 +118,7 @@ def _read_manifest_checked(root):
     descriptor = os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
     with os.fdopen(descriptor,'rb') as stream:
         _guard_internal_path(root,path)
-        if os.name == 'nt' and os.path.normcase(str(_windows_final_path(stream))) != os.path.normcase(str(path.absolute())):
+        if os.name == 'nt' and os.path.normcase(str(_windows_final_path(stream))) != _canonical_windows_path(path):
             raise RemoteError('تغير سجل المكتبة؛ لم يُحذف الملف.',409)
         opened = os.fstat(stream.fileno())
         if (opened.st_dev,opened.st_ino) != (expected.st_dev,expected.st_ino) or not stat.S_ISREG(opened.st_mode):
@@ -146,7 +154,7 @@ class RemoteLibraryFile:
                 stream = os.fdopen(descriptor, 'rb')
                 try:
                     _validate_path(Path(row['root']), row['relative'])
-                    if os.name == 'nt' and os.path.normcase(str(_windows_final_path(stream))) != os.path.normcase(str(target.absolute())):
+                    if os.name == 'nt' and os.path.normcase(str(_windows_final_path(stream))) != _canonical_windows_path(target):
                         raise RemoteError('تغير موقع الملف. حدّث المكتبة.', 409)
                     info = os.fstat(stream.fileno())
                     if not stat.S_ISREG(info.st_mode) or _version(info) != row['version']:
@@ -420,7 +428,7 @@ class RemoteLibrary:
                     root=Path(row['root'])
                     manifest=_read_manifest_checked(root)
                     manifest={k:v for k,v in manifest.items() if k.rsplit('|',1)[-1] not in FOLDERS or
-                              self.library._old_path(root,k.rsplit('|',1)[-1],v)!=target}
+                              self.library._old_path(root,k.rsplit('|',1)[-1],v)!=target.resolve(strict=True)}
                     with self.bridge.store.lock:
                         for job in self.bridge.store.jobs():
                             for key in ('input_path','audio','transcript','document'):
@@ -456,7 +464,7 @@ class RemoteLibrary:
             descriptor=msvcrt.open_osfhandle(handle,os.O_RDONLY|os.O_BINARY)
             with os.fdopen(descriptor,'rb') as stream:
                 _validate_path(Path(row['root']),row['relative'])
-                if os.path.normcase(str(_windows_final_path(stream)))!=os.path.normcase(str(target.absolute())) or _version(os.fstat(stream.fileno()))!=row['version']:
+                if os.path.normcase(str(_windows_final_path(stream)))!=_canonical_windows_path(target) or _version(os.fstat(stream.fileno()))!=row['version']:
                     raise RemoteError('تغير الملف قبل الحذف.',409)
                 disposition=wintypes.BOOL(True)
                 if not kernel.SetFileInformationByHandle(handle,4,ctypes.byref(disposition),ctypes.sizeof(disposition)):raise OSError('delete')

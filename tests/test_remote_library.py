@@ -415,3 +415,42 @@ def test_malformed_manifest_fails_before_deleting_library_file(env):
         with pytest.raises(RemoteError):
             registry.delete({'file_id':row['file_id'],'expected_version':row['version'],'confirm':True},config.snapshot()).result(5)
         assert path.read_text()=='safe'
+
+
+@pytest.mark.skipif(os.name!='nt',reason='Windows native DOS alias semantics')
+def test_windows_short_path_alias_preview_download_manifest_and_cas_delete(env):
+    import ctypes
+    from ctypes import wintypes
+    from waraq.library import MANIFEST
+    from waraq.remote_library import _windows_final_path, _canonical_windows_path
+    bridge,registry,root,config,store,app=env
+    long_root=root/'Long Library Directory For Alias Test'
+    transcripts=long_root/'التفريغات'
+    transcripts.mkdir(parents=True)
+    path=transcripts/'Long Lesson Filename For Alias Test.txt'
+    content=b'\xef\xbb\xbf'+ 'نص محفوظ بلا تغيير'.encode()
+    path.write_bytes(content)
+    (long_root/MANIFEST).write_text(json.dumps({'old-job|transcript':str(Path('التفريغات')/path.name)}),encoding='utf-8')
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.GetShortPathNameW.argtypes=[wintypes.LPCWSTR,wintypes.LPWSTR,wintypes.DWORD]
+    kernel.GetShortPathNameW.restype=wintypes.DWORD
+    buffer=ctypes.create_unicode_buffer(32768)
+    size=kernel.GetShortPathNameW(str(long_root),buffer,len(buffer))
+    assert 0<size<len(buffer),'GetShortPathNameW failed'
+    short_root=Path(buffer.value)
+    if os.path.normcase(str(short_root))==os.path.normcase(str(long_root)):
+        pytest.skip('This NTFS volume has 8.3 alias creation disabled')
+    assert short_root.is_dir()
+    config.data['library_root']=str(short_root)
+    item=ready(registry,config)['files'][0]
+    capability=registry.file({'file_id':item['file_id'],'expected_version':item['version']},config.snapshot())
+    with capability.open() as stream:
+        assert stream.read()==content
+        assert os.path.normcase(str(_windows_final_path(stream)))==_canonical_windows_path(path)
+    preview=registry.preview({'file_id':item['file_id'],'expected_version':item['version']},config.snapshot()).result(5)
+    assert preview['text']=='نص محفوظ بلا تغيير'
+    # Reading and replacing the manifest, and the native CAS delete handle,
+    # exercise the other two canonical final-path comparisons through the alias.
+    result=registry.delete({'file_id':item['file_id'],'expected_version':item['version'],'confirm':True},config.snapshot()).result(5)
+    assert result['revision'] and not path.exists()
+    assert json.loads((long_root/MANIFEST).read_text(encoding='utf-8'))=={}
