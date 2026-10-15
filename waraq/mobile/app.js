@@ -136,10 +136,11 @@ async function api(path, data) {
 }
 async function poll() {
   if (!ready || !pageActive || ui.polling || document.hidden || (internetMode && !targetDevice)) return;
+  const epoch = ui.sessionEpoch;
   ui.polling = true;
   try {
     const state = await api(devicePath("/state"));
-    if (!pageActive) return;
+    if (!pageActive || epoch !== ui.sessionEpoch) return;
     if (!ui.state) {
       document.querySelectorAll("[data-page]").forEach((page) => {
         page.hidden = page.dataset.page !== "queue";
@@ -153,6 +154,10 @@ async function poll() {
     ui.online = true;
     $("login").hidden = true;
     $("workspace").hidden = false;
+    if (internetMode) {
+      $("device-context").hidden = false;
+      $("internet-home").hidden = true;
+    }
     $("navigation").hidden = false;
     $("logout").hidden = false;
     $("offline").hidden = true;
@@ -160,7 +165,7 @@ async function poll() {
     text("connection", internetMode ? "متصل بالجهاز المحدد" : "متصل بالكمبيوتر");
     render();
   } catch (error) {
-    if (!pageActive) return;
+    if (!pageActive || epoch !== ui.sessionEpoch) return;
     if (error.status !== 401 && error.status !== 403) {
       ui.online = false;
       $("offline").hidden = false;
@@ -941,6 +946,7 @@ async function loadDevices() {
       }
     }
   } catch (error) {
+    if (!pageActive || epoch !== ui.sessionEpoch) return;
     if (error.status === 401) empty($("device-list"), "لم يقترن هذا المتصفح بأي كمبيوتر بعد.");
     else text("device-error", error.message);
   } finally { $("devices-refresh").disabled = false; }

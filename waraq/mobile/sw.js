@@ -1,6 +1,6 @@
 /* Public UI only. Bump VERSION whenever a precached asset changes. */
 'use strict';
-const VERSION = '2026-10-16-pwa-1';
+const VERSION = '2026-10-16-pwa-2';
 const CACHE = 'waraq-public-' + VERSION;
 const PUBLIC_ASSETS = [
   '/pwa-shell.html', '/offline.html', '/manifest.webmanifest',

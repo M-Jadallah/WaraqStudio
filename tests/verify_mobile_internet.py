@@ -24,7 +24,8 @@ def main():
     record = {"approved": False, "offline": False, "uncertain": False, "reject_second_phone": False,
               "posts": [], "state_requests": [], "grants": ["device-a", "device-b"],
               "library_calls": [], "deleted": False, "library_capable": True, "stale": False,
-              "revoke_preview": False}
+              "revoke_preview": False, "hold_next_state": False, "deny_state": False}
+    state_held, release_state = threading.Event(), threading.Event()
     names = {"device-a": "كمبيوتر المنزل", "device-b": "كمبيوتر المكتب"}
 
     def state(device):
@@ -70,7 +71,15 @@ def main():
                     self.reply({"error": "هذا الهاتف غير مقترن بهذا الكمبيوتر"}, 403)
                 elif self.path.endswith("/state"):
                     record["state_requests"].append(device)
-                    if record["offline"]:
+                    if record["hold_next_state"]:
+                        record["hold_next_state"] = False
+                        captured = state(device)
+                        state_held.set()
+                        assert release_state.wait(8), "Browser failed to release held state response"
+                        self.reply(captured)
+                    elif record["deny_state"]:
+                        self.reply({"error": "أُلغي اقتران الهاتف"}, 403)
+                    elif record["offline"]:
                         self.reply({"error": "الجهاز غير متصل"}, 503)
                     else:
                         self.reply(state(device))
@@ -211,6 +220,31 @@ def main():
             page.locator("#results-tab").click()
             expect(page.locator("#files article")).to_have_count(1)
             record["library_capable"] = True
+            # A state response authorized before revocation must not resurrect
+            # private UI after a concurrent preview detects HTTP403.
+            expect(page.locator("#workspace")).to_be_visible()
+            page.wait_for_function("!ui.polling")
+            record["hold_next_state"] = True
+            assert page.evaluate("""() => {
+                if (ui.polling) return false;
+                window.resumeAuthorizedPoll = poll;
+                window.poll = () => Promise.resolve();
+                window.heldStatePromise = window.resumeAuthorizedPoll();
+                return true;
+            }"""), "Could not isolate state request from the automatic polling timer"
+            assert state_held.wait(5), "State request was not held"
+            record["revoke_preview"] = True
+            page.evaluate("() => api(devicePath('/library/files/library-1/preview')).catch(() => null)")
+            expect(page.locator("#workspace")).to_be_hidden()
+            record["deny_state"] = True
+            release_state.set()
+            page.evaluate("window.heldStatePromise")
+            expect(page.locator("#workspace")).to_be_hidden()
+            expect(page.locator("#jobs article")).to_have_count(0)
+            expect(page.locator("#library-files article")).to_have_count(0)
+            record["deny_state"], record["revoke_preview"] = False, False
+            page.evaluate("async () => { window.poll=window.resumeAuthorizedPoll; await poll(); }")
+            expect(page.locator("#workspace")).to_be_visible()
             page.locator('[data-tab="source"]').click()
             page.locator("#url").fill("https://youtu.be/for-device-a")
             page.locator("#change-device").click()
@@ -291,6 +325,7 @@ def main():
             assert not errors, errors
             browser.close()
     finally:
+        release_state.set()
         server.shutdown()
         thread.join(3)
         server.server_close()

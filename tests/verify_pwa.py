@@ -68,7 +68,7 @@ def main():
         def do_GET(self):
             path = self.path.split('?')[0]
             if path == '/sw.js':
-                data = (MOBILE/'sw.js').read_text('utf-8').replace('2026-10-16-pwa-1',f'test-{record["version"]}')
+                data = (MOBILE/'sw.js').read_text('utf-8').replace('2026-10-16-pwa-2',f'test-{record["version"]}')
                 self.reply(data.encode(),'text/javascript'); return
             if path == '/api/bootstrap': self.reply({'mode':'internet'}); return
             if path == '/api/devices': self.reply({'devices':[]}); return
