@@ -98,6 +98,35 @@ def test_host_origin_csrf_and_json_are_strict(setup_gateway):
     assert client.get('/api/bootstrap').headers['cache-control'] == 'no-store'
 
 
+@pytest.mark.parametrize('path', ['/', '/internet', '/pair', '/devices/device-A'])
+def test_qr_external_navigation_can_open_only_public_pages(setup_gateway, path):
+    client, _ = setup_gateway
+    navigation = {'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate',
+                  'Sec-Fetch-Dest': 'document'}
+    response = client.get(path, headers=navigation, follow_redirects=False)
+    assert response.status_code == (302 if path == '/' else 200)
+    assert COOKIE not in response.cookies and PENDING_COOKIE not in response.cookies
+    for invalid in ({'Sec-Fetch-Mode': 'cors'}, {'Sec-Fetch-Dest': 'iframe'},
+                    {'Sec-Fetch-Dest': 'script'}, {'Sec-Fetch-Dest': 'object'},
+                    {'Origin': 'https://attacker.test'}, {'Host': 'attacker.test'}):
+        assert client.get(path, headers={**navigation, **invalid}, follow_redirects=False).status_code == 403
+
+
+def test_qr_navigation_exception_never_exposes_api_or_websockets(setup_gateway):
+    client, _ = setup_gateway
+    navigation = {'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate',
+                  'Sec-Fetch-Dest': 'document'}
+    for path in ('/api/bootstrap', '/api/devices', '/api/devices/device-A/state',
+                 '/api/devices/device-A/files/job/document', '/api/pair/status/claim', '/healthz', '/assets/app.js'):
+        assert client.get(path, headers=navigation).status_code == 403
+    for path in ('/api/pair/start', '/api/logout', '/api/devices/device-A/action/queue', '/pair'):
+        assert client.post(path, json={}, headers={**HEADERS, **navigation}).status_code == 403
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect('wss://relay.test/ws/device?device_id=device-A', headers=navigation):
+            pass
+    assert exc.value.code == 4403
+
+
 def test_wrong_device_secret_and_duplicate_connection_rejected(setup_gateway):
     client, gateway = setup_gateway
     a, b = enroll(client, gateway), enroll(client, gateway, 'B')

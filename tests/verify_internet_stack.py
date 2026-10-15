@@ -9,7 +9,9 @@ from __future__ import annotations
 from concurrent.futures import Future
 import asyncio
 import datetime
+import html
 import ipaddress
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -106,6 +108,32 @@ def browser_checks(base, bridges, gui, output):
             errors = []
             page.on("pageerror", lambda exc: errors.append(str(exc)))
 
+            def open_scanned_link(url):
+                # Use a genuinely different site, rather than spoofing browser
+                # headers, to cover opening QR links from another app/site.
+                class ScannerPage(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        content = ('<a id="scanned-link" href="'+html.escape(url, quote=True)+'">Open Waraq</a>').encode()
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'text/html; charset=utf-8')
+                        self.send_header('Content-Length', str(len(content)))
+                        self.end_headers()
+                        self.wfile.write(content)
+                    def log_message(self, *_args):
+                        pass
+                scanner = ThreadingHTTPServer(('127.0.0.1', 0), ScannerPage)
+                thread = threading.Thread(target=scanner.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    page.goto(f'http://localhost:{scanner.server_port}/')
+                    with page.expect_response(lambda r: r.url == base+'/pair' and r.request.is_navigation_request()) as loaded:
+                        page.locator('#scanned-link').click()
+                    response = loaded.value
+                    assert response.request.all_headers()['sec-fetch-site'] == 'cross-site'
+                    assert response.status == 200, response.status
+                finally:
+                    scanner.shutdown(); scanner.server_close(); thread.join(3)
+
             def api(path, data=None):
                 return page.evaluate("""async ({path,data}) => {
                   const options = data === null ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-Waraq-Client':'1'},body:JSON.stringify(data)};
@@ -118,7 +146,7 @@ def browser_checks(base, bridges, gui, output):
                 gui.call(bridge.internet.createPair)
                 url = gui.wait(lambda: bridge.internet.state()["pairUrl"])
                 assert url.startswith(base+"/pair#")
-                page.goto(url)
+                open_scanned_link(url)
                 expect(page.locator("#internet-pair")).to_be_visible()
                 assert page.evaluate("location.hash") == ""
                 page.locator("#phone-name").fill("هاتف الاختبار")
@@ -300,7 +328,7 @@ def main():
                 for bridge in bridges:bridge.store.db.close()
                 database.engine.dispose()
                 app.processEvents()
-    print("Full TLS Internet stack passed: real enrollment/WSS, two Qt desktop identities, phone approval, "
+    print("Full TLS Internet stack passed: external QR/link navigation, real enrollment/WSS, two Qt desktop identities, phone approval, "
           "target tampering denied, queue isolation, BOM TXT byte preservation/download, task cancellation, "
           "independent second pairing, picker, offline503 without fallback, native phone revocation, cookie "
           "reload, no JS errors, and clean connector/relay/browser shutdown.")

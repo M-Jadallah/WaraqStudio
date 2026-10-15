@@ -1,5 +1,9 @@
 # Verification — 2026-09-19 · منطق إعادة تنزيل YouTube + ضغط الواجهة
 
+## QR navigation regression — 2026-10-16
+
+The deployed gateway returned 200 for direct `/pair` GET but 403 for the same page with `Sec-Fetch-Site: cross-site`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`, reproducing the Android QR report. The middleware now allows that GET navigation only for public HTML-shell routes; Host/Origin validation, cross-site API/assets/WebSocket rejection, mutation headers, pairing approval and device grants remain enforced. Added five gateway cases covering public routes, iframe/script/object/fetch rejection and protected requests. The real TLS/Edge acceptance now follows a link from an actual different site on both pairings, checks the browser's cross-site metadata and completes approval and A/B isolation.
+
 ## Repository delivery paths — 2026-10-15
 
 GitHub's [container gate on commit f6e3def](https://github.com/M-Jadallah/WaraqStudio/actions/runs/38799704673) passed on Ubuntu, including the real production image and PostgreSQL acceptance. A Windows TLS test initially passed in CI but failed in the parallel release run; the test now binds/connects explicit IPv4 with a matching certificate SAN and allows the connector's full handshake deadline. Certificate and hostname validation remain enabled. The real local two-desktop/browser TLS stack passed again after that test-only adjustment.

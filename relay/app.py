@@ -58,7 +58,16 @@ class SecurityMiddleware:
         host = headers.get(b'host', b'').decode('latin1').lower()
         origin = headers.get(b'origin', b'').decode('latin1')
         bad = host != self.host or bool(origin and origin != self.settings.public_base_url)
-        if headers.get(b'sec-fetch-site') == b'cross-site':
+        # QR scanners and external links can initiate a cross-site top-level
+        # navigation. These routes serve only the public HTML shell; actual
+        # pairing, device state, commands and files remain separately protected.
+        path = scope.get('path', '')
+        public_page = path in ('/', '/internet', '/pair') or (
+            path.startswith('/devices/') and len(path.split('/')) == 3 and bool(path.split('/')[2]))
+        public_navigation = (scope['type'] == 'http' and scope.get('method') == 'GET' and public_page
+                             and headers.get(b'sec-fetch-mode') == b'navigate'
+                             and headers.get(b'sec-fetch-dest') == b'document')
+        if headers.get(b'sec-fetch-site') == b'cross-site' and not public_navigation:
             bad = True
         if scope['type'] == 'http' and scope['method'] not in ('GET', 'HEAD'):
             if scope['path'] != '/api/enroll':

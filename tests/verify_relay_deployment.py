@@ -44,8 +44,9 @@ assert database.engine.dialect.name == 'postgresql'
 index = next(i for i in inspect(database.engine).get_indexes('grants') if i['name'] == 'uq_grants_device_id')
 assert index['unique'] and index['column_names'] == ['device_id']
 
-def http(path, cookies=None, data=None):
+def http(path, cookies=None, data=None, extra_headers=None):
     headers = {'Host': host, 'Origin': settings.public_base_url, 'X-Waraq-Client': '1'}
+    headers.update(extra_headers or {})
     if cookies:
         headers['Cookie'] = '; '.join(k+'='+v for k,v in cookies.items())
     if data is not None:
@@ -77,6 +78,9 @@ if sys.argv[1] == 'persisted':
     sys.exit(0)
 
 assert http('/internet')[0] == 200
+qr_navigation = {'Sec-Fetch-Site':'cross-site', 'Sec-Fetch-Mode':'navigate', 'Sec-Fetch-Dest':'document'}
+assert http('/pair', extra_headers=qr_navigation)[0] == 200
+assert http('/api/devices', extra_headers=qr_navigation)[0] == 403
 for asset in ('app.js', 'style.css', 'icon.svg'):
     assert http('/assets/'+asset)[0] == 200
 
