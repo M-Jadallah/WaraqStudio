@@ -16,6 +16,7 @@ import ssl
 import sys
 import tempfile
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 MOBILE = ROOT / 'waraq/mobile'
@@ -38,6 +39,24 @@ def certificate(home):
     cp.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     kp.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
     return cp, kp
+
+
+def wait_async(page, predicate, timeout=30000):
+    """Poll async browser APIs by awaiting evaluate(), not a truthy Promise in
+    wait_for_function. Retry the expected context replacement during SW reload.
+    The predicate is trusted test code, never page/user input.
+    """
+    from playwright.sync_api import Error
+    until = time.monotonic()+timeout/1000
+    while time.monotonic() < until:
+        try:
+            if page.evaluate(predicate):
+                return
+        except Error as error:
+            if 'Execution context was destroyed' not in str(error) and 'Cannot find context' not in str(error):
+                raise
+        page.wait_for_timeout(50)
+    raise AssertionError('Async browser condition timed out: '+predicate)
 
 
 def main():
@@ -182,26 +201,42 @@ def main():
                 expect(page.locator('#pwa-pair-dialog')).not_to_be_visible()
                 assert '#' not in page.url and page.locator('#pwa-link').input_value()==''
                 assert page.evaluate("t=>![...Object.values(localStorage),...Object.values(sessionStorage)].some(v=>v.includes(t))",ticket)
+                assert not errors,errors
+                # A fresh browser context isolates update lifecycle assertions
+                # from register()/soft-update jobs queued by the navigation and
+                # camera tests above. Otherwise a second failed update can
+                # recreate its staging cache just after the first is cleaned.
+                context.close()
+                context=browser.new_context(ignore_https_errors=True,viewport={'width':390,'height':844},locale='ar-JO')
+                page=context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
                 page.goto(origin+'/internet')
+                page.wait_for_function('()=>!!navigator.serviceWorker.controller')
                 # A failed precache keeps the existing active cache intact.
                 record['version']=2;record['fail_asset']=True
-                page.evaluate("async()=>await(await navigator.serviceWorker.getRegistration()).update()")
-                page.wait_for_function("""async()=>{
+                page.evaluate("""async()=>{
+                    window.failedWorker=null;
                     const reg=await navigator.serviceWorker.getRegistration();
-                    return !reg.installing && JSON.stringify(await caches.keys())===JSON.stringify(['waraq-public-test-1']);
-                }""",timeout=30000)
-                assert page.evaluate("async()=>await caches.keys()") == ['waraq-public-test-1']
+                    reg.addEventListener('updatefound',()=>{window.failedWorker=reg.installing;},{once:true});
+                    await reg.update();
+                }""")
+                wait_async(page,"""async()=>{
+                    return window.failedWorker?.state==='redundant' &&
+                      !(await navigator.serviceWorker.getRegistration()).installing &&
+                      JSON.stringify(await caches.keys())===JSON.stringify(['waraq-public-test-1']);
+                }""")
+                failed_cache_names = page.evaluate("async()=>await caches.keys()")
+                assert failed_cache_names == ['waraq-public-test-1'], failed_cache_names
                 record['fail_asset']=False;record['version']=3
                 page.evaluate("async()=>await(await navigator.serviceWorker.getRegistration()).update()")
-                page.wait_for_function("async()=>!!(await navigator.serviceWorker.getRegistration()).waiting")
+                wait_async(page,"async()=>!!(await navigator.serviceWorker.getRegistration()).waiting")
                 tab=context.new_page();tab.goto(origin+'/internet');expect(tab.locator('#pwa-pair')).to_be_visible()
                 tab.evaluate("window.testBusy=true;window.originalBusy=waraqPwaBridge.isBusy;waraqPwaBridge.isBusy=()=>window.testBusy||window.originalBusy()")
                 page.locator('#pwa-update').click();expect(page.locator('#pwa-message')).to_contain_text('كل النوافذ')
                 assert page.evaluate("async()=>!!(await navigator.serviceWorker.getRegistration()).waiting")
                 tab.evaluate('window.testBusy=false')
                 page.locator('#pwa-update').click()
-                page.wait_for_function("async()=>!(await navigator.serviceWorker.getRegistration()).waiting")
-                page.wait_for_function("async()=>JSON.stringify(await caches.keys())===JSON.stringify(['waraq-public-test-3'])")
+                wait_async(page,"async()=>!(await navigator.serviceWorker.getRegistration()).waiting")
+                wait_async(page,"async()=>JSON.stringify(await caches.keys())===JSON.stringify(['waraq-public-test-3'])")
                 expect(page.locator('#pwa-pair')).to_be_visible()
                 if output:page.screenshot(path=str(output/'pwa-mobile.png'),full_page=True)
                 assert not errors,errors
