@@ -242,12 +242,14 @@ def main():
                         while time.monotonic() < deadline:
                             scheduler.tick()
                             stage = next(j for j in scheduler_store.jobs() if j["id"] == job_id)["stages"]["opencode"]
-                            if stage["status"] == "completed":
+                            # Stage completion precedes publication/finally.
+                            # Audit assertions require the lease to be released.
+                            if stage["status"] == "completed" and scheduler.idle():
                                 break
                             if stage["status"] in ("failed", "blocked", "uncertain"):
                                 raise AssertionError("Native failover stage stopped: " + json.dumps(stage, ensure_ascii=False))
                             time.sleep(0.1)
-                        assert stage["status"] == "completed", stage
+                        assert stage["status"] == "completed" and scheduler.idle(), stage
                         with scheduler_store.lock:
                             attempts = [dict(r) for r in scheduler_store.db.execute(
                                 "SELECT account_id,outcome,session_id FROM chatgpt_attempts WHERE job_id=? ORDER BY started", (job_id,))]
