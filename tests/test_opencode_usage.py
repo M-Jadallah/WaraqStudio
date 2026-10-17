@@ -16,7 +16,7 @@ import pytest
 
 from waraq import opencode_runtime as native
 from waraq.opencode_usage import (USAGE_REASON_CODES, classify_usage_capability,
-                                 parse_usage_response, usage_result)
+                                 oauth_method_metadata, parse_usage_response, usage_result)
 
 NOW = 1_800_000_000
 
@@ -117,6 +117,86 @@ def test_duplicate_duration_is_ambiguous_and_buckets_are_bounded():
 ])
 def test_capability_is_exact(method, version, reason):
     assert classify_usage_capability(method, version)["reason_code"] == reason
+
+
+@pytest.mark.parametrize("version", ["2.0.27", "2.0.32"])
+@pytest.mark.parametrize("method", ["chatgpt-browser", "chatgpt-headless"])
+def test_only_acceptance_verified_versions_enable_legacy_usage(version, method):
+    assert classify_usage_capability(method, version)["status"] == "available"
+    assert oauth_method_metadata(method, version)["usage"]["reason_code"] == "legacy_supported"
+
+
+@pytest.mark.parametrize("method,kind,label,source", [
+    ("chatgpt-token-sharing", "siwc", "Sign in with ChatGPT", ""),
+    ("chatgpt-browser", "legacy_codex", "Codex browser (legacy)", "legacy_codex_usage"),
+    ("chatgpt-headless", "legacy_codex", "Codex device code (legacy)", "legacy_codex_usage"),
+])
+def test_method_catalog_classifies_only_known_methods_without_native_labels(method, kind, label, source):
+    result = oauth_method_metadata(method, "2.0.27")
+    assert result == {"id": method, "type": "oauth", "label": label, "kind": kind,
+                      "usage": {"status": "unsupported" if kind == "siwc" else "available",
+                                "reason_code": "token_sharing_unsupported" if kind == "siwc" else "legacy_supported",
+                                "source": source}}
+    if kind == "legacy_codex":
+        unverified = oauth_method_metadata(method, "2.1.0")
+        assert unverified["usage"]["reason_code"] == "native_version_unverified"
+        assert unverified["kind"] == "legacy_codex"
+
+
+@pytest.mark.parametrize("version", ["2.0.27", "2.0.32"])
+@pytest.mark.parametrize("method", [None, [], {}, True, "chatgpt", "CHATGPT-BROWSER", "chatgpt-browser-extra"])
+def test_method_catalog_rejects_unknown_ids(method, version):
+    assert oauth_method_metadata(method, version) is None
+    assert classify_usage_capability(method, version)["reason_code"] == "method_unsupported"
+
+
+@pytest.mark.parametrize("version", [None, [], {}, 2.027, True, "2.0.27+build"])
+def test_invalid_native_version_has_controlled_capability_status(version):
+    assert classify_usage_capability("chatgpt-browser", version)["reason_code"] == "native_version_unverified"
+
+
+def test_capability_key_is_private_cache_only_and_changes_on_config_binary_or_native_version(tmp_path):
+    first, second = tmp_path / "first.exe", tmp_path / "second.exe"
+    first.write_bytes(b"synthetic native one")
+    second.write_bytes(b"synthetic native two")
+    settings = {"opencode_executable": str(first)}
+    manager = native.AccountRuntimeManager(SimpleNamespace(home=tmp_path, snapshot=lambda: dict(settings)))
+    manager.ensure = Mock(side_effect=AssertionError("capability key started native"))
+    original = manager.usage_capability_key("account123")
+    assert original == manager.usage_capability_key("account123")
+    assert str(tmp_path) not in str(original)
+    settings["opencode_executable"] = str(second)
+    changed_config = manager.usage_capability_key("account123")
+    assert original != changed_config
+    second.write_bytes(b"synthetic replacement binary different length")
+    assert manager.usage_capability_key("account123") != changed_config
+    runtime = SimpleNamespace(executable=second, native_version="2.0.27")
+    manager._runtimes["account123"] = runtime
+    running = manager.usage_capability_key("account123")
+    runtime.native_version = "2.0.32"
+    assert manager.usage_capability_key("account123") != running
+    manager.ensure.assert_not_called()
+
+
+def test_capability_key_never_waits_for_native_lifecycle_lock(tmp_path):
+    manager = native.AccountRuntimeManager(SimpleNamespace(home=tmp_path,
+        snapshot=lambda: {"opencode_executable": "synthetic-no-binary"}))
+    held, release = threading.Event(), threading.Event()
+    def native_operation():
+        with manager._lock:
+            held.set()
+            release.wait(2)
+    worker = threading.Thread(target=native_operation)
+    worker.start()
+    assert held.wait(1)
+    try:
+        began = time.monotonic()
+        key = manager.usage_capability_key("account123")
+        assert key and time.monotonic() - began < 0.5
+        assert not release.is_set()
+    finally:
+        release.set()
+        worker.join(2)
 
 
 def test_legacy_camelcase_account_id_controls_identity_and_header():

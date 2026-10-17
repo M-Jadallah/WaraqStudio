@@ -40,6 +40,7 @@ ApplicationWindow {
     property var pendingFile: ({})
     property var pendingProvider: ({})
     property var pendingAccount: ({})
+    readonly property var accountLoginChoice: backend.accountLoginChoice || ({})
     property var lastForce: ({provider: "", model: "", variant: ""})
     property bool skipForceQuestion: false
     property var pageNames: ["مركز العمليات", "إضافة مصدر", "العمال والخدمات", "مكتبة النتائج", "الملفات", "الإعدادات"]
@@ -106,6 +107,16 @@ ApplicationWindow {
         var message = messages[usage.messageCode] || (usage.status === "unsupported" ? messages.unsupported
             : usage.status === "available" ? "" : "الحصة غير معروفة حاليًا؛ أعد المحاولة لاحقًا.")
         return (refreshing ? "جارٍ تحديث الحصة… " : "") + (usage.stale ? "قراءة قديمة. " : "") + message
+    }
+    function usageRefreshReason(usage) {
+        usage = usage || {}
+        var reasons = {refreshing: "تحديث الحصة جارٍ بالفعل.",
+            managed_accounts_disabled: "فعّل استخدام حسابات ChatGPT المُدارة لتحديث الحصة.",
+            account_not_ready: "الحساب غير جاهز؛ تحقق من تسجيل الدخول وحالة الجلسة.",
+            usage_unsupported: "لا تدعم طريقة الدخول أو نسخة OpenCode الحالية قراءة الحصة.",
+            usage_closed: "أُوقف تحديث الحصص أثناء إغلاق التطبيق.", usage_unavailable: "تحديث الحصة غير متاح حاليًا."}
+        return usage.refreshBlockReason === "refresh_wait" ? "يمكن إعادة التحديث بعد " + (usage.refreshWaitSeconds || 0) + " ثانية."
+            : reasons[usage.refreshBlockReason] || ""
     }
     function transcriptTemplateId() { return backend.templates.length > 0 ? (templateBox.currentValue || "") : "" }
     function chooseSourceOutputFolder() {
@@ -870,6 +881,8 @@ ApplicationWindow {
                                             SubText { objectName: "accountUsageWeekly"; textFormat: Text.PlainText; text: win.usageWindow("أسبوعية", parent.usage.weekly); Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
                                             SubText { objectName: "accountUsageUpdated"; text: "آخر قراءة ناجحة (توقيت الجهاز): " + win.usageDate(parent.usage.lastSuccessAt); Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
                                             SubText { objectName: "accountUsageMessage"; text: win.usageMessage(parent.usage, accountData.usageRefreshing); visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageRefreshReason"; text: win.usageRefreshReason(parent.usage); visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageBrowserNote"; text: "إدارة الاستخدام تُفتح في المتصفح؛ اختر الحساب المطلوب فيه صراحةً. لا يسجّل ورق دخوله تلقائيًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
                                         }
                                         SubText { objectName: "accountError"; text: accountData.error; visible: !!accountData.error; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; color: win.dark ? "#f4b880" : "#9a4409" }
                                         Flow {
@@ -877,7 +890,8 @@ ApplicationWindow {
                                             AppButton { objectName: "accountLoginButton"; text: "تسجيل / إعادة الدخول"; enabled: !accountData.busy && !accountData.inFlight && !backend.accountBusy; onClicked: backend.loginAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
                                             AppButton { objectName: "accountCancelLoginButton"; text: "إلغاء الدخول"; visible: accountData.loggingIn; onClicked: backend.cancelAccountLogin(accountData.id); Accessible.name: text + " " + accountData.alias }
                                             AppButton { objectName: "accountRefreshButton"; text: "فحص الحساب"; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.refreshAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
-                                            AppButton { objectName: "accountUsageRefreshButton"; text: accountData.usageRefreshing ? "جارٍ تحديث الحصة…" : "تحديث الحصة"; enabled: !accountData.usageRefreshing && !accountData.loggingIn && !accountData.busy; onClicked: backend.refreshAccountUsage(accountData.id); Accessible.name: "تحديث الحصة " + accountData.alias }
+                                            AppButton { objectName: "accountUsageRefreshButton"; text: accountData.usageRefreshing ? "جارٍ تحديث الحصة…" : "تحديث الحصة"; enabled: accountData.usage && accountData.usage.canRefresh === true && !accountData.loggingIn && !accountData.busy; onClicked: backend.refreshAccountUsage(accountData.id); Accessible.name: "تحديث الحصة " + accountData.alias }
+                                            AppButton { objectName: "accountManageUsageButton"; text: "إدارة الاستخدام"; onClicked: backend.manageAccountUsage(); Accessible.name: "إدارة الاستخدام في المتصفح؛ اختر حساب " + accountData.alias + " صراحةً" }
                                             AppButton { text: "فحص الجلسة السابقة"; visible: accountData.uncertain; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.recheckAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
                                             AppButton { objectName: "accountPreferButton"; text: "تفضيل"; enabled: !accountData.preferred && !accountData.busy; onClicked: backend.preferAccount(accountData.id); Accessible.name: "تفضيل " + accountData.alias }
                                             AppButton { objectName: "accountUpButton"; text: "للأعلى"; enabled: index > 0 && !accountData.busy; onClicked: backend.moveAccount(accountData.id, -1); Accessible.name: "رفع أولوية " + accountData.alias }
@@ -1538,6 +1552,40 @@ ApplicationWindow {
         onOpened: { standardButton(Dialog.Ok).text = "تفريغ جديد"; standardButton(Dialog.Cancel).text = "إلغاء" }
         Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُرسل الصوت مجددًا إلى Deepgram وقد تنتج تكلفة جديدة. ستبقى النسخة السابقة محفوظة." }
         onAccepted: { backend.retry(selectedJob.id, "deepgram", true); jobDialog.close() }
+    }
+    Dialog {
+        id: accountLoginMethodDialog; objectName: "accountLoginMethodDialog"; anchors.centerIn: parent
+        width: Math.min(win.width - 40, 620 * win.uiScale); height: Math.min(win.height - 60, 540 * win.uiScale)
+        modal: true; title: "اختر طريقة تسجيل الدخول"; standardButtons: Dialog.Cancel
+        visible: !!win.accountLoginChoice.accountId
+        onOpened: { standardButton(Dialog.Cancel).text = "إلغاء"; standardButton(Dialog.Cancel).objectName = "accountLoginChoiceCancelButton" }
+        onRejected: backend.cancelAccountLoginChoice()
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: ScrollView {
+            id: accountLoginMethodScroll; clip: true; contentWidth: availableWidth
+            ColumnLayout {
+                width: accountLoginMethodScroll.availableWidth; spacing: win.rs(12)
+                LabelText { objectName: "accountLoginChoiceAlias"; textFormat: Text.PlainText; text: win.accountLoginChoice.alias || ""; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                SubText { text: "لن يتغير تسجيل الحساب الحالي حتى تختار طريقة. أكمل التفويض بنفسك في المتصفح واختر الحساب المطلوب صراحةً."; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                SubText { objectName: "accountLoginChoiceLoading"; visible: win.accountLoginChoice.loading === true; text: "جارٍ قراءة طرق الدخول المتاحة في OpenCode…"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                SubText { objectName: "accountLoginChoiceError"; text: win.accountLoginChoice.error || ""; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                Repeater {
+                    model: win.accountLoginChoice.methods || []
+                    ColumnLayout {
+                        required property var modelData
+                        Layout.fillWidth: true; spacing: win.rs(4)
+                        AppButton { objectName: "accountLoginMethodButton"; text: modelData.label; Layout.fillWidth: true; onClicked: backend.chooseAccountLoginMethod(win.accountLoginChoice.accountId, modelData.id); Accessible.name: "تسجيل " + (win.accountLoginChoice.alias || "") + " بواسطة " + text }
+                        SubText {
+                            objectName: "accountLoginMethodExplanation"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            text: modelData.kind === "siwc" ? "Sign in with ChatGPT: لتسجيل الدخول؛ قراءة الحصة آليًا غير مدعومة حاليًا. استخدم إدارة الاستخدام في المتصفح."
+                                : "Codex legacy: يعيد تفويض الحساب لواجهة Codex القديمة. القراءة تخص حصة Codex، وليست ضمانًا لإتاحة بيانات الحصة."
+                                  + (modelData.usage.status === "unsupported" ? " لم يُتحقق من دعم قراءة الحصة في إصدار OpenCode المثبّت." : "")
+                        }
+                    }
+                }
+                AppButton { objectName: "accountLoginChoiceRetryButton"; text: "إعادة قراءة طرق الدخول"; visible: !!win.accountLoginChoice.error; onClicked: backend.loginAccount(win.accountLoginChoice.accountId) }
+            }
+        }
     }
     Dialog {
         id: renameAccountDialog; objectName: "renameAccountDialog"; anchors.centerIn: parent; width: 450 * win.uiScale; modal: true

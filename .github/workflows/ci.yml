@@ -10,7 +10,8 @@ permissions:
   contents: read
 
 env:
-  OPENCODE_TEST_VERSION: "2.0.27"
+  OPENCODE_TEST_VERSION: "2.0.32"
+  OPENCODE_COMPAT_TEST_VERSION: "2.0.27"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -59,6 +60,11 @@ jobs:
 
       - name: Native quota reader contract (synthetic credentials, no model calls)
         run: python tests/verify_opencode_accounts.py --usage-only
+
+      - name: Prior OpenCode quota reader compatibility (isolated tools)
+        run: |
+          npm install --prefix "$RUNNER_TEMP/waraq-opencode-compat" --no-audit --no-fund "@opencode/cli@$OPENCODE_COMPAT_TEST_VERSION"
+          python tests/verify_opencode_accounts.py --usage-only --executable "$RUNNER_TEMP/waraq-opencode-compat/node_modules/@opencode/cli/bin/opencode.exe"
 
       - name: Native UI interaction checks
         run: python tests/verify_ui.py

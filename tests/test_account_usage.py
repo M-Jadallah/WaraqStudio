@@ -225,6 +225,9 @@ def test_disabled_for_jobs_is_eligible_but_auth_mutating_and_unsupported_stop_au
     assert s.monitor.request(s.ident) and complete(s)
     s.clock[0] += 1000
     assert not s.monitor.request(s.ident)
+    assert not s.monitor.request(s.ident, manual=True)
+    assert s.monitor.public_snapshot(s.ident)["refreshBlockReason"] == "usage_unsupported"
+    s.config.data["opencode_executable"] = "different-opencode"
     assert s.monitor.request(s.ident, manual=True) and complete(s)
     s.accounts.set_login_state(s.ident, "checking")
     s.clock[0] += 1000
@@ -241,6 +244,205 @@ def test_cached_snapshot_stale_on_startup_ttl_and_reset_without_faking_renewal(s
     s.config.data["chatgpt_usage_refresh_seconds"] = 1800
     public = s.monitor.public_snapshot(s.ident, now=2200)
     assert public["stale"] and public["fiveHour"]["remainingPercent"] == 60
+
+
+def test_manual_success_clears_previous_unsupported_and_restores_auto(service):
+    s = service
+    s.runtime.read_usage = lambda *args: {"status": "unsupported", "reason_code": "endpoint_unavailable"}
+    assert s.monitor.request(s.ident) and complete(s)
+    assert not s.monitor.request(s.ident)
+    s.clock[0] += 60
+    assert s.monitor.public_snapshot(s.ident)["canRefresh"]
+    s.runtime.read_usage = lambda *args: success(s.clock[0])
+    assert s.monitor.request(s.ident, manual=True) and complete(s)
+    assert s.ident not in s.monitor.unsupported
+    s.clock[0] += 300
+    assert s.monitor.schedule_due() == 1
+
+
+@pytest.mark.parametrize("reason", ["token_sharing_unsupported", "method_unsupported", "native_version_unverified", "usage_runtime_unsupported"])
+def test_unsupported_capability_blocks_manual_until_runtime_version_changes(service, reason):
+    s = service
+    capability = ["2.0.27"]
+    s.runtime.usage_capability_key = lambda ident: tuple(capability)
+    s.runtime.read_usage = lambda *args: {"status": "unsupported", "reason_code": reason}
+    binding = s.accounts.usage_binding(s.ident)
+    assert s.monitor.request(s.ident) and complete(s)
+    s.clock[0] += 1000
+    assert not s.monitor.request(s.ident, manual=True)
+    public = s.monitor.public_snapshot(s.ident)
+    assert not public["canRefresh"] and public["refreshWaitSeconds"] == 0
+    assert public["refreshBlockReason"] == "usage_unsupported"
+    capability[0] = "2.0.28"
+    public = s.monitor.public_snapshot(s.ident)
+    assert public["canRefresh"] and public["refreshBlockReason"] == ""
+    assert s.accounts.usage_binding(s.ident) == binding
+    s.runtime.read_usage = lambda *args: success(s.clock[0])
+    assert s.monitor.request(s.ident, manual=True) and complete(s)
+    s.clock[0] += 300
+    assert s.monitor.request(s.ident)
+
+
+def test_capability_change_keeps_floor_and_retry_after_and_snapshot_launches_no_work(service):
+    s = service
+    s.runtime.read_usage = lambda *args: {"status": "unsupported", "reason_code": "native_version_unverified", "retry_after": 120}
+    assert s.monitor.request(s.ident) and complete(s)
+    s.config.data["opencode_executable"] = "new-opencode"
+    public = s.monitor.public_snapshot(s.ident)
+    assert not public["canRefresh"] and public["refreshWaitSeconds"] == 120
+    assert public["refreshBlockReason"] == "refresh_wait"
+    assert not s.executor.tasks
+    assert not s.monitor.request(s.ident, manual=True)
+    s.clock[0] += 119.25
+    assert s.monitor.public_snapshot(s.ident)["refreshWaitSeconds"] == 1
+    s.clock[0] += .75
+    assert s.monitor.public_snapshot(s.ident)["canRefresh"]
+    assert not s.executor.tasks
+
+
+def test_cold_runtime_creation_does_not_invalidate_unsupported_cache(service):
+    s = service
+    capability = [None]
+    s.runtime.usage_capability_key = lambda ident: capability[0]
+    def read(*args):
+        capability[0] = "runtime-version-2.0.27"
+        return {"status": "unsupported", "reason_code": "token_sharing_unsupported"}
+    s.runtime.read_usage = read
+    assert s.monitor.request(s.ident) and complete(s)
+    s.clock[0] += 1000
+    assert not s.monitor.public_snapshot(s.ident)["canRefresh"]
+    assert not s.monitor.request(s.ident)
+
+
+def test_capability_read_failure_is_not_actionable_or_a_changed_unsupported_key(service):
+    s = service
+    capability, failed = ["known-version"], [False]
+    def key(ident):
+        if failed[0]:
+            raise ValueError("PRIVATE_LOCAL_FAILURE")
+        return capability[0]
+    s.runtime.usage_capability_key = key
+    s.runtime.read_usage = lambda *args: {"status": "unsupported", "reason_code": "token_sharing_unsupported"}
+    assert s.monitor.request(s.ident) and complete(s)
+    before = s.monitor.unsupported[s.ident].copy()
+    s.clock[0] += 1000
+    failed[0] = True
+    public = s.monitor.public_snapshot(s.ident)
+    assert not public["canRefresh"] and public["refreshBlockReason"] == "usage_unavailable"
+    assert not s.monitor.request(s.ident, manual=True)
+    assert s.monitor.unsupported[s.ident] == before and not s.executor.tasks
+    assert "PRIVATE_LOCAL_FAILURE" not in json.dumps(public)
+    failed[0] = False
+    assert s.monitor.public_snapshot(s.ident)["refreshBlockReason"] == "usage_unsupported"
+    assert not s.monitor.request(s.ident, manual=True)
+    capability[0] = "known-changed-version"
+    assert s.monitor.public_snapshot(s.ident)["canRefresh"]
+    assert s.monitor.request(s.ident, manual=True)
+
+
+@pytest.mark.parametrize("status", ["available", "unsupported"])
+def test_capability_read_failure_after_usage_clears_pending_and_preserves_start_key(service, status):
+    s = service
+    failed = [False]
+    def key(ident):
+        if failed[0]:
+            raise OSError("PRIVATE_LOCAL_FAILURE")
+        return "stable-capability"
+    def read(*args):
+        failed[0] = True
+        return success() if status == "available" else {"status": "unsupported", "reason_code": "token_sharing_unsupported"}
+    s.runtime.usage_capability_key, s.runtime.read_usage = key, read
+    assert s.monitor.request(s.ident)
+    assert complete(s)
+    assert not s.monitor.state(s.ident)["refreshing"]
+    public = s.monitor.public_snapshot(s.ident)
+    assert public["status"] == status and not public["canRefresh"]
+    assert public["refreshBlockReason"] == "usage_unavailable"
+    assert "PRIVATE_LOCAL_FAILURE" not in json.dumps(s.accounts.usage_record(s.ident))
+    failed[0] = False
+    s.clock[0] += 1000
+    if status == "available":
+        assert s.monitor.public_snapshot(s.ident)["canRefresh"]
+    else:
+        assert s.monitor.public_snapshot(s.ident)["refreshBlockReason"] == "usage_unsupported"
+        assert not s.monitor.request(s.ident, manual=True)
+
+
+def test_refresh_projection_matches_requests_without_jobs_or_background_activity(service):
+    s = service
+    assert not s.store.jobs()
+    public = s.monitor.public_snapshot(s.ident)
+    assert public["canRefresh"] and public["refreshBlockReason"] == "" and public["refreshWaitSeconds"] == 0
+    assert not s.executor.tasks
+    assert s.monitor.request(s.ident, manual=True)
+    public = s.monitor.public_snapshot(s.ident)
+    assert not public["canRefresh"] and public["refreshBlockReason"] == "refreshing"
+    assert complete(s)
+    public = s.monitor.public_snapshot(s.ident)
+    assert not public["canRefresh"] and public["refreshWaitSeconds"] == 30
+    s.clock[0] += 30
+    assert s.monitor.public_snapshot(s.ident)["canRefresh"]
+    assert not s.monitor.request(s.ident)  # Ordinary interval still applies.
+    assert s.monitor.request(s.ident, manual=True)
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("managed_disabled", "managed_accounts_disabled"), ("callback_missing", "usage_unavailable"),
+    ("auth_missing", "account_not_ready"), ("uncertain", "account_not_ready"),
+    ("stopped", "usage_closed"), ("missing_account", "account_not_ready")])
+def test_refresh_projection_reasons_match_nonactionable_request(service, change, reason):
+    s = service
+    if change == "managed_disabled":
+        s.config.data["chatgpt_accounts_enabled"] = False
+    elif change == "callback_missing":
+        s.monitor.set_callback(None)
+    elif change == "auth_missing":
+        s.accounts.set_login_state(s.ident, "signed_out")
+    elif change == "uncertain":
+        row = s.accounts._get(s.ident)
+        row["health"] = "execution_uncertain"
+        s.accounts._put(row)
+    elif change == "stopped":
+        s.monitor.stop()
+    else:
+        s.accounts.remove(s.ident)
+    public = s.monitor.public_snapshot(s.ident)
+    assert not public["canRefresh"] and public["refreshBlockReason"] == reason
+    assert public["refreshWaitSeconds"] == 0
+    assert not s.monitor.request(s.ident, manual=True)
+    assert not s.executor.tasks
+
+
+def test_auto_disabled_and_account_disabled_for_jobs_do_not_block_manual_refresh(service):
+    s = service
+    s.config.data["chatgpt_usage_auto_refresh"] = False
+    s.accounts.update(s.ident, enabled=False)
+    assert s.monitor.public_snapshot(s.ident)["canRefresh"]
+    assert not s.monitor.request(s.ident)
+    assert s.monitor.request(s.ident, manual=True)
+
+
+def test_refresh_projection_uses_monotonic_countdown_and_persisted_backoff(service):
+    s = service
+    monotonic = [10.0]
+    s.monitor.monotonic = lambda: monotonic[0]
+    s.runtime.read_usage = lambda *args: {"status": "unavailable", "reason_code": "timeout"}
+    assert s.monitor.request(s.ident) and complete(s)
+    assert s.monitor.public_snapshot(s.ident)["refreshWaitSeconds"] == 60
+    s.clock[0] -= 86400
+    monotonic[0] += 59.5
+    assert s.monitor.public_snapshot(s.ident)["refreshWaitSeconds"] == 1
+    monotonic[0] += .5
+    assert s.monitor.public_snapshot(s.ident)["canRefresh"]
+    fresh = AccountUsageMonitor(s.scheduler, clock=lambda: s.clock[0], executor=ManualExecutor(),
+                                monotonic=lambda: monotonic[0])
+    fresh.set_callback(s.payloads.append)
+    try:
+        public = fresh.public_snapshot(s.ident)
+        assert not public["canRefresh"] and public["refreshWaitSeconds"] == 60
+        assert not fresh.request(s.ident, manual=True)
+    finally:
+        fresh.stop()
 
 
 def test_no_callback_no_network_and_shutdown_discards_queued_delivery(service):

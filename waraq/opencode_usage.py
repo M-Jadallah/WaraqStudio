@@ -10,7 +10,8 @@ import math
 
 SOURCE = "legacy_codex_usage"
 LEGACY_METHODS = frozenset(("chatgpt-browser", "chatgpt-headless"))
-VERIFIED_NATIVE_VERSIONS = frozenset(("2.0.27",))
+CHATGPT_OAUTH_METHODS = frozenset((*LEGACY_METHODS, "chatgpt-token-sharing"))
+VERIFIED_NATIVE_VERSIONS = frozenset(("2.0.27", "2.0.32"))
 USAGE_REASON_CODES = frozenset((
     "token_sharing_unsupported", "method_unsupported", "native_version_unverified", "legacy_supported",
     "invalid_response", "windows_missing", "usage_available", "usage_partial", "cancelled",
@@ -31,11 +32,30 @@ def usage_result(status, reason_code, observed_at=0, **fields):
 def classify_usage_capability(method_id, native_version):
     if method_id == "chatgpt-token-sharing":
         return usage_result("unsupported", "token_sharing_unsupported")
-    if method_id not in LEGACY_METHODS:
+    if not isinstance(method_id, str) or method_id not in LEGACY_METHODS:
         return usage_result("unsupported", "method_unsupported")
-    if native_version not in VERIFIED_NATIVE_VERSIONS:
+    if not isinstance(native_version, str) or native_version not in VERIFIED_NATIVE_VERSIONS:
         return usage_result("unsupported", "native_version_unverified")
     return usage_result("available", "legacy_supported")
+
+
+def oauth_method_metadata(method_id, native_version):
+    """Credential-free method catalog. Labels and source never come from native.
+
+    The usage status is a capability classification, not a successful quota
+    observation. A compatible legacy method still needs a real usage read.
+    """
+    if not isinstance(method_id, str) or method_id not in CHATGPT_OAUTH_METHODS:
+        return None
+    labels = {"chatgpt-browser": "Codex browser (legacy)",
+              "chatgpt-headless": "Codex device code (legacy)",
+              "chatgpt-token-sharing": "Sign in with ChatGPT"}
+    legacy = method_id in LEGACY_METHODS
+    capability = classify_usage_capability(method_id, native_version)
+    return {"id": method_id, "type": "oauth", "label": labels[method_id],
+            "kind": "legacy_codex" if legacy else "siwc",
+            "usage": {"status": capability["status"], "reason_code": capability["reason_code"],
+                      "source": SOURCE if legacy else ""}}
 
 
 def finite_number(value):

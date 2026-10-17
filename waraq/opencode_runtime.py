@@ -16,6 +16,7 @@ import re
 import secrets
 import signal
 import ssl
+import shutil
 import subprocess
 import threading
 import time
@@ -24,8 +25,8 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 from urllib.error import HTTPError, URLError
 
-from .opencode_usage import (classify_usage_capability, finite_number,
-                             parse_usage_response, usage_result)
+from .opencode_usage import (CHATGPT_OAUTH_METHODS, VERIFIED_NATIVE_VERSIONS, classify_usage_capability, finite_number,
+                             oauth_method_metadata, parse_usage_response, usage_result)
 from . import __version__
 
 _USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
@@ -608,6 +609,35 @@ class AccountRuntimeManager:
         result = _safe_credential_metadata(runtime.request("GET", "/api/credential")["data"])
         return dict(result, account_id=account_id)
 
+    def usage_capability_key(self, account_id):
+        """Cache-only compatibility fingerprint; never starts native or reads auth.
+
+        Both configured and already-running executables matter: changing the
+        binary on disk does not upgrade an existing native process in place.
+        Paths are hashed so callers can retain this key without publishing paths.
+        """
+        def executable_key(value):
+            value = str(value) if isinstance(value, (str, Path)) else ""
+            resolved = shutil.which(value) if value else None
+            path = Path(resolved or value).absolute() if value else None
+            digest = hashlib.sha256(str(path or "").encode()).hexdigest()
+            try:
+                stat = path.stat() if path else None
+                return (digest, stat.st_mtime_ns, stat.st_size) if stat else (digest, 0, 0)
+            except (OSError, ValueError):
+                return (digest, 0, 0)
+        settings = self.config.snapshot()
+        # Read only public lifecycle facts from one retained runtime reference.
+        # Waiting for the manager lock here would block GUI cache projections
+        # behind a background login's native requests. A concurrent replacement
+        # merely changes the next key; telemetry never authorizes execution.
+        runtime = self._runtimes.get(account_id)
+        version = getattr(runtime, "native_version", "") if runtime else ""
+        executable = getattr(runtime, "executable", "") if runtime else ""
+        return ("usage-capability-v1", tuple(sorted(VERIFIED_NATIVE_VERSIONS)),
+                executable_key(settings.get("opencode_executable", "")),
+                executable_key(executable), version if isinstance(version, str) else "")
+
     def _usage_capture(self, runtime, expected_binding):
         response = runtime.request("GET", "/api/credential", timeout=3)
         entries = response.get("data") if isinstance(response, dict) else None
@@ -765,21 +795,36 @@ class AccountRuntimeManager:
     def auth_methods(self, account_id):
         # Listing awaits location initialisation. A direct get immediately after
         # /api/info can race builtin integration registration on native startup.
-        integrations = self.ensure(account_id).request("GET", "/api/integration")["data"]
-        info = next((i for i in integrations if i.get("id") == "openai"), {})
-        return [{"id": m["id"], "type": "oauth", "label": m.get("label", "ChatGPT")}
-                for m in info.get("methods", []) if m.get("type") == "oauth" and
-                "chatgpt" in (str(m.get("id", "")) + " " + str(m.get("label", ""))).lower()]
+        runtime = self.ensure(account_id)
+        response = runtime.request("GET", "/api/integration")
+        integrations = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(integrations, list):
+            raise RuntimeError("Native authentication methods are unavailable.")
+        info = next((i for i in integrations if isinstance(i, dict) and i.get("id") == "openai"), {})
+        methods = info.get("methods", [])
+        if not isinstance(methods, list):
+            raise RuntimeError("Native authentication methods are unavailable.")
+        result, seen = [], set()
+        for method in methods:
+            if not isinstance(method, dict) or method.get("type") != "oauth":
+                continue
+            safe = oauth_method_metadata(method.get("id"), getattr(runtime, "native_version", ""))
+            if safe is not None and safe["id"] not in seen:
+                seen.add(safe["id"])
+                result.append(safe)
+        return result
 
     def begin_login(self, account_id, method=None, inputs=None):
         with self._lock:
             if self._login:
                 raise RuntimeError("Complete or cancel the current ChatGPT sign-in first.")
-            self._usage_epochs[account_id] = self._usage_epochs.get(account_id, 0) + 1
+            if method is not None and (not isinstance(method, str) or method not in CHATGPT_OAUTH_METHODS):
+                raise RuntimeError("Unknown ChatGPT OAuth method.")
             methods = self.auth_methods(account_id)
             selected = next((m for m in methods if method is None or m["id"] == method), None)
             if not selected:
-                raise RuntimeError("This OpenCode build exposes no supported ChatGPT OAuth method.")
+                raise RuntimeError("The selected ChatGPT OAuth method is unavailable in this OpenCode build.")
+            self._usage_epochs[account_id] = self._usage_epochs.get(account_id, 0) + 1
             runtime = self.ensure(account_id)
             data = {"methodID": selected["id"]}
             if inputs:
@@ -791,7 +836,7 @@ class AccountRuntimeManager:
             if url.scheme != "https" or url.hostname != "auth.openai.com" or url.username or url.password or url.port not in (None, 443):
                 self.cancel_login(account_id)
                 raise RuntimeError("OpenCode returned an unsupported ChatGPT authorization URL.")
-            return {"account_id": account_id, "attempt_id": attempt_id, "url": attempt["url"],
+            return {"account_id": account_id, "attempt_id": attempt_id, "method_id": selected["id"], "url": attempt["url"],
                     "mode": attempt["mode"], "instructions": attempt.get("instructions", ""),
                     "expires_at": attempt.get("time", {}).get("expires", 0) / 1000}
 

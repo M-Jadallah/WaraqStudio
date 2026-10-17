@@ -62,8 +62,24 @@ class Runtime:
         self.finish = {"status": "complete", "authenticated": True, "identity": "stable-account",
                        "email": "test@example.invalid", "subscription": "Plus", "access_token": "SECRET_TOKEN"}
         self.gate = None
+        self.method_gate = None
+        self.selected_methods = []
+        self.methods = [
+            {"id": "chatgpt-token-sharing", "type": "oauth", "label": "Sign in with ChatGPT", "kind": "siwc",
+             "usage": {"status": "unsupported", "reason_code": "token_sharing_unsupported", "source": ""}},
+            {"id": "chatgpt-browser", "type": "oauth", "label": "Codex browser (legacy)", "kind": "legacy_codex",
+             "usage": {"status": "available", "reason_code": "legacy_supported", "source": "legacy_codex_usage"}}]
 
-    def begin_login(self, ident):
+    def auth_methods(self, ident):
+        if self.method_gate:
+            assert self.method_gate.wait(5)
+        if isinstance(self.methods, Exception):
+            raise self.methods
+        return self.methods
+
+    def begin_login(self, ident, method=None):
+        assert method in {item["id"] for item in self.methods}, "UI must explicitly choose an offered method"
+        self.selected_methods.append(method)
         self.calls.append(("begin", ident, threading.get_ident()))
         if self.gate:
             assert self.gate.wait(5)
@@ -116,17 +132,21 @@ class UsageMonitorDouble:
             "status": "unavailable", "stale": False, "lastSuccessAt": None, "lastAttemptAt": None,
             "messageCode": "not_checked", "source": "", "fiveHour": dict(window), "weekly": dict(window)}))
         snapshot["refreshing"] = ident in self.pending
+        snapshot.setdefault("canRefresh", not self.stopped and ident not in self.pending)
+        snapshot.setdefault("refreshWaitSeconds", 0)
+        snapshot.setdefault("refreshBlockReason", "refreshing" if ident in self.pending else "")
         return snapshot
 
     def request(self, ident, manual=False):
-        if self.stopped or ident in self.pending:
+        if self.stopped or ident in self.pending or not self.public_snapshot(ident)["canRefresh"]:
             return False
         self.pending.add(ident)
         self.requests.append((ident, manual))
         epoch = self.epochs.get(ident, 0)
         def work():
             self.gate.wait(3)
-            self.callback({"account_id": ident, "auth_epoch": epoch})
+            if not self.stopped:
+                self.callback({"account_id": ident, "auth_epoch": epoch})
         worker = threading.Thread(target=work, daemon=True)
         self.workers.append(worker)
         worker.start()
@@ -159,6 +179,7 @@ class UsageMonitorDouble:
     def stop(self):
         self.stopped = True
         self.pending.clear()
+        self.gate.set()
 
 
 def attach_usage(env):
@@ -222,6 +243,14 @@ def add_account(env):
     return env.accounts.rows[-1]["id"]
 
 
+def start_login(env, ident, method="chatgpt-browser"):
+    """Drive the explicit choice before testing the existing OAuth lifecycle."""
+    env.bridge.loginAccount(ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    if env.bridge.accountLoginChoice.get("methods"):
+        env.bridge.chooseAccountLoginMethod(ident, method)
+
+
 def test_account_mode_is_opt_in_and_validates_integer_concurrency(tmp_path):
     config = Config(tmp_path)
     assert config.data["chatgpt_accounts_enabled"] is False
@@ -249,10 +278,10 @@ def test_login_runs_native_calls_off_gui_and_publishes_only_safe_metadata(accoun
     env = account_ui
     ident = add_account(env)
     main_thread = threading.get_ident()
-    env.bridge.loginAccount(ident)
+    start_login(env, ident)
     assert env.bridge.accountBusy
     assert not env.opened  # the worker may finish, but only a queued GUI callback can open the browser
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert len(env.opened) == 1
     assert all(call[2] != main_thread for call in env.runtime.calls)
     row = env.bridge.accountsModel._items[0]
@@ -268,8 +297,8 @@ def test_untrusted_oauth_urls_never_open_browser(account_ui, url):
     env = account_ui
     ident = add_account(env)
     env.runtime.begin = {"url": url, "mode": "auto"}
-    env.bridge.loginAccount(ident)
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    start_login(env, ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert not env.opened
     assert env.bridge.accountsModel._items[0]["error"]
     assert any(call[0] == "cancel" for call in env.runtime.calls)
@@ -279,7 +308,7 @@ def test_cancel_rejects_late_begin_callback_and_duplicate_actions(account_ui):
     env = account_ui
     ident = add_account(env)
     env.runtime.gate = threading.Event()
-    env.bridge.loginAccount(ident)
+    start_login(env, ident)
     pump(env.app, lambda: bool(env.runtime.calls))
     env.bridge.loginAccount(ident)
     env.bridge.removeAccount(ident)
@@ -287,7 +316,7 @@ def test_cancel_rejects_late_begin_callback_and_duplicate_actions(account_ui):
     env.bridge.cancelAccountLogin(ident)
     pump(env.app, lambda: any(call[0] == "cancel" for call in env.runtime.calls))
     env.runtime.gate.set()
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert not env.opened and not env.accounts.records
     assert env.accounts.row(ident)["login_state"] == "signed_out"
 
@@ -296,14 +325,14 @@ def test_manual_code_field_only_required_by_native_method(account_ui):
     env = account_ui
     ident = add_account(env)
     env.runtime.begin["mode"] = "code"
-    env.bridge.loginAccount(ident)
+    start_login(env, ident)
     pump(env.app, lambda: bool(env.bridge._account_logins))
     assert env.bridge.accountsModel._items[0]["needsCode"]
     assert not any(call[0] == "finish" for call in env.runtime.calls)
     env.bridge.finishAccountLogin(ident, "")
     assert not any(call[0] == "finish" for call in env.runtime.calls)
     env.bridge.finishAccountLogin(ident, "private-code")
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert "private-code" not in json.dumps(env.bridge.accountsModel._items)
 
 
@@ -313,7 +342,7 @@ def test_metadata_reserves_account_and_preserves_observed_cooldown(account_ui):
     env.accounts.row(ident)["cooldown_seconds"] = 120
     env.bridge.refreshAccount(ident)
     assert env.accounts.row(ident)["login_state"] == "checking"
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert env.accounts.records[-1][2] is False
     assert "2" in env.bridge.accountsModel._items[0]["quotaText"]
 
@@ -322,7 +351,7 @@ def test_active_account_cannot_relogin_rename_or_remove(account_ui):
     env = account_ui
     ident = add_account(env)
     env.accounts.row(ident)["in_flight"] = 2
-    env.bridge.loginAccount(ident)
+    start_login(env, ident)
     env.bridge.refreshAccount(ident)
     env.bridge.removeAccount(ident)
     env.bridge.renameAccount(ident, "blocked")
@@ -336,8 +365,8 @@ def test_auth_failure_does_not_echo_native_exception_secrets(account_ui):
     env.runtime.begin = RuntimeError("access_token=SECRET_TOKEN https://auth.openai.com/?state=PRIVATE_STATE")
     notices = []
     env.bridge.notice.connect(lambda message, error: notices.append(message))
-    env.bridge.loginAccount(ident)
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    start_login(env, ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     visible = json.dumps(env.bridge.accountsModel._items) + str(notices) + str(env.store.events(100))
     assert "SECRET_TOKEN" not in visible and "PRIVATE_STATE" not in visible
 
@@ -346,7 +375,7 @@ def test_autostop_waits_for_login_and_close_invalidates_late_callbacks(account_u
     env = account_ui
     ident = add_account(env)
     env.runtime.gate = threading.Event()
-    env.bridge.loginAccount(ident)
+    start_login(env, ident)
     env.scheduler.running = True
     env.bridge._auto_stop = env.bridge._auto_stop_seen = True
     reached = []
@@ -364,7 +393,7 @@ def test_active_auth_close_can_be_declined_and_update_installer_waits(account_ui
     env = account_ui
     ident = add_account(env)
     env.runtime.gate = threading.Event()
-    env.bridge.loginAccount(ident)
+    start_login(env, ident)
     asked = []
     monkeypatch.setattr(QMessageBox, "question", lambda *args: asked.append(True) or QMessageBox.StandardButton.No)
     assert env.bridge.prepareClose() is False
@@ -381,7 +410,7 @@ def test_active_auth_close_can_be_declined_and_update_installer_waits(account_ui
     assert notices and notices[-1][1] is True
     env.bridge.cancelAccountLogin(ident)
     env.runtime.gate.set()
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
 
 
 def test_uncertain_session_recheck_failure_preserves_execution_hold(account_ui):
@@ -393,7 +422,7 @@ def test_uncertain_session_recheck_failure_preserves_execution_hold(account_ui):
         raise ValueError("still running: SECRET_TOKEN")
     env.scheduler.recheck_account = cannot_prove_stopped
     env.bridge.recheckAccount(ident)
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert env.accounts.row(ident)["health"] == "execution_uncertain"
     assert env.accounts.row(ident)["login_state"] == "authenticated"
     assert "SECRET_TOKEN" not in str(env.bridge.accountsModel._items)
@@ -449,7 +478,7 @@ def test_usage_callbacks_cannot_survive_auth_invalidation_or_close(account_ui, a
     monitor = attach_usage(env)
     env.bridge.refreshAccountUsage(ident)
     if action == "login":
-        env.bridge.loginAccount(ident)
+        start_login(env, ident)
     elif action == "remove":
         env.bridge.removeAccount(ident)
     else:
@@ -460,7 +489,7 @@ def test_usage_callbacks_cannot_survive_auth_invalidation_or_close(account_ui, a
     monitor.gate.set()
     for worker in monitor.workers:
         worker.join(1)
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert ident not in monitor.snapshots
 
 
@@ -470,7 +499,7 @@ def test_usage_refresh_never_holds_autostop_and_metadata_keeps_usage_epoch(accou
     monitor = attach_usage(env)
     env.bridge.refreshAccountUsage(ident)
     env.bridge.refreshAccount(ident)
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert monitor.epochs == {}, "metadata check is not a new authentication identity"
     reached = []
     env.bridge.autoStopReached.connect(lambda: reached.append(True))
@@ -502,5 +531,140 @@ def test_usage_maintenance_keeps_cache_and_auth_action_available_after_reservati
     env.bridge.refresh()
     assert not env.bridge.accountsModel._items[0]["busy"]
     getattr(env.bridge, action)(ident)
-    pump(env.app, lambda: not env.bridge.accountBusy)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    if action == "loginAccount":
+        env.bridge.chooseAccountLoginMethod(ident, "chatgpt-browser")
+        pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert env.runtime.calls and monitor.epochs[ident] == 1
+
+
+def test_login_choice_cancel_listing_failure_and_untrusted_methods_preserve_current_auth(account_ui):
+    env = account_ui
+    ident = add_account(env)
+    env.accounts.row(ident).update(login_state="authenticated", identity="stable-account", health="healthy")
+    monitor = attach_usage(env)
+    monitor.snapshots[ident] = phone_usage_fixtures()[0]["usage"]
+    before, cached = copy.deepcopy(env.accounts.row(ident)), copy.deepcopy(monitor.snapshots)
+    env.runtime.method_gate = threading.Event()
+    env.bridge.loginAccount(ident)
+    assert env.bridge.accountLoginChoice["loading"] and env.bridge.accountBusy
+    assert env.accounts.row(ident) == before and monitor.snapshots == cached
+    env.bridge.cancelAccountLoginChoice()
+    env.runtime.method_gate.set()
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    assert env.bridge.accountLoginChoice == {} and env.accounts.row(ident) == before
+    assert not env.runtime.calls and not env.opened and monitor.epochs == {}
+    env.runtime.methods = RuntimeError("SECRET_TOKEN http://private.invalid")
+    env.bridge.loginAccount(ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    assert env.bridge.accountLoginChoice["error"] and env.bridge.accountLoginChoice["methods"] == []
+    assert "SECRET_TOKEN" not in str(env.bridge.accountLoginChoice)
+    assert env.accounts.row(ident) == before and monitor.snapshots == cached
+    env.bridge.cancelAccountLoginChoice()
+    env.runtime.methods = [{"id": "evil-method", "type": "oauth", "label": "SECRET_TOKEN"}]
+    env.bridge.loginAccount(ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    env.bridge.chooseAccountLoginMethod(ident, "evil-method")
+    assert env.accounts.row(ident) == before and not env.runtime.calls
+
+
+@pytest.mark.parametrize("method", ["chatgpt-browser", "chatgpt-token-sharing"])
+def test_explicit_method_selection_and_active_lease_recheck(account_ui, method):
+    env = account_ui
+    ident = add_account(env)
+    env.bridge.loginAccount(ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    assert not env.runtime.calls and not env.opened
+    env.accounts.row(ident)["in_flight"] = 1
+    env.bridge.chooseAccountLoginMethod(ident, method)
+    assert not env.runtime.calls and env.accounts.row(ident)["login_state"] == "signed_out"
+    assert "انتظر" in env.bridge.accountLoginChoice["error"]
+    env.accounts.row(ident)["in_flight"] = 0
+    env.bridge.chooseAccountLoginMethod(ident, method)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    assert env.runtime.selected_methods == [method] and len(env.opened) == 1
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_cancelled_or_failed_reauthorization_restores_verified_existing_login(account_ui, failure):
+    env = account_ui
+    ident = add_account(env)
+    env.accounts.row(ident).update(login_state="authenticated", identity="stable-account", health="healthy")
+    env.runtime.begin["mode"] = "code"
+    if failure:
+        env.runtime.begin = ValueError("selected method unavailable SECRET_TOKEN")
+    start_login(env, ident)
+    if not failure:
+        pump(env.app, lambda: ident in env.bridge._account_logins)
+        env.bridge.cancelAccountLogin(ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    assert env.accounts.row(ident)["login_state"] == "authenticated"
+    assert env.accounts.records[-1][2] is False
+    assert any(call[0] == "metadata" for call in env.runtime.calls)
+    assert not any(call[0] == "delete" for call in env.runtime.calls)
+    assert "SECRET_TOKEN" not in str(env.bridge.accountsModel._items)
+
+
+def test_cancelled_reauthorization_does_not_claim_auth_when_metadata_is_unverified(account_ui):
+    env = account_ui
+    ident = add_account(env)
+    env.accounts.row(ident).update(login_state="authenticated", identity="stable-account", health="healthy")
+    env.runtime.begin["mode"] = "code"
+    start_login(env, ident)
+    pump(env.app, lambda: ident in env.bridge._account_logins)
+    env.runtime.finish = {"authenticated": False}
+    env.bridge.cancelAccountLogin(ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    assert env.accounts.row(ident)["login_state"] == "needsverify"
+    assert env.bridge.accountsModel._items[0]["error"]
+
+
+def test_deleted_account_rejects_late_method_catalog(account_ui):
+    env = account_ui
+    ident = add_account(env)
+    env.runtime.method_gate = threading.Event()
+    env.bridge.loginAccount(ident)
+    env.accounts.remove(ident)
+    env.runtime.method_gate.set()
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    assert not env.bridge.accountLoginChoice and not env.runtime.calls and not env.opened
+
+
+@pytest.mark.parametrize("reason,wait", [("usage_unsupported", 0), ("refresh_wait", 17), ("managed_accounts_disabled", 0)])
+def test_manual_usage_rejection_is_controlled_and_browser_action_is_fixed(account_ui, reason, wait):
+    env = account_ui
+    ident = add_account(env)
+    monitor = attach_usage(env)
+    snapshot = monitor.public_snapshot(ident)
+    snapshot.update(canRefresh=False, refreshBlockReason=reason, refreshWaitSeconds=wait)
+    monitor.snapshots[ident] = snapshot
+    messages = []
+    env.bridge.notice.connect(lambda message, error: messages.append(message))
+    env.bridge.refreshAccountUsage(ident)
+    assert not monitor.requests and messages
+    if wait:
+        assert "17" in messages[-1]
+    env.bridge.refreshAllAccountUsage()
+    assert "لم يبدأ" in messages[-1] or "بدأ تحديث" in messages[-1]
+    env.bridge.manageAccountUsage()
+    assert env.opened[-1] == "https://chatgpt.com/settings/usage"
+    assert "صراحةً" in messages[-1]
+
+
+def test_open_login_choice_holds_auto_stop_without_changing_auth(account_ui):
+    env = account_ui
+    ident = add_account(env)
+    before = copy.deepcopy(env.accounts.row(ident))
+    reached = []
+    env.bridge.autoStopReached.connect(lambda: reached.append(True))
+    env.scheduler.running = True
+    env.bridge._auto_stop = env.bridge._auto_stop_seen = True
+    env.bridge.loginAccount(ident)
+    pump(env.app, lambda: not env.bridge._account_operation_busy())
+    assert env.bridge.accountBusy and env.bridge.accountLoginChoice["methods"]
+    env.bridge.refresh()
+    assert not reached and env.accounts.row(ident) == before
+    assert not env.runtime.calls and not env.opened
+    env.bridge.cancelAccountLoginChoice()
+    env.bridge.refresh()
+    assert reached and not env.bridge.accountBusy

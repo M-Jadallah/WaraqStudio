@@ -66,6 +66,8 @@ class Bridge(QObject):
         self._account_serial = 0
         self._account_logins = {}
         self._account_errors = {}
+        self._account_login_choice = {}
+        self._account_login_previous = {}
         self._accounts_closing = False
         self._accountTaskReady.connect(self._apply_account_task, Qt.ConnectionType.QueuedConnection)
         self._accountUsageReady.connect(self._apply_account_usage, Qt.ConnectionType.QueuedConnection)
@@ -218,7 +220,14 @@ class Bridge(QObject):
 
     @Property(bool, notify=accountsChanged)
     def accountBusy(self):
+        return self._account_operation_busy() or bool(self._account_login_choice)
+
+    def _account_operation_busy(self):
         return bool(self._account_ops or self._account_pending or self._account_logins)
+
+    @Property("QVariantMap", notify=accountsChanged)
+    def accountLoginChoice(self):
+        return dict(self._account_login_choice)
 
     def _usage_snapshot(self, ident):
         service = getattr(self.scheduler, "account_usage", None)
@@ -227,21 +236,49 @@ class Bridge(QObject):
         window = {"status": "unknown", "remainingPercent": None, "resetsAt": None, "windowMinutes": None}
         return {"status": "unknown", "stale": False, "lastSuccessAt": None, "lastAttemptAt": None,
                 "messageCode": "not_fetched", "source": "", "refreshing": False,
+                "canRefresh": False, "refreshWaitSeconds": 0, "refreshBlockReason": "usage_unavailable",
                 "fiveHour": dict(window), "weekly": dict(window)}
 
     @Slot(str)
     def refreshAccountUsage(self, ident):
         service = getattr(self.scheduler, "account_usage", None)
         if service and not self._accounts_closing and self._account(ident):
-            service.request(ident, manual=True)
+            usage = service.public_snapshot(ident)
+            if not usage.get("canRefresh", False):
+                self.notice.emit(self._usage_refresh_message(usage), False)
+                return
+            accepted = service.request(ident, manual=True)
             self._publish_accounts()
+            if not accepted:
+                self.notice.emit(self._usage_refresh_message(service.public_snapshot(ident)), False)
 
     @Slot()
     def refreshAllAccountUsage(self):
         service = getattr(self.scheduler, "account_usage", None)
         if service and not self._accounts_closing:
-            service.request_all()
+            accepted = service.request_all()
             self._publish_accounts()
+            total = self._accounts_model.rowCount()
+            self.notice.emit(("بدأ تحديث حصص " + str(accepted) + " حساب؛ لم يبدأ تحديث " + str(max(0, total - accepted))
+                              + " حساب. راجع سبب التعطيل أو الانتظار في بطاقته.") if accepted else
+                             "لم يبدأ تحديث أي حصة. راجع طريقة الدخول وسبب التعطيل أو الانتظار في بطاقات الحسابات.", False)
+
+    @staticmethod
+    def _usage_refresh_message(usage):
+        reason = usage.get("refreshBlockReason")
+        if reason == "refresh_wait":
+            return "انتظر " + str(max(0, int(usage.get("refreshWaitSeconds") or 0))) + " ثانية قبل إعادة تحديث الحصة."
+        return {"refreshing": "تحديث الحصة جارٍ بالفعل.",
+                "managed_accounts_disabled": "فعّل استخدام حسابات ChatGPT المُدارة لقراءة الحصة.",
+                "account_not_ready": "الحساب غير جاهز لقراءة الحصة؛ تحقق من تسجيل الدخول وحالة الجلسة.",
+                "usage_unsupported": "قراءة الحصة غير مدعومة لطريقة الدخول أو إصدار OpenCode الحالي. يمكنك فتح إدارة الاستخدام في المتصفح.",
+                "usage_closed": "أُوقف تحديث الحصص أثناء إغلاق التطبيق."}.get(reason, "تحديث الحصة غير متاح حاليًا.")
+
+    @Slot()
+    def manageAccountUsage(self):
+        self.notice.emit("اختر حساب ChatGPT المطلوب صراحةً في المتصفح. ورق لا يسجّل دخوله تلقائيًا.", False)
+        if not QDesktopServices.openUrl(QUrl("https://chatgpt.com/settings/usage")):
+            self.notice.emit("تعذّر فتح إدارة الاستخدام في المتصفح.", True)
 
     @Slot(object)
     def _apply_account_usage(self, payload):
@@ -284,7 +321,8 @@ class Bridge(QObject):
             usage_maintenance = bool(service and service.state(ident).get("maintenance"))
             usage_refreshing = bool(usage.get("refreshing"))
             usage = {key: usage.get(key) for key in ("status", "stale", "lastSuccessAt", "lastAttemptAt",
-                                                    "messageCode", "source", "fiveHour", "weekly")}
+                                                    "messageCode", "source", "fiveHour", "weekly",
+                                                    "canRefresh", "refreshWaitSeconds", "refreshBlockReason")}
             for key in ("fiveHour", "weekly"):
                 window = usage[key] or {}
                 usage[key] = {field: window.get(field) for field in ("status", "remainingPercent", "resetsAt", "windowMinutes")}
@@ -295,6 +333,8 @@ class Bridge(QObject):
                                "probe": "حان موعد إعادة فحص الحد؛ لم يُثبت تجدده"}.get(health, status_text)
             if operation == "metadata":
                 status_text = "جارٍ تحديث الحساب…"
+            if operation == "methods":
+                status_text = "جارٍ قراءة طرق تسجيل الدخول…"
             if health == "execution_uncertain":
                 status_text = "جلسة سابقة لم يُتحقق من توقفها"
             if operation == "recheck":
@@ -406,19 +446,54 @@ class Bridge(QObject):
 
     @Slot(str)
     def loginAccount(self, ident):
-        if not self._account_mutable(ident) or self.accountBusy:
+        if (not self._account_mutable(ident) or self._account_operation_busy()
+                or self._account_login_choice.get("accountId") not in (None, ident)):
             return
+        generation = self._account_generations.get(ident, 0) + 1
+        self._account_generations[ident] = generation
+        self._account_ops[ident] = "methods"
+        self._account_login_choice = {"accountId": ident, "alias": self._account(ident)["alias"],
+                                      "loading": True, "methods": [], "error": ""}
+        self._publish_accounts()
+        self.accountsChanged.emit()
+        self._account_task(ident, generation, "methods", lambda: self.scheduler.account_runtime.auth_methods(ident))
+
+    @Slot()
+    def cancelAccountLoginChoice(self):
+        ident = self._account_login_choice.get("accountId")
+        if ident and self._account_ops.get(ident) == "methods":
+            self._account_generations[ident] = self._account_generations.get(ident, 0) + 1
+            self._account_ops.pop(ident, None)
+        self._account_login_choice = {}
+        self._publish_accounts()
+        self.accountsChanged.emit()
+
+    @Slot(str, str)
+    def chooseAccountLoginMethod(self, ident, method):
+        choice = self._account_login_choice
+        if (choice.get("accountId") != ident or choice.get("loading")
+                or method not in {item["id"] for item in choice.get("methods", [])}):
+            return
+        if not self._account_mutable(ident) or self._account_operation_busy():
+            choice["error"] = "لا يمكن بدء الدخول الآن. انتظر اكتمال مهام الحساب أو التحقق من جلسته، ثم اختر الطريقة مجددًا."
+            self.accountsChanged.emit()
+            return
+        previous = self._account(ident)
         try:
             self.scheduler.accounts.set_login_state(ident, "authorizing")
         except Exception:
+            self.notice.emit("تعذّر بدء الدخول؛ انتظر اكتمال مهام الحساب أو التحقق من جلسته.", True)
             return
+        self._account_login_choice = {}
+        self._account_login_previous[ident] = previous.get("login_state") == "authenticated"
         self._invalidate_account_usage(ident)
         generation = self._account_generations.get(ident, 0) + 1
         self._account_generations[ident] = generation
         self._account_ops[ident] = "login"
         self._account_errors.pop(ident, None)
         self._publish_accounts()
-        self._account_task(ident, generation, "begin", lambda: self.scheduler.account_runtime.begin_login(ident))
+        self.accountsChanged.emit()
+        self._account_task(ident, generation, "begin", lambda: self.scheduler.account_runtime.begin_login(ident, method=method))
 
     @Slot(str)
     def recheckAccount(self, ident):
@@ -450,8 +525,24 @@ class Bridge(QObject):
         self._account_generations[ident] = generation
         self._account_logins.pop(ident, None)
         self._account_ops[ident] = "cancel"
-        self._account_task(ident, generation, "cancel", lambda: self.scheduler.account_runtime.cancel_login(ident))
+        self._account_task(ident, generation, "cancel", lambda: self._cancel_and_check_account(ident))
         self._publish_accounts()
+
+    def _cancel_and_check_account(self, ident):
+        self.scheduler.account_runtime.cancel_login(ident)
+        if self._account_login_previous.get(ident):
+            return self.scheduler.account_runtime.metadata(ident)
+        return None
+
+    def _restore_cancelled_account(self, ident, result):
+        if self._account_login_previous.pop(ident, False):
+            if isinstance(result, dict) and result.get("authenticated"):
+                self.scheduler.accounts.record_login_result(ident, result, reset_cooldown=False)
+            else:
+                self.scheduler.accounts.set_login_state(ident, "needsverify")
+                self._account_errors[ident] = "أُلغيت محاولة الدخول؛ تعذّر التحقق من الدخول السابق. افحص الحساب قبل استئناف مهامه."
+        else:
+            self.scheduler.accounts.set_login_state(ident, "signed_out")
 
     @Slot(str)
     def refreshAccount(self, ident):
@@ -475,6 +566,8 @@ class Bridge(QObject):
             self.scheduler.accounts.set_login_state(ident, "removing")
         except Exception:
             return
+        if self._account_login_choice.get("accountId") == ident:
+            self._account_login_choice = {}
         self._invalidate_account_usage(ident)
         generation = self._account_generations.get(ident, 0) + 1
         self._account_generations[ident] = generation
@@ -493,10 +586,44 @@ class Bridge(QObject):
         self._account_pending.discard(token)
         self._account_pending_owners.pop(token, None)
         if self._accounts_closing or self._account_generations.get(ident) != generation or not self._account(ident):
+            if not self._account(ident) and self._account_login_choice.get("accountId") == ident:
+                self._account_login_choice = {}
+                self._account_ops.pop(ident, None)
             self.accountsChanged.emit()
             return
         registry = self.scheduler.accounts
+        if action == "methods":
+            self._account_ops.pop(ident, None)
+            labels = {"chatgpt-browser": ("Codex browser (legacy)", "legacy_codex"),
+                      "chatgpt-headless": ("Codex device code (legacy)", "legacy_codex"),
+                      "chatgpt-token-sharing": ("Sign in with ChatGPT", "siwc")}
+            methods, seen = [], set()
+            for item in result if isinstance(result, list) and not error else []:
+                if (not isinstance(item, dict) or item.get("type") != "oauth"
+                        or not isinstance(item.get("id"), str) or item["id"] not in labels):
+                    continue
+                method = item["id"]
+                if method in seen:
+                    continue
+                seen.add(method)
+                label, kind = labels[method]
+                capability = item.get("usage") if isinstance(item.get("usage"), dict) else {}
+                methods.append({"id": method, "type": "oauth", "label": label, "kind": kind,
+                                "usage": {"status": "available" if capability.get("status") == "available" else "unsupported",
+                                          "reason_code": capability.get("reason_code") if capability.get("reason_code") in
+                                          ("legacy_supported", "native_version_unverified", "token_sharing_unsupported") else "method_unsupported",
+                                          "source": "legacy_codex_usage" if kind == "legacy_codex" else ""}})
+            if self._account_login_choice.get("accountId") == ident:
+                self._account_login_choice.update(loading=False, methods=methods,
+                    error="" if methods else "تعذّرت قراءة طرق دخول موثوقة. تحقّق من OpenCode ثم أعد المحاولة. يبقى تسجيل الحساب الحالي محفوظًا.")
+            self._publish_accounts()
+            self.accountsChanged.emit()
+            return
         if action == "cleanup":
+            try:
+                self._restore_cancelled_account(ident, result)
+            except Exception:
+                self._account_errors[ident] = "تعذّر التحقق من تسجيل الدخول السابق. افحص الحساب قبل استئناف مهامه."
             self._publish_accounts()
             self.accountsChanged.emit()
             return
@@ -530,21 +657,28 @@ class Bridge(QObject):
                 elif action == "remove":
                     registry.remove(ident)
                 elif action == "cancel":
-                    registry.set_login_state(ident, "signed_out")
+                    self._restore_cancelled_account(ident, result)
+                if action == "finish":
+                    self._account_login_previous.pop(ident, None)
                 self._account_ops.pop(ident, None)
                 self._account_logins.pop(ident, None)
-                self._account_errors.pop(ident, None)
+                if registry and self._account(ident) and self._account(ident).get("login_state") != "needsverify":
+                    self._account_errors.pop(ident, None)
         except Exception:
             self._account_ops.pop(ident, None)
             self._account_logins.pop(ident, None)
             self._account_errors[ident] = error or "لم تكتمل العملية. أعد المحاولة أو ألغِ تسجيل الدخول."
+            if action == "cancel" and self._account_login_previous.pop(ident, False):
+                registry.set_login_state(ident, "needsverify")
+                self._account_errors[ident] = "أُلغيت محاولة الدخول؛ تعذّر التحقق من الدخول السابق. افحص الحساب قبل استئناف مهامه."
             account = self._account(ident)
             if account and account.get("login_state") == "duplicate":
                 self._account_errors[ident] = "هذا الحساب مسجّل بالفعل باسم آخر. استخدم الإدخال الموجود."
-            elif action != "recheck" and account and account.get("health") != "execution_uncertain":
+            elif (action != "recheck" and account and account.get("health") != "execution_uncertain"
+                  and account.get("login_state") != "needsverify"):
                 registry.set_login_state(ident, "failed", self._account_errors[ident])
             if action in ("begin", "finish"):
-                self._account_task(ident, generation, "cleanup", lambda: self.scheduler.account_runtime.cancel_login(ident))
+                self._account_task(ident, generation, "cleanup", lambda: self._cancel_and_check_account(ident))
         self._publish_accounts()
         self.accountsChanged.emit()
 
@@ -552,6 +686,7 @@ class Bridge(QObject):
     def closeAccounts(self):
         # Invalidate callbacks before scheduler.shutdown closes native runtimes.
         self._accounts_closing = True
+        self._account_login_choice = {}
         self._account_usage_timer.stop()
         service = getattr(self.scheduler, "account_usage", None)
         if service:

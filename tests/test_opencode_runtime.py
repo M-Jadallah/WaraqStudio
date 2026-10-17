@@ -218,7 +218,7 @@ def test_oauth_uses_discovered_method_and_cancel_releases_ownership(tmp_path):
     def request(method, path, data=None):
         calls.append((method, path, data))
         if path == "/api/integration":
-            return {"data": [{"id": "openai", "methods": [{"id": "new-chatgpt-method", "type": "oauth", "label": "ChatGPT"},
+            return {"data": [{"id": "openai", "methods": [{"id": "chatgpt-token-sharing", "type": "oauth", "label": "ChatGPT"},
                 {"type": "key"}]}]}
         if method == "POST":
             return {"data": {"attemptID": "con_test", "url": "https://auth.openai.com/authorize?state=native",
@@ -229,7 +229,8 @@ def test_oauth_uses_discovered_method_and_cancel_releases_ownership(tmp_path):
     manager.ensure = lambda *args: runtime
     result = manager.begin_login("account123")
     assert result["mode"] == "auto" and result["attempt_id"] == "con_test"
-    assert calls[-1][2] == {"methodID": "new-chatgpt-method"}
+    assert calls[-1][2] == {"methodID": "chatgpt-token-sharing"}
+    assert result["method_id"] == "chatgpt-token-sharing"
     with pytest.raises(native.RuntimeError, match="current"):
         manager.begin_login("account456")
     assert manager.finish_login("account123")["status"] == "pending"
@@ -250,6 +251,76 @@ def test_oauth_rejects_unsafe_url_and_cancels_native_attempt(tmp_path):
         manager.begin_login("account123")
     assert runtime.request.call_args.args[0] == "DELETE"
     assert manager._login is None
+
+
+def test_auth_methods_are_known_oauth_allowlist_without_native_labels(tmp_path):
+    manager = native.AccountRuntimeManager(config(tmp_path))
+    response = {"data": [{"id": "other", "methods": [{"id": "chatgpt-browser", "type": "oauth"}]},
+        {"id": "openai", "methods": [None, {}, {"id": [], "type": "oauth"},
+            {"id": "chatgpt-token-sharing", "type": "oauth", "label": "PRIVATE_NATIVE_TEXT"},
+            {"id": "unknown-chatgpt", "type": "oauth", "label": "ChatGPT"},
+            {"id": "chatgpt-browser", "type": "key"},
+            {"id": "chatgpt-browser", "type": "oauth", "label": "PRIVATE_NATIVE_TEXT"},
+            {"id": "chatgpt-headless", "type": "oauth"},
+            {"id": "chatgpt-browser", "type": "oauth"}]}]}
+    runtime = SimpleNamespace(native_version="2.0.27", request=Mock(return_value=response))
+    manager.ensure = Mock(return_value=runtime)
+    methods = manager.auth_methods("account123")
+    assert [m["id"] for m in methods] == ["chatgpt-token-sharing", "chatgpt-browser", "chatgpt-headless"]
+    assert methods[0]["kind"] == "siwc" and methods[0]["usage"]["source"] == ""
+    assert methods[1]["kind"] == "legacy_codex" and methods[1]["usage"]["status"] == "available"
+    assert "PRIVATE_NATIVE_TEXT" not in json.dumps(methods)
+
+
+@pytest.mark.parametrize("method", ["chatgpt-browser", "chatgpt-headless"])
+def test_explicit_legacy_login_selects_exact_method_even_when_siwc_is_first(tmp_path, method):
+    manager = native.AccountRuntimeManager(config(tmp_path))
+    calls = []
+    def request(verb, path, data=None):
+        calls.append((verb, path, data))
+        if path == "/api/integration":
+            return {"data": [{"id": "openai", "methods": [
+                {"id": ident, "type": "oauth"} for ident in
+                ("chatgpt-token-sharing", "chatgpt-browser", "chatgpt-headless")]}]}
+        return {"data": {"attemptID": "con_synthetic", "url": "https://auth.openai.com/authorize?state=synthetic",
+                         "mode": "auto", "time": {"expires": 4000000000000}}}
+    manager.ensure = Mock(return_value=SimpleNamespace(native_version="2.0.27", request=request))
+    result = manager.begin_login("account123", method=method)
+    assert calls[-1] == ("POST", "/api/integration/openai/connect/oauth", {"methodID": method})
+    assert result["method_id"] == method
+
+
+@pytest.mark.parametrize("method", ["unknown-chatgpt", "chatgpt", "CHATGPT-BROWSER", "", [], {}, 1, False])
+def test_explicit_unknown_login_method_is_rejected_before_native_access(tmp_path, method):
+    manager = native.AccountRuntimeManager(config(tmp_path))
+    manager.ensure = Mock(side_effect=AssertionError("unknown method reached native"))
+    with pytest.raises(native.RuntimeError, match="Unknown"):
+        manager.begin_login("account123", method=method)
+    manager.ensure.assert_not_called()
+    assert manager._login is None and not manager._usage_epochs
+
+
+@pytest.mark.parametrize("method", ["chatgpt-browser", "chatgpt-headless"])
+def test_explicit_unavailable_login_method_never_falls_back_to_siwc(tmp_path, method):
+    manager = native.AccountRuntimeManager(config(tmp_path))
+    runtime = SimpleNamespace(native_version="2.0.27", request=Mock(return_value={"data": [
+        {"id": "openai", "methods": [{"id": "chatgpt-token-sharing", "type": "oauth"}]}]}))
+    manager.ensure = Mock(return_value=runtime)
+    with pytest.raises(native.RuntimeError, match="unavailable"):
+        manager.begin_login("account123", method=method)
+    assert runtime.request.call_args.args == ("GET", "/api/integration")
+    assert runtime.request.call_count == 1 and manager._login is None and not manager._usage_epochs
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"data": None}, {"data": []},
+    {"data": [{"id": "openai", "methods": {}}]}])
+def test_malformed_native_auth_catalog_never_creates_login(tmp_path, payload):
+    manager = native.AccountRuntimeManager(config(tmp_path))
+    runtime = SimpleNamespace(native_version="2.0.27", request=Mock(return_value=payload))
+    manager.ensure = Mock(return_value=runtime)
+    with pytest.raises(native.RuntimeError):
+        manager.begin_login("account123", method="chatgpt-browser")
+    assert runtime.request.call_count == 1 and manager._login is None
 
 
 def test_subscription_gate_rejects_active_key_even_if_profile_configured(tmp_path):

@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QPoint, QPointF, QUrl, Qt, qInstallMessageHandler
+from PySide6.QtCore import QObject, QPoint, QPointF, QUrl, Qt, qInstallMessageHandler
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtTest import QTest
@@ -57,6 +57,10 @@ def main():
 
         def find(name, parent=None):
             matches = find_all(parent or root.contentItem(), name)
+            if not matches and parent is None:
+                popup = root.findChild(QObject, name)
+                if popup:
+                    return popup
             assert matches, name
             return matches[0]
 
@@ -85,6 +89,14 @@ def main():
                 QTest.qWait(15)
             assert predicate(), "account action did not finish"
 
+        def choose_method(label):
+            settle(lambda: not bridge.accountLoginChoice.get("loading"))
+            buttons = find_all(root.contentItem(), "accountLoginMethodButton")
+            method_button = next(button for button in buttons if button.property("text") == label)
+            position = method_button.mapToScene(method_button.boundingRect().center())
+            QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(position.x()), int(position.y())))
+            QTest.qWait(45)
+
         with patch("waraq.bridge.QDesktopServices.openUrl", lambda url: opened.append(url.toString()) or True):
             assert not runtime.calls and not config.data["chatgpt_accounts_enabled"]
             click("managedAccountsEnabled")
@@ -98,17 +110,28 @@ def main():
             first = find("accountCard")
             runtime.begin["mode"] = "code"
             click("accountLoginButton", first)
+            settle(lambda: not bridge._account_operation_busy())
+            assert not runtime.calls and not opened
+            assert scheduler.accounts.list()[0]["login_state"] == "logged_out"
+            assert find("accountLoginMethodDialog").property("visible")
+            click("accountLoginChoiceCancelButton")
+            assert not bridge.accountLoginChoice and not opened
+            click("accountLoginButton", first)
+            choose_method("Sign in with ChatGPT")
             settle(lambda: bool(bridge._account_logins))
+            assert runtime.selected_methods[-1] == "chatgpt-token-sharing"
             assert len(opened) == 1 and bridge.accountsModel._items[0]["needsCode"]
             assert not find("accountRemoveButton", first).property("enabled")
             click("accountCancelLoginButton", first)
-            settle(lambda: not bridge.accountBusy)
+            settle(lambda: not bridge._account_operation_busy())
             runtime.begin["mode"] = "auto"
             click("accountLoginButton", first)
-            settle(lambda: not bridge.accountBusy)
+            choose_method("Codex browser (legacy)")
+            settle(lambda: not bridge._account_operation_busy())
+            assert runtime.selected_methods[-1] == "chatgpt-browser"
             assert scheduler.accounts.list()[0]["login_state"] == "authenticated"
             click("accountRefreshButton", first)
-            settle(lambda: not bridge.accountBusy)
+            settle(lambda: not bridge._account_operation_busy())
             assert "Plus" in find("accountStatus", first).property("text")
             assert "غير معروف" in find("accountUsageFiveHour", first).property("text")
             usage.gate.set()
@@ -118,6 +141,14 @@ def main():
             assert "0٪" in find("accountUsageFiveHour", first).property("text")
             assert "43٪" in find("accountUsageWeekly", first).property("text")
             assert "غير معروف" not in find("accountUsageUpdated", first).property("text")
+            usage.snapshots[ident].update(canRefresh=False, refreshWaitSeconds=17, refreshBlockReason="refresh_wait")
+            bridge.refresh()
+            assert not find("accountUsageRefreshButton", first).property("enabled")
+            assert "17" in find("accountUsageRefreshReason", first).property("text")
+            click("accountManageUsageButton", first)
+            assert opened[-1] == "https://chatgpt.com/settings/usage"
+            usage.snapshots[ident].update(canRefresh=True, refreshWaitSeconds=0, refreshBlockReason="")
+            bridge.refresh()
             # Manual telemetry remains usable while an account executes work.
             with store.lock:
                 lease, _ = scheduler.accounts.acquire("fixture-active-job", "fixture-worker", "model")
@@ -150,7 +181,8 @@ def main():
                 "fiveHour": {**available["fiveHour"], "status": "stale"},
                 "weekly": {"status": "unavailable", "remainingPercent": None, "resetsAt": None, "windowMinutes": None}}
             usage.snapshots[rows[2]["id"]] = {**usage.public_snapshot("unknown"),
-                "status": "unsupported", "messageCode": "token_sharing_unsupported"}
+                "status": "unsupported", "messageCode": "token_sharing_unsupported", "canRefresh": False,
+                "refreshBlockReason": "usage_unsupported"}
             bridge.refresh()
             assert "قراءة قديمة" in find("accountUsageFiveHour").property("text")
             assert "غير معروف" in find("accountUsageWeekly").property("text")
@@ -193,6 +225,21 @@ def main():
                 assert root.grabWindow().save(str(screenshots / f"workers-{theme}-{scale}-{compact}.png"))
                 scroller.setProperty("contentY", 0)
                 QTest.qWait(50)
+                # Opening and cancelling the method chooser never begins OAuth.
+                current = scheduler.accounts.list()[0]
+                calls_before = len(runtime.calls)
+                bridge.loginAccount(current["id"])
+                settle(lambda: not bridge._account_operation_busy())
+                dialog = find("accountLoginMethodDialog")
+                assert dialog.property("visible") and dialog.property("width") <= root.width() - 20
+                assert dialog.property("height") <= root.height() - 20
+                explanations = find_all(root.contentItem(), "accountLoginMethodExplanation")
+                assert any("ليست ضمانًا" in label.property("text") for label in explanations)
+                assert any("غير مدعومة" in label.property("text") for label in explanations)
+                root.setProperty("toastText", "")
+                assert root.grabWindow().save(str(screenshots / f"login-methods-{theme}-{scale}-{compact}.png"))
+                click("accountLoginChoiceCancelButton")
+                assert len(runtime.calls) == calls_before
             config.save({"theme": "dark", "ui_scale": 1.0, "ui_compact": True})
             bridge.settingsChanged.emit()
             QTest.qWait(100)
@@ -207,7 +254,7 @@ def main():
             assert len(scheduler.accounts.list()) == 3
             click("accountRemoveButton", first)
             click("accountRemoveConfirmButton")
-            settle(lambda: not bridge.accountBusy)
+            settle(lambda: not bridge._account_operation_busy())
             assert len(scheduler.accounts.list()) == 2
             errors = [message for message in messages if any(word in message for word in ("Error", "ReferenceError", "TypeError", "Binding loop", "Unable to assign"))]
             assert not errors, errors

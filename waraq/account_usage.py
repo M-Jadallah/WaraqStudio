@@ -16,6 +16,8 @@ from .opencode_usage import USAGE_REASON_CODES
 
 STATUSES = {"available", "partial", "unsupported", "auth_unavailable", "deferred", "unavailable", "cancelled"}
 BACKOFF = (60, 120, 300, 600, 900)
+CAPABILITY_BLOCKS = frozenset(("token_sharing_unsupported", "method_unsupported",
+                              "native_version_unverified", "usage_runtime_unsupported"))
 REASONS = USAGE_REASON_CODES | frozenset((
     "usage_unavailable", "not_checked", "usage_available", "usage_partial", "usage_windows_unavailable",
     "usage_read_failed", "usage_cancelled", "usage_refresh_deferred", "usage_runtime_unsupported",
@@ -129,52 +131,84 @@ class AccountUsageMonitor:
                     "nextAttemptAt": self.next_attempt.get(ident, 0),
                     "maintenance": self.accounts.usage_is_maintenance(ident)}
 
+    def _capability_key(self, ident, config=None):
+        """Local cached facts only; never start/probe a native process here."""
+        try:
+            config = config if config is not None else self.scheduler.config.snapshot()
+            reader = getattr(self.scheduler.account_runtime, "usage_capability_key", None)
+            return (config.get("opencode_executable", ""), reader(ident) if callable(reader) else None)
+        except Exception:
+            # Filesystem/runtime facts can be temporarily unreadable. Unknown
+            # compatibility is neither permission to fetch nor a changed key.
+            return None
+
+    def _refresh_context(self, ident, manual):
+        """One eligibility decision shared by requests and cache-only UI state."""
+        blocked = lambda reason, wait=0: (False, reason, max(0, math.ceil(wait)), None, None)
+        if self.closed or self.scheduler.stop_event.is_set():
+            return blocked("usage_closed")
+        if self.callback is None:
+            return blocked("usage_unavailable")
+        if ident in self.pending or self.accounts.usage_is_maintenance(ident):
+            return blocked("refreshing")
+        config = self.scheduler.config.snapshot()
+        if not config.get("chatgpt_accounts_enabled", False):
+            return blocked("managed_accounts_disabled")
+        if not manual and not config.get("chatgpt_usage_auto_refresh", True):
+            return blocked("auto_refresh_disabled")
+        if not self.accounts.usage_eligible(ident):
+            return blocked("account_not_ready")
+        binding = self.accounts.usage_binding(ident)
+        capability = self._capability_key(ident, config)
+        if capability is None:
+            return blocked("usage_unavailable")
+        record = self.accounts.usage_record(ident)
+        unsupported = self.unsupported.get(ident)
+        if unsupported and (unsupported["binding"] != binding or unsupported["capability"] != capability):
+            # A changed native capability deserves a new local check even when
+            # the authenticated account identity itself has not changed.
+            self.unsupported.pop(ident, None)
+            self.failures.pop(ident, None)
+            self._due_deadlines[ident] = self.monotonic()
+            unsupported = None
+        if unsupported and (not manual or unsupported["reason"] in CAPABILITY_BLOCKS):
+            return blocked("usage_unsupported")
+        now, monotonic_now = self.clock(), self.monotonic()
+        last = max(self.last_attempt.get(ident, 0), record["last_attempt_at"] if record else 0)
+        due = max(self.next_attempt.get(ident, 0), record["next_attempt_at"] if record else 0)
+        snapshot = record["snapshot"] if record else {}
+        if ident not in self._floor_deadlines:
+            # Import durable wall times once, then use monotonic cadence. If
+            # the wall clock moved backwards, retain the delay rather than the
+            # previous calendar date (which could otherwise stall for days).
+            rollback = bool(last and last > now)
+            remaining = max(0, due - (last if rollback else now))
+            floor = 30 if rollback else max(0, last + 30 - now) if last else 0
+            retry_wait = (snapshot.get("retry_after", 0) if rollback else
+                          max(0, snapshot.get("observed_at", 0) + snapshot.get("retry_after", 0) - now))
+            self._floor_deadlines[ident] = monotonic_now + floor
+            self._due_deadlines.setdefault(ident, monotonic_now + remaining)
+            self._retry_deadlines[ident] = monotonic_now + retry_wait
+        failed = self.failures.get(ident, 0) or (record and record["status"] not in ("available", "partial", "not_checked"))
+        deadline = max(self._floor_deadlines[ident], self._retry_deadlines[ident])
+        if not manual or failed:
+            deadline = max(deadline, self._due_deadlines[ident])
+        if monotonic_now < deadline:
+            return blocked("refresh_wait", deadline - monotonic_now)
+        return True, "", 0, binding, capability
+
     def request(self, ident, manual=False):
         with self.lock:
-            if self.closed or self.callback is None or ident in self.pending:
+            allowed, _, _, binding, capability = self._refresh_context(ident, manual)
+            if not allowed:
                 return False
-            now = self.clock()
-            monotonic_now = self.monotonic()
-            config = self.scheduler.config.snapshot()
-            if not config.get("chatgpt_accounts_enabled", False):
-                return False
-            if not manual and not config.get("chatgpt_usage_auto_refresh", True):
-                return False
-            if not self.accounts.usage_eligible(ident):
-                return False
-            binding = self.accounts.usage_binding(ident)
-            if not manual and self.unsupported.get(ident) == binding:
-                return False
-            record = self.accounts.usage_record(ident)
-            last = max(self.last_attempt.get(ident, 0), record["last_attempt_at"] if record else 0)
-            due = max(self.next_attempt.get(ident, 0), record["next_attempt_at"] if record else 0)
-            snapshot = record["snapshot"] if record else {}
-            if ident not in self._floor_deadlines:
-                # Import persisted wall-clock due times once; live cadence then
-                # uses monotonic deadlines, so clock corrections cannot stall
-                # polling. A future persisted attempt signals a clock rollback;
-                # retain its full delay rather than waiting until the old date.
-                rollback = bool(last and last > now)
-                remaining = max(0, due - (last if rollback else now))
-                floor = 30 if rollback else max(0, last + 30 - now) if last else 0
-                retry_wait = (snapshot.get("retry_after", 0) if rollback else
-                              max(0, snapshot.get("observed_at", 0) + snapshot.get("retry_after", 0) - now))
-                self._floor_deadlines[ident] = monotonic_now + floor
-                self._due_deadlines[ident] = monotonic_now + remaining
-                self._retry_deadlines[ident] = monotonic_now + retry_wait
-            # Manual refresh may bypass the ordinary interval, never Retry-After
-            # or the per-account 30-second request floor.
-            if monotonic_now < self._floor_deadlines[ident]:
-                return False
-            failed = self.failures.get(ident, 0) or (record and record["status"] not in ("available", "partial", "not_checked"))
-            if (monotonic_now < self._retry_deadlines[ident]
-                    or (monotonic_now < self._due_deadlines[ident] and (not manual or failed))):
-                return False
+            now, monotonic_now = self.clock(), self.monotonic()
             request_id = uuid.uuid4().hex
             if not self.accounts.begin_usage_request(ident, binding, request_id, now):
                 return False
             cancel = threading.Event()
-            self.pending[ident] = {"request_id": request_id, "binding": binding, "cancel": cancel}
+            self.pending[ident] = {"request_id": request_id, "binding": binding, "cancel": cancel,
+                                   "capability": capability}
             self.last_attempt[ident] = now
             self._floor_deadlines[ident] = monotonic_now + 30
             try:
@@ -204,11 +238,13 @@ class AccountUsageMonitor:
         result = safe_usage_result(result)
         if not result["observed_at"]:
             result["observed_at"] = self.clock()
+        capability = self._capability_key(ident)
         payload = dict(binding, request_id=request_id, result=result)
         with self.lock:
             current = self.pending.get(ident)
             if (self.closed or cancel.is_set() or not current or current["request_id"] != request_id):
                 return
+            current["result_capability"] = capability if capability is not None else current["capability"]
             callback = self.callback
         if callback is not None:
             try:
@@ -253,7 +289,11 @@ class AccountUsageMonitor:
                 if success:
                     self.validated.add(ident)
                 if result["status"] == "unsupported":
-                    self.unsupported[ident] = binding
+                    self.unsupported[ident] = {"binding": binding,
+                                               "capability": current.get("result_capability", current["capability"]),
+                                               "reason": result["reason_code"]}
+                else:
+                    self.unsupported.pop(ident, None)
             return accepted
 
     def invalidate(self, ident):
@@ -306,6 +346,8 @@ class AccountUsageMonitor:
                       "lastSuccessAt": success, "lastAttemptAt": record["last_attempt_at"] if record else 0,
                       "messageCode": record["reason_code"] if record else "not_checked",
                       "source": snapshot.get("source", ""), "refreshing": ident in self.pending}
+            allowed, block_reason, wait, _, _ = self._refresh_context(ident, manual=True)
+            result.update(canRefresh=allowed, refreshWaitSeconds=wait, refreshBlockReason=block_reason)
             for source, target in (("five_hour", "fiveHour"), ("weekly", "weekly")):
                 window = snapshot.get(source)
                 result[target] = {"status": "stale" if stale else "available" if window else "unavailable",

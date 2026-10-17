@@ -7,6 +7,7 @@ provider deliberately has no real ChatGPT account. Gate rejection is unit tested
 """
 import base64
 import hashlib
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -25,7 +26,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from waraq.config import Config, defaults
 from waraq.opencode_runtime import AccountRuntimeManager
-from waraq.opencode_usage import parse_usage_response
+from waraq.opencode_usage import VERIFIED_NATIVE_VERSIONS, parse_usage_response
 from waraq.services import OpenCode, ServiceError, digest, opencode_version, resolve_opencode, validate_docx
 from waraq.scheduler import Scheduler
 from waraq.store import Store
@@ -39,7 +40,7 @@ def verify_usage_quota(executable, version):
     is installed. Future expiry prevents native OAuth refresh. This verifies
     the tested native contract; it does not claim a live ChatGPT quota check.
     """
-    assert version == "2.0.27", "Usage acceptance requires the explicitly tested native version"
+    assert version in VERIFIED_NATIVE_VERSIONS, "Usage acceptance requires an explicitly verified native version"
     with tempfile.TemporaryDirectory(prefix="waraq-usage-native-acceptance-") as temporary:
         root = Path(temporary)
         cfg = dict(defaults(root), opencode_executable=str(executable))
@@ -58,7 +59,11 @@ def verify_usage_quota(executable, version):
                 account_id = "account_usage_synthetic"
                 runtime = manager.ensure(account_id)
                 # Initialise while the disposable native account has no OAuth.
-                manager.auth_methods(account_id)
+                methods = manager.auth_methods(account_id)
+                assert {method["id"] for method in methods} == {
+                    "chatgpt-token-sharing", "chatgpt-browser", "chatgpt-headless"}
+                assert next(method for method in methods if method["id"] == "chatgpt-browser")["usage"]["status"] == "available"
+                assert next(method for method in methods if method["id"] == "chatgpt-token-sharing")["usage"]["status"] == "unsupported"
                 claims = {"sub": "usage-synthetic-subject", "https://api.openai.com/auth": {
                     "chatgpt_account_id": "usage-synthetic-account"}}
                 encoded = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
@@ -346,8 +351,13 @@ def main():
 
 
 if __name__ == "__main__":
-    if "--usage-only" in sys.argv:
-        executable = resolve_opencode("opencode")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--usage-only", action="store_true")
+    parser.add_argument("--executable", default="opencode", help="Native executable for usage-only acceptance")
+    args = parser.parse_args()
+    if args.usage_only:
+        executable = resolve_opencode(args.executable)
         print(json.dumps(verify_usage_quota(executable, opencode_version(executable))))
     else:
+        assert args.executable == "opencode", "Executable option requires --usage-only"
         main()
