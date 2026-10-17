@@ -321,10 +321,14 @@ def main():
         server=uvicorn.Server(uvicorn.Config(relay,host="127.0.0.1",port=port,ssl_certfile=str(cert),
                                              ssl_keyfile=str(key),access_log=False,log_level="critical",
                                              timeout_graceful_shutdown=3))
+        relay_failures=[]
         def serve_relay():
-            factory=asyncio.SelectorEventLoop if os.name=="nt" else asyncio.new_event_loop
-            with asyncio.Runner(loop_factory=factory) as runner:
-                runner.run(server.serve(sockets=[listener]))
+            try:
+                factory=asyncio.SelectorEventLoop if os.name=="nt" else asyncio.new_event_loop
+                with asyncio.Runner(loop_factory=factory) as runner:
+                    runner.run(server.serve(sockets=[listener]))
+            except BaseException:
+                relay_failures.append(traceback.format_exc())
         relay_thread=threading.Thread(target=serve_relay,daemon=True,name="test-relay-tls")
         bridges=[]
         browser_thread=None
@@ -379,6 +383,12 @@ def main():
                     if bridge.internet._thread:
                         bridge.internet._thread.join(1)
                         assert not bridge.internet._thread.is_alive(),"Connector remained live during cleanup"
+                # Client threads can finish before the server processes their
+                # WebSocket close frames. Drain those transports before asking
+                # Uvicorn to initiate a second close during server shutdown.
+                until=time.monotonic()+10
+                while server.server_state.connections and time.monotonic()<until:
+                    app.processEvents();time.sleep(.01)
                 server.should_exit=True
                 relay_thread.join(10)
                 assert not relay_thread.is_alive(),"Relay remained live during cleanup"
@@ -388,6 +398,7 @@ def main():
                 for bridge in bridges:bridge.store.db.close()
                 database.engine.dispose()
                 app.processEvents()
+                assert not relay_failures,"TLS relay failed during execution/shutdown:\n"+"\n".join(relay_failures)
     print("Full TLS Internet stack passed: external QR/link navigation, real enrollment/WSS, two Qt desktop identities, phone approval, "
           "target tampering denied, queue isolation, BOM TXT byte preservation/download, task cancellation, "
           "actual paginated library, bounded safe preview, mirror download/delete preserving original, "

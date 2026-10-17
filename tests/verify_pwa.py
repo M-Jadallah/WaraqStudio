@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 from pathlib import Path
+import re
 import ssl
 import sys
 import tempfile
@@ -87,7 +88,10 @@ def main():
         def do_GET(self):
             path = self.path.split('?')[0]
             if path == '/sw.js':
-                data = (MOBILE/'sw.js').read_text('utf-8').replace('2026-10-16-pwa-2',f'test-{record["version"]}')
+                data, replacements = re.subn(r"(?m)^const VERSION = '[^']+';$",
+                    lambda _: f"const VERSION = 'test-{record['version']}';",
+                    (MOBILE/'sw.js').read_text('utf-8'), count=1)
+                assert replacements == 1, 'Service Worker version declaration was not found'
                 self.reply(data.encode(),'text/javascript'); return
             if path == '/api/bootstrap': self.reply({'mode':'internet'}); return
             if path == '/api/devices': self.reply({'devices':[]}); return

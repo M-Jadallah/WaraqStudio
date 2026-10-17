@@ -1,5 +1,9 @@
 # Verification — 2026-09-19 · منطق إعادة تنزيل YouTube + ضغط الواجهة
 
+## Actions acceptance follow-up — 2026-10-17
+
+The first managed-account push passed the 431-test suite, real OpenCode account isolation/failover, native account UI and Docker/PostgreSQL gates. PWA acceptance exposed a test fixture that replaced a fixed old Service Worker version; the fixture now substitutes the declared version and asserts that it matched. The real HTTPS PWA acceptance passed locally with the new public-cache version. TLS acceptance also exposed a shutdown race between a completed connector thread and the server's WebSocket `connection_lost` callback. Cleanup now waits for server transports to drain, and a relay-thread exception fails acceptance explicitly. The complete two-desktop TLS/browser acceptance passed against both Uvicorn 0.52.4 and the Actions version 0.54.0, without a shutdown traceback. These changes affect verification only.
+
 ## Managed ChatGPT accounts — 2026-10-17
 
 - `python -m pytest tests -q --tb=short`: **431 passed**. The account tests cover three-account routing, shared per-account capacity, explicit preference, sticky selection, account/model quota scope, conservative 429 classification, unknown-reset probes, persistent cooldowns, stale parallel results, duplicate identities, failed database claims, crash recovery and all-or-nothing session reconciliation. Durable replay holds also block direct store claims/retries after managed mode is disabled. Runtime tests cover failed startup/cleanup, Windows 64-bit process handles, malformed ownership/activity responses, private Windows ACL repair and source/candidate integrity. Bridge tests exercise asynchronous login/cancel/delete and stale callbacks without real OAuth.
