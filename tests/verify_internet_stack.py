@@ -300,7 +300,7 @@ def browser_checks(base, bridges, gui, output):
             browser.close()
 
 
-def main():
+def run_acceptance():
     import uvicorn
     import websockets.sync.client
     output=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else None
@@ -373,6 +373,10 @@ def main():
                 if failures:raise AssertionError("\n".join(failures))
             finally:
                 for bridge in bridges:
+                    # Stop both Qt publishers before releasing the scheduler or
+                    # database; queued usage callbacks must also be invalidated.
+                    bridge.timer.stop()
+                    bridge.closeAccounts()
                     bridge.internet.stop();bridge.internet_commands.stop();bridge.remote.stop();bridge.scheduler.shutdown()
                     bridge.closeRemoteLibrary()
                 # Continue pumping Qt so already queued commands are cancelled before DB cleanup.
@@ -399,6 +403,22 @@ def main():
                 database.engine.dispose()
                 app.processEvents()
                 assert not relay_failures,"TLS relay failed during execution/shutdown:\n"+"\n".join(relay_failures)
+
+
+def main():
+    # PySide reports exceptions from Python slots through sys.excepthook and
+    # continues processing events. Treat them as acceptance failures, including
+    # callbacks dispatched during cleanup after the browser checks complete.
+    callback_failures = []
+    original_hook = sys.excepthook
+    def capture_callback_failure(kind, value, tb):
+        callback_failures.append("".join(traceback.format_exception(kind, value, tb)))
+    sys.excepthook = capture_callback_failure
+    try:
+        run_acceptance()
+        assert not callback_failures, "Unhandled Qt callback exceptions:\n" + "\n".join(callback_failures)
+    finally:
+        sys.excepthook = original_hook
     print("Full TLS Internet stack passed: external QR/link navigation, real enrollment/WSS, two Qt desktop identities, phone approval, "
           "target tampering denied, queue isolation, BOM TXT byte preservation/download, task cancellation, "
           "actual paginated library, bounded safe preview, mirror download/delete preserving original, "

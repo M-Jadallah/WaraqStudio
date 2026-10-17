@@ -26,7 +26,8 @@ def main():
     record = {"approved": False, "offline": False, "uncertain": False, "reject_second_phone": False,
               "posts": [], "state_requests": [], "grants": ["device-a", "device-b"],
               "library_calls": [], "deleted": False, "library_capable": True, "stale": False,
-              "revoke_preview": False, "hold_next_state": False, "deny_state": False}
+              "revoke_preview": False, "hold_next_state": False, "deny_state": False,
+              "delay_next_app_script": False}
     state_held, release_state = threading.Event(), threading.Event()
     names = {"device-a": "كمبيوتر المنزل", "device-b": "كمبيوتر المكتب"}
 
@@ -56,6 +57,11 @@ def main():
         def do_GET(self):
             if self.path.startswith("/assets/"):
                 name = self.path.rsplit("/", 1)[1]
+                if name == "app.js" and record["delay_next_app_script"]:
+                    record["delay_next_app_script"] = False
+                    # Reproduce a loaded HTML document whose deferred script is
+                    # slower than Playwright's ordinary five-second assertion.
+                    threading.Event().wait(6)
                 path = ROOT / "waraq" / ("icon.svg" if name == "icon.svg" else "mobile/" + name)
                 content_type = "text/javascript" if name.endswith(".js") else {"style.css": "text/css", "icon.svg": "image/svg+xml"}[name]
                 self.reply(path.read_bytes(), content_type=content_type)
@@ -140,7 +146,25 @@ def main():
                                           color_scheme="dark", reduced_motion="reduce")
             page = context.new_page()
             errors = []
+            failed_requests = []
             page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("requestfailed", lambda request: failed_requests.append((request.url, request.failure)))
+
+            def navigate_click(locator, destination):
+                # click() can finish at document commit, before deferred app.js
+                # initializes the new page. Wait for that exact document's load;
+                # this is a lifecycle barrier, not a retry or a longer UI assertion.
+                try:
+                    with page.expect_navigation(url=destination, wait_until="load", timeout=30000):
+                        locator.click()
+                except Exception as error:
+                    try:
+                        state = page.evaluate("""() => ({url: location.href, readyState: document.readyState,
+                            scripts: [...document.scripts].map(script => script.src)})""")
+                    except Exception as diagnostic_error:
+                        state = {"diagnosticError": str(diagnostic_error)}
+                    raise AssertionError(f"Navigation did not finish: {state}; page errors: {errors}; "
+                                         f"failed requests: {failed_requests}") from error
             page.goto(base + "/pair#one-use-secret")
             expect(page.locator("#internet-pair")).to_be_visible()
             assert page.evaluate("location.hash") == ""
@@ -262,10 +286,12 @@ def main():
             expect(page.locator("#workspace")).to_be_visible()
             page.locator('[data-tab="source"]').click()
             page.locator("#url").fill("https://youtu.be/for-device-a")
-            page.locator("#change-device").click()
+            record["delay_next_app_script"] = True
+            navigate_click(page.locator("#change-device"), base + "/internet")
+            assert not record["delay_next_app_script"], "Delayed deferred-script regression was not exercised"
             expect(page.locator("#internet-home")).to_be_visible()
             expect(page.locator("#device-list a")).to_have_count(2)
-            page.get_by_role("link", name=names["device-b"], exact=True).click()
+            navigate_click(page.get_by_role("link", name=names["device-b"], exact=True), base + "/devices/device-b")
             expect(page.locator("#device-name")).to_have_text(names["device-b"])
             expect(page.locator("#url")).to_have_value("")
             expect(page.locator("#jobs")).to_contain_text("درس " + names["device-b"])
@@ -308,7 +334,7 @@ def main():
                     page.locator(f'[data-tab="{tab}"]').click()
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (scheme, tab, "200% text")
                 page.evaluate("document.documentElement.style.fontSize='16px'")
-            page.locator("#logout").click()
+            navigate_click(page.locator("#logout"), base + "/internet")
             expect(page).to_have_url(base + "/internet")
             expect(page.locator("#device-list a")).to_have_count(1)
             assert record["grants"] == ["device-b"]
