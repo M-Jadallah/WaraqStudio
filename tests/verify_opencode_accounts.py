@@ -6,6 +6,7 @@ paid model call. The subscription gate alone is stubbed because the fake local
 provider deliberately has no real ChatGPT account. Gate rejection is unit tested.
 """
 import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -24,10 +25,69 @@ from urllib.request import Request, build_opener, ProxyHandler
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from waraq.config import Config, defaults
 from waraq.opencode_runtime import AccountRuntimeManager
+from waraq.opencode_usage import parse_usage_response
 from waraq.services import OpenCode, ServiceError, digest, opencode_version, resolve_opencode, validate_docx
 from waraq.scheduler import Scheduler
 from waraq.store import Store
 from verify_opencode_v2 import CONTENT_TYPES, RELATIONSHIPS
+
+
+def verify_usage_quota(executable, version):
+    """Real native serialization in a new disposable profile; zero inference.
+
+    The private outbound transport is replaced before any synthetic credential
+    is installed. Future expiry prevents native OAuth refresh. This verifies
+    the tested native contract; it does not claim a live ChatGPT quota check.
+    """
+    assert version == "2.0.27", "Usage acceptance requires the explicitly tested native version"
+    with tempfile.TemporaryDirectory(prefix="waraq-usage-native-acceptance-") as temporary:
+        root = Path(temporary)
+        cfg = dict(defaults(root), opencode_executable=str(executable))
+        manager = AccountRuntimeManager(SimpleNamespace(home=root, snapshot=lambda: dict(cfg)))
+        outbound = []
+        now = time.time()
+        synthetic = {"rate_limit": {
+            "primary_window": {"used_percent": 42, "limit_window_seconds": 18000, "reset_at": now + 3600},
+            "secondary_window": {"used_percent": 17, "limit_window_seconds": 604800, "reset_at": now + 86400}}}
+        def transport(access, account, cancel):
+            assert access.startswith("x.") and account == "usage-synthetic-account"
+            outbound.append("mocked_usage_get")
+            return parse_usage_response(synthetic, now)
+        try:
+            with patch("waraq.opencode_runtime._usage_https", side_effect=transport):
+                account_id = "account_usage_synthetic"
+                runtime = manager.ensure(account_id)
+                # Initialise while the disposable native account has no OAuth.
+                manager.auth_methods(account_id)
+                claims = {"sub": "usage-synthetic-subject", "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "usage-synthetic-account"}}
+                encoded = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+                value = {"type": "oauth", "methodID": "chatgpt-browser", "access": "x." + encoded + ".x",
+                         "refresh": "usage-synthetic-refresh", "expires": int((now + 86400) * 1000),
+                         "metadata": {"sub": "usage-synthetic-subject", "accountID": "usage-synthetic-account"}}
+                runtime.request("POST", "/api/credential", {"integrationID": "openai", "value": value})
+                metadata = manager.metadata(account_id)
+                assert metadata["identity_verified"] and metadata["authenticated"]
+                binding = {"account_id": account_id, "auth_epoch": 1,
+                           "identity": hashlib.sha256(metadata["identity"].encode()).hexdigest()}
+                usage = manager.read_usage(account_id, binding, threading.Event())
+                assert usage["status"] == "available", usage["reason_code"]
+                assert usage["five_hour"]["remaining_percent"] == 58
+                assert usage["weekly"]["remaining_percent"] == 83
+                assert len(outbound) == 1
+                assert "synthetic-refresh" not in json.dumps(usage)
+                manager.delete_auth(account_id)
+                value = dict(value, methodID="chatgpt-token-sharing")
+                runtime.request("POST", "/api/credential", {"integrationID": "openai", "value": value})
+                usage = manager.read_usage(account_id, binding, threading.Event())
+                assert usage["status"] == "unsupported" and usage["reason_code"] == "token_sharing_unsupported"
+                assert len(outbound) == 1, "SIWC must not call the legacy quota backend"
+                manager.delete_auth(account_id)
+        finally:
+            manager.close()
+        assert runtime.process.poll() is not None
+        return {"version": version, "native_usage_contract": "passed", "live_usage_backend": "unverified",
+                "synthetic_usage_calls": len(outbound), "token_sharing_usage_calls": 0, "model_calls": 0}
 
 
 def main():
@@ -286,4 +346,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--usage-only" in sys.argv:
+        executable = resolve_opencode("opencode")
+        print(json.dumps(verify_usage_quota(executable, opencode_version(executable))))
+    else:
+        main()

@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import time
+import threading
 import uuid
 from contextlib import contextmanager
 
@@ -31,6 +32,12 @@ class OpenCodeAccounts:
         self.store, self.config = store, config
         self.clock = clock or time.time
         self.leases = {}
+        self.usage_maintenance = {}
+        with self.store.lock:
+            for row in self._rows():
+                if "auth_epoch" not in row:
+                    row["auth_epoch"] = 0
+                    self._put(row)
 
     @contextmanager
     def _transaction(self):
@@ -50,7 +57,9 @@ class OpenCodeAccounts:
         row = self.store.db.execute("SELECT metadata FROM chatgpt_accounts WHERE id=?", (ident,)).fetchone()
         if not row:
             raise ValueError("حساب ChatGPT غير موجود.")
-        return json.loads(row[0])
+        result = json.loads(row[0])
+        result.setdefault("auth_epoch", 0)
+        return result
 
     def _put(self, row):
         self.store.db.execute("INSERT OR REPLACE INTO chatgpt_accounts VALUES(?,?,?)",
@@ -87,7 +96,7 @@ class OpenCodeAccounts:
                    "priority": max((r["priority"] for r in rows), default=0) + 1,
                    "enabled": True, "login_state": "logged_out", "health": "login_required",
                    "identity": "", "email": "", "subscription": "", "error": "", "reset_at": 0,
-                   "throttle_until": 0, "probe_count": 0, "generation": 0, "models": {}}
+                   "throttle_until": 0, "probe_count": 0, "generation": 0, "auth_epoch": 0, "models": {}}
             self._put(row)
             return self._safe(row)
 
@@ -117,13 +126,18 @@ class OpenCodeAccounts:
             row = self._get(ident)
             if row["login_state"] in ("authorizing", "pending"):
                 raise ValueError("أكمل تسجيل الدخول أو ألغِه أولًا.")
-            self.store.db.execute("DELETE FROM chatgpt_accounts WHERE id=?", (ident,))
-            for key in ("chatgpt_preferred", "chatgpt_current"):
-                if self.store.state_get(key, "") == ident:
-                    self.store.state_clear(key)
+            with self._transaction():
+                self.invalidate_usage(ident)
+                self.store.db.execute("DELETE FROM chatgpt_usage WHERE account_id=?", (ident,))
+                self.store.db.execute("DELETE FROM chatgpt_accounts WHERE id=?", (ident,))
+                for key in ("chatgpt_preferred", "chatgpt_current"):
+                    if self.store.state_get(key, "") == ident:
+                        self.store.state_clear(key)
 
     def assert_idle(self, ident):
         with self.store.lock:
+            if ident in self.usage_maintenance:
+                raise ValueError("انتظر انتهاء تحديث استخدام هذا الحساب أولًا.")
             if any(v["account_id"] == ident for v in self.leases.values()):
                 raise ValueError("انتظر انتهاء مهام هذا الحساب أولًا.")
             if self._get(ident).get("health") == "execution_uncertain":
@@ -131,9 +145,11 @@ class OpenCodeAccounts:
 
     def set_login_state(self, ident, state, error=""):
         with self.store.lock:
-            if state in ("authorizing", "removing", "pending", "checking"):
+            if state in ("authorizing", "removing", "pending", "checking", "logged_out", "signed_out"):
                 self.assert_idle(ident)
             row = self._get(ident)
+            if state in ("authorizing", "pending", "removing", "logged_out", "signed_out"):
+                self._invalidate_auth(row)
             row.update(login_state=str(state)[:40], error=str(error)[:300])
             if state not in ("authenticated", "checking"):
                 row["health"] = "login_required"
@@ -144,6 +160,7 @@ class OpenCodeAccounts:
             self.assert_idle(ident)
             row = self._get(ident)
             if not result.get("authenticated"):
+                self._invalidate_auth(row)
                 row.update(login_state="logged_out", health="login_required", error="يلزم تسجيل الدخول.")
                 self._put(row)
                 return self._safe(row)
@@ -151,18 +168,23 @@ class OpenCodeAccounts:
             # cannot accidentally retain a subject/token supplied by a runtime.
             identity = str(result.get("identity", "") or "")
             if not identity or result.get("identity_verified") is False:
+                self._invalidate_auth(row)
                 row.update(login_state="needsverify", health="login_required", error="تعذر التحقق من هوية حساب مستقلة.")
                 self._put(row)
                 raise ValueError("لم يُرجع تسجيل الدخول هوية حساب قابلة للتحقق.")
             digest = hashlib.sha256(identity.encode()).hexdigest()
             if not reset_cooldown and row.get("identity") and row["identity"] != digest:
+                self._invalidate_auth(row)
                 row.update(login_state="needsverify", health="login_required", error="تغيّرت هوية الحساب؛ أعد تسجيل الدخول للتحقق.")
                 self._put(row)
                 raise ValueError(row["error"])
             if any(r["id"] != ident and r.get("identity") == digest for r in self._rows()):
+                self._invalidate_auth(row)
                 row.update(login_state="duplicate", health="login_required", error="هذا الحساب مسجل مسبقًا.")
                 self._put(row)
                 raise DuplicateAccountError("هذا الحساب مسجل مسبقًا؛ استخدم الحساب الموجود.")
+            if row.get("identity") != digest or reset_cooldown:
+                self._invalidate_auth(row)
             row.update(identity=digest, email=str(result.get("email", ""))[:160],
                        subscription=str(result.get("subscription", ""))[:80], login_state="authenticated")
             if reset_cooldown:
@@ -190,7 +212,108 @@ class OpenCodeAccounts:
         self.store.db.execute("UPDATE stages SET next_retry=0 WHERE name='opencode' AND status='pending' "
                               "AND error LIKE 'حسابات ChatGPT:%'")
 
+    def _invalidate_auth(self, row):
+        row["auth_epoch"] = row.get("auth_epoch", 0) + 1
+        self.invalidate_usage(row["id"])
+
+    def usage_binding(self, ident):
+        """Credential-free identity, independent of job-routing generation."""
+        with self.store.lock:
+            row = self._get(ident)
+            return {"account_id": ident, "auth_epoch": row.get("auth_epoch", 0),
+                    "identity": row.get("identity", "")}
+
+    def usage_eligible(self, ident):
+        with self.store.lock:
+            try:
+                row = self._get(ident)
+            except ValueError:
+                return False
+            return bool(row.get("identity") and row["login_state"] == "authenticated"
+                        and row.get("health") != "execution_uncertain"
+                        and not any(h.get("account_id") == ident for h in
+                                    self.store.state_get("chatgpt_session_holds", {}).values()))
+
+    def _matches_usage_binding(self, ident, binding):
+        try:
+            return self.usage_binding(ident) == {key: binding.get(key) for key in
+                                               ("account_id", "auth_epoch", "identity")}
+        except ValueError:
+            return False
+
+    def begin_usage_request(self, ident, binding, request_id, now=None):
+        with self.store.lock:
+            if not self._matches_usage_binding(ident, binding) or not self.usage_eligible(ident):
+                return False
+            self.store.db.execute(
+                "INSERT INTO chatgpt_usage(account_id,auth_epoch,request_id,last_attempt_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(account_id) DO UPDATE SET request_id=excluded.request_id,last_attempt_at=excluded.last_attempt_at",
+                (ident, binding["auth_epoch"], str(request_id), self.clock() if now is None else now))
+            return True
+
+    def usage_record(self, ident):
+        with self.store.lock:
+            row = self.store.db.execute("SELECT * FROM chatgpt_usage WHERE account_id=?", (ident,)).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            result["snapshot"] = json.loads(result["snapshot"])
+            return result
+
+    def record_usage(self, ident, binding, request_id, result, next_attempt_at=0):
+        """Update only an existing, latest request with the same auth identity."""
+        from .account_usage import safe_usage_result
+        result = safe_usage_result(result)
+        with self.store.lock:
+            if not self._matches_usage_binding(ident, binding):
+                return False
+            row = self.usage_record(ident)
+            if not row or row["auth_epoch"] != binding["auth_epoch"] or row["request_id"] != str(request_id):
+                return False
+            success = result["status"] in ("available", "partial") and any(
+                result.get(key) for key in ("five_hour", "weekly", "other_windows", "buckets"))
+            snapshot = result if success else row["snapshot"]
+            self.store.db.execute(
+                "UPDATE chatgpt_usage SET snapshot=?,last_success_at=?,next_attempt_at=?,status=?,reason_code=? "
+                "WHERE account_id=? AND auth_epoch=? AND request_id=?",
+                (json.dumps(snapshot, ensure_ascii=False), result["observed_at"] if success else row["last_success_at"],
+                 _finite_number(next_attempt_at), result["status"], result["reason_code"], ident,
+                 binding["auth_epoch"], str(request_id)))
+            return True
+
+    def invalidate_usage(self, ident):
+        with self.store.lock:
+            reservation = self.usage_maintenance.get(ident)
+            if reservation:
+                reservation["cancel"].set()
+            self.store.db.execute("DELETE FROM chatgpt_usage WHERE account_id=?", (ident,))
+
+    def reserve_usage_maintenance(self, ident, binding):
+        """Caller holds scheduler lock first. Reservation excludes queued leases."""
+        with self.store.lock:
+            if (not self._matches_usage_binding(ident, binding) or not self.usage_eligible(ident)
+                    or ident in self.usage_maintenance
+                    or any(lease["account_id"] == ident for lease in self.leases.values())):
+                return None
+            reservation = dict(binding, token=uuid.uuid4().hex, cancel=threading.Event())
+            self.usage_maintenance[ident] = reservation
+            return reservation
+
+    def release_usage_maintenance(self, reservation):
+        with self.store.lock:
+            reservation["cancel"].set()
+            ident = reservation["account_id"]
+            if self.usage_maintenance.get(ident) is reservation:
+                self.usage_maintenance.pop(ident)
+                self._wake_waiters()
+
+    def usage_is_maintenance(self, ident):
+        with self.store.lock:
+            return ident in self.usage_maintenance
+
     def _candidate(self, row, model, now):
+        if row["id"] in self.usage_maintenance:
+            return False, now + 1
         if not row["enabled"] or row["login_state"] != "authenticated" or row["health"] in ("auth_error", "execution_uncertain"):
             return False, 0
         exclusion = row.get("models", {}).get(model, {})
@@ -212,6 +335,8 @@ class OpenCodeAccounts:
             for row in rows:
                 eligible, wakeup = self._candidate(row, model, now)
                 if not eligible:
+                    if row["id"] in self.usage_maintenance and row["id"] in (current, preferred):
+                        return None, now + 1
                     # A short transport throttle is not an exhausted account;
                     # keep its identity sticky and wait rather than rotating.
                     if (row["enabled"] and row["login_state"] == "authenticated"

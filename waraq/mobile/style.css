@@ -14,6 +14,11 @@
   font-size: 16px;
   line-height: 1.65;
 }
+.account-usage-card { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.account-usage-card h3, .account-usage-card p { overflow-wrap: anywhere; }
+.account-usage-card h3 { margin-bottom: 8px; }
+.account-usage-card p:last-child { margin-bottom: 0; }
+.usage-cached { color: var(--warn); }
 * {
   box-sizing: border-box;
 }

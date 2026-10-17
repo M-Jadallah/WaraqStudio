@@ -73,7 +73,7 @@ function showLogin() {
   $("login").hidden = internetMode;
   $("connection").classList.remove("online");
   text("connection", "يلزم الاقتران");
-  for (const id of ["jobs", "workers", "services", "files", "source-items", "library-files"])
+  for (const id of ["jobs", "workers", "services", "account-usage", "files", "source-items", "library-files"])
     $(id).replaceChildren();
   ui.sourceRevision = null;
   ui.selected.clear();
@@ -168,6 +168,7 @@ async function poll() {
     if (!pageActive || epoch !== ui.sessionEpoch) return;
     if (error.status !== 401 && error.status !== 403) {
       ui.online = false;
+      renderAccountUsage();
       $("offline").hidden = false;
       text("connection", "الاتصال متوقف");
       $("connection").classList.remove("online");
@@ -201,6 +202,7 @@ async function mutate(action, data = {}) {
     toast(error.message, true);
     if (error.network) {
       ui.online = false;
+      renderAccountUsage();
       $("offline").hidden = false;
     }
     return false;
@@ -479,6 +481,7 @@ function selectionCount() {
   text("enqueue", "إضافة المحدد إلى الطابور (" + ui.selected.size + ")");
 }
 function renderWorkers() {
+  renderAccountUsage();
   const labels = {
     download: "التنزيل",
     deepgram: "التفريغ",
@@ -551,6 +554,66 @@ function renderWorkers() {
       return card;
     },
   );
+}
+function usageDate(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? new Date(value * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"}) : "غير معروف";
+}
+function usageWindow(label, value = {}) {
+  value ||= {};
+  const known = ["available", "stale"].includes(value.status) && typeof value.remainingPercent === "number" && Number.isFinite(value.remainingPercent);
+  return label + " · المتبقي: " + (known ? value.remainingPercent + "٪" : "غير معروف") + (value.status === "stale" ? " (قراءة قديمة)" : "") + " · موعد التجدد (توقيت الهاتف): " + usageDate(value.resetsAt);
+}
+function usageMessage(usage, refreshing) {
+  const messages = {
+    unsupported: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+    unsupported_method: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+    signed_out: "سجّل الدخول لقراءة الحصة.", auth_required: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+    authentication_required: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+    network_error: "تعذّر الاتصال لقراءة الحصة.", rate_limited: "خدمة الحصص طلبت الانتظار قبل إعادة المحاولة.",
+    timeout: "انتهت مهلة قراءة الحصة.", invalid_response: "تعذّر تفسير بيانات الحصة.", not_fetched: "لم تُقرأ الحصة بعد.", not_checked: "لم تُقرأ الحصة بعد.",
+    token_sharing_unsupported: "قراءة الحصة غير مدعومة لتسجيل Sign in with ChatGPT الحالي.",
+    method_unsupported: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+    native_version_unverified: "لم يُتحقق من دعم قراءة الحصة في إصدار OpenCode المثبّت.",
+    usage_available: "", usage_partial: "بعض نوافذ الحصة غير متاحة.", windows_missing: "لم تُرجع الخدمة نوافذ الحصة.",
+    usage_windows_unavailable: "نوافذ الحصة غير متاحة.", usage_read_failed: "تعذّرت قراءة الحصة. أعد المحاولة لاحقًا.",
+    usage_unavailable: "الحصة غير متاحة حاليًا.", usage_cancelled: "أُلغي تحديث الحصة.", cancelled: "أُلغي تحديث الحصة.",
+    usage_refresh_deferred: "تحديث الحصة مؤجّل حتى يصبح الحساب متاحًا.", account_not_ready: "الحساب غير جاهز لقراءة الحصة.",
+    usage_runtime_unsupported: "إصدار OpenCode الحالي لا يدعم قراءة الحصة.", legacy_supported: "طريقة الدخول تدعم قراءة الحصة.",
+    response_too_large: "تعذّر قبول استجابة خدمة الحصص.", unauthorized: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+    endpoint_unavailable: "قراءة الحصة غير مدعومة حاليًا لدى الخدمة.", throttled: "خدمة الحصص طلبت الانتظار قبل إعادة المحاولة.",
+    http_error: "تعذّرت قراءة الحصة من الخدمة.", connection_failed: "تعذّر الاتصال بخدمة الحصص.",
+    binding_invalid: "تغيّر تسجيل الحساب؛ يلزم التحقق من الدخول.", runtime_changed: "تغيّرت جلسة OpenCode؛ أعد تحديث الحصة.",
+    identity_unavailable: "تعذّر التحقق من هوية الحساب لقراءة الحصة.", expired_pending_idle: "انتهت صلاحية الدخول؛ يُؤجّل تجديده حتى اكتمال مهام الحساب.",
+    binding_changed: "تغيّرت هوية الحساب؛ أعد تحديث الحصة.", native_unavailable: "OpenCode غير متاح لقراءة الحصة.",
+    maintenance_unreserved: "تحديث الحصة مؤجّل حتى يصبح الحساب متاحًا.", runtime_unavailable: "جلسة OpenCode غير متاحة لقراءة الحصة.",
+    account_busy: "تحديث الحصة مؤجّل حتى اكتمال مهام الحساب.", activity_unverified: "يلزم التحقق من توقف جلسة الحساب السابقة.",
+    native_refreshed: "جُدّد الدخول؛ يمكن تحديث الحصة.", refresh_unavailable: "تعذّر تجديد الدخول لقراءة الحصة.",
+    runtime_pending_idle: "تحديث الحصة مؤجّل حتى اكتمال مهام الحساب.",
+  };
+  const message = messages[usage.messageCode] || (usage.status === "unsupported" ? messages.unsupported
+    : usage.status === "available" ? "" : "الحصة غير معروفة حاليًا.");
+  return (refreshing ? "جارٍ تحديث الحصة… " : "") + (usage.stale ? "قراءة قديمة. " : "") + message;
+}
+function renderAccountUsage() {
+  const rows = ui.state?.accountUsage || [];
+  if (!rows.length) {
+    empty($("account-usage"), "لا توجد قراءات لحصص الحسابات.");
+    return;
+  }
+  reconcile($("account-usage"), rows, (row) => row.displayKey, (row) => {
+    const usage = row.usage || {}, card = el("article", "account-usage-card");
+    card.setAttribute("aria-label", "حصة " + row.alias);
+    card.setAttribute("aria-busy", String(!!row.usageRefreshing));
+    card.append(el("h3", "", row.alias));
+    card.append(el("p", "usage-window", usageWindow("خمس ساعات", usage.fiveHour)));
+    card.append(el("p", "usage-window", usageWindow("أسبوعية", usage.weekly)));
+    card.append(el("p", "meta", "آخر قراءة ناجحة (توقيت الهاتف): " + usageDate(usage.lastSuccessAt)));
+    const message = usageMessage(usage, row.usageRefreshing);
+    if (message) card.append(el("p", "meta", message));
+    if (!ui.online) card.append(el("p", "usage-cached", "قراءة محفوظة في هذه الجلسة · الاتصال متوقف"));
+    return card;
+  }, (row) => JSON.stringify([row, ui.online]));
 }
 function renderFiles() {
   if (!ui.state) return;

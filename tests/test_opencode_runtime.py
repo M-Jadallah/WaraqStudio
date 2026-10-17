@@ -148,7 +148,8 @@ def test_malformed_owner_record_cannot_clear_hold_or_start_second_owner(tmp_path
 
 def test_reconcile_startup_failure_stops_idle_owner_but_preserves_other_sessions(tmp_path):
     manager = native.AccountRuntimeManager(config(tmp_path))
-    runtime = Mock(instance_id="instance", sessions={"another-session"})
+    runtime = Mock(instance_id="instance", sessions={"another-session"}, _lock=threading.RLock())
+    runtime.request.return_value = {"data": {}}
     manager._runtimes["account123"] = runtime
     assert not manager.confirm_stopped("account123", "")
     runtime.stop.assert_not_called()
@@ -166,6 +167,7 @@ def test_reconcile_startup_failure_stops_idle_owner_but_preserves_other_sessions
 def test_malformed_active_sessions_never_proves_inactivity(payload):
     runtime = object.__new__(native.AccountRuntime)
     runtime.request = Mock(return_value=payload)
+    runtime._lock = threading.RLock()
     runtime.sessions = {"session"}
     with pytest.raises(native.RuntimeError):
         runtime.inactive("session")

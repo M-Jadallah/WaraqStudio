@@ -47,6 +47,12 @@ class Store:
               created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS chatgpt_accounts (
               id TEXT PRIMARY KEY, metadata TEXT NOT NULL, updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS chatgpt_usage (
+              account_id TEXT PRIMARY KEY, auth_epoch INTEGER NOT NULL,
+              request_id TEXT NOT NULL, snapshot TEXT NOT NULL DEFAULT '{}',
+              last_success_at REAL DEFAULT 0, last_attempt_at REAL DEFAULT 0,
+              next_attempt_at REAL DEFAULT 0, status TEXT NOT NULL DEFAULT 'unavailable',
+              reason_code TEXT NOT NULL DEFAULT 'not_checked');
             CREATE TABLE IF NOT EXISTS chatgpt_attempts (
               id TEXT PRIMARY KEY, account_id TEXT NOT NULL, job_id TEXT NOT NULL,
               worker_id TEXT NOT NULL, model TEXT NOT NULL, session_id TEXT DEFAULT '',

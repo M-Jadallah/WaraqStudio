@@ -20,6 +20,7 @@ from waraq.bridge import Bridge
 from waraq.config import Config
 from waraq.scheduler import Scheduler
 from waraq.store import Store, STAGES
+from test_account_bridge import UsageMonitorDouble, phone_usage_fixtures
 
 
 def browser_checks(base, code, output):
@@ -80,6 +81,24 @@ def browser_checks(base, code, output):
         expect(page.locator("#transcripts")).to_have_value("")
 
         page.locator('[data-tab="workers"]').click()
+        expect(page.locator("#account-usage article")).to_have_count(4)
+        expect(page.locator("#account-usage article").nth(0)).to_contain_text("0٪")
+        expect(page.locator("#account-usage article").nth(0)).to_contain_text("43٪")
+        expect(page.locator("#account-usage article").nth(1)).to_contain_text("قراءة قديمة")
+        expect(page.locator("#account-usage article").nth(1)).to_contain_text("غير معروف")
+        expect(page.locator("#account-usage article").nth(2)).to_contain_text("Sign in with ChatGPT")
+        expect(page.locator("#account-usage article").nth(3)).to_contain_text("غير معروف")
+        expect(page.locator("#account-usage article").nth(3)).not_to_contain_text("0٪")
+        assert page.locator("#account-usage img, #account-usage button").count() == 0
+        assert page.evaluate("window.__quota_xss") is None
+        assert page.evaluate("localStorage.length === 0 && sessionStorage.length === 0")
+        # A repeated cache snapshot preserves keyed rows even for duplicate aliases.
+        page.evaluate("window.firstUsageCard=document.querySelector('#account-usage article'); renderAccountUsage()")
+        assert page.evaluate("firstUsageCard===document.querySelector('#account-usage article')")
+        # Older desktops omit this optional field; their worker controls still work.
+        page.evaluate("window.savedUsage=ui.state.accountUsage; delete ui.state.accountUsage; renderAccountUsage()")
+        expect(page.locator("#account-usage .empty")).to_be_visible()
+        page.evaluate("ui.state.accountUsage=savedUsage; renderAccountUsage()")
         service = page.locator("#services article").first
         service.get_by_role("button").click()
         expect(service.locator(".badge")).to_have_text("متوقفة يدويًا")
@@ -107,6 +126,8 @@ def browser_checks(base, code, output):
             page.locator('[data-tab="source"]').click()
             if output:
                 page.screenshot(path=str(output / f"mobile-source-{scheme}.png"), full_page=True)
+                page.locator('[data-tab="workers"]').click()
+                page.screenshot(path=str(output / f"mobile-usage-{scheme}.png"), full_page=True)
         page.set_viewport_size({"width": 320, "height": 740})
         page.evaluate("document.documentElement.style.fontSize='32px'")
         for tab in ("queue", "source", "workers", "files"):
@@ -118,6 +139,7 @@ def browser_checks(base, code, output):
         context.set_offline(True)
         page.locator("#refresh").click()
         expect(page.locator("#offline")).to_be_visible()
+        expect(page.locator("#account-usage .usage-cached")).to_have_count(4)
         expect(page.locator("#queue-toggle")).to_be_disabled()
         context.set_offline(False)
         expect(page.locator("#offline")).to_be_hidden(timeout=10000)
@@ -127,6 +149,7 @@ def browser_checks(base, code, output):
         page.locator("#logout").click()
         expect(page.locator("#login")).to_be_visible()
         expect(page.locator("#workspace")).to_be_hidden()
+        expect(page.locator("#account-usage article")).to_have_count(0)
         assert not errors, errors
         browser.close()
 
@@ -140,6 +163,12 @@ def main():
         home = Path(directory)
         config, store = Config(home), Store(home / "tasks.sqlite3")
         scheduler = Scheduler(store, config, None)
+        scheduler.account_usage.stop()
+        usage = UsageMonitorDouble()
+        scheduler.account_usage = usage
+        for fixture in phone_usage_fixtures():
+            account = scheduler.accounts.create(fixture["alias"][:80])
+            usage.snapshots[account["id"]] = fixture["usage"]
         scheduler.start = lambda: setattr(scheduler, "running", True)
         bridge = Bridge(store, config, None, scheduler)
         bridge.timer.stop()
@@ -178,6 +207,7 @@ def main():
             app.processEvents()
             time.sleep(0.003)
         bridge.remote.stop()
+        bridge.closeAccounts()
         thread.join(3)
         assert not thread.is_alive(), "Browser acceptance timed out"
         if failures:

@@ -49,6 +49,7 @@ class Bridge(QObject):
     internetAccessChanged = Signal()
     accountsChanged = Signal()
     _accountTaskReady = Signal(str, int, str, object, str, int)
+    _accountUsageReady = Signal(object)
 
     def __init__(self, store, config, secrets, scheduler):
         super().__init__()
@@ -67,6 +68,7 @@ class Bridge(QObject):
         self._account_errors = {}
         self._accounts_closing = False
         self._accountTaskReady.connect(self._apply_account_task, Qt.ConnectionType.QueuedConnection)
+        self._accountUsageReady.connect(self._apply_account_usage, Qt.ConnectionType.QueuedConnection)
         self._auto_stop = False
         self._auto_stop_seen = False
         self._auto_stop_fired = False
@@ -121,6 +123,14 @@ class Bridge(QObject):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(700)
+        # Only this independent timer schedules quota reads. Normal refresh and
+        # phone snapshots remain cache-only, and quota work never reserves auth UI.
+        self._account_usage_timer = QTimer(self)
+        self._account_usage_timer.timeout.connect(self._schedule_account_usage)
+        usage = getattr(self.scheduler, "account_usage", None)
+        if usage:
+            usage.set_callback(self._accountUsageReady.emit)
+            self._account_usage_timer.start(1000)
         self.refresh()
         if self.config.migration_note:
             note = self.config.migration_note
@@ -210,6 +220,47 @@ class Bridge(QObject):
     def accountBusy(self):
         return bool(self._account_ops or self._account_pending or self._account_logins)
 
+    def _usage_snapshot(self, ident):
+        service = getattr(self.scheduler, "account_usage", None)
+        if service:
+            return service.public_snapshot(ident)
+        window = {"status": "unknown", "remainingPercent": None, "resetsAt": None, "windowMinutes": None}
+        return {"status": "unknown", "stale": False, "lastSuccessAt": None, "lastAttemptAt": None,
+                "messageCode": "not_fetched", "source": "", "refreshing": False,
+                "fiveHour": dict(window), "weekly": dict(window)}
+
+    @Slot(str)
+    def refreshAccountUsage(self, ident):
+        service = getattr(self.scheduler, "account_usage", None)
+        if service and not self._accounts_closing and self._account(ident):
+            service.request(ident, manual=True)
+            self._publish_accounts()
+
+    @Slot()
+    def refreshAllAccountUsage(self):
+        service = getattr(self.scheduler, "account_usage", None)
+        if service and not self._accounts_closing:
+            service.request_all()
+            self._publish_accounts()
+
+    @Slot(object)
+    def _apply_account_usage(self, payload):
+        service = getattr(self.scheduler, "account_usage", None)
+        if service and not self._accounts_closing and service.apply(payload):
+            self._publish_accounts()
+
+    @Slot()
+    def _schedule_account_usage(self):
+        service = getattr(self.scheduler, "account_usage", None)
+        if service and not self._accounts_closing:
+            service.schedule_due()
+            self._publish_accounts()
+
+    def _invalidate_account_usage(self, ident):
+        service = getattr(self.scheduler, "account_usage", None)
+        if service:
+            service.invalidate(ident)
+
     def _publish_accounts(self):
         registry = getattr(self.scheduler, "accounts", None)
         rows = []
@@ -228,6 +279,15 @@ class Bridge(QObject):
             cooldown = int(account.get("cooldown_seconds") or 0)
             operation = self._account_ops.get(ident, "")
             login = self._account_logins.get(ident, {})
+            usage = self._usage_snapshot(ident)
+            service = getattr(self.scheduler, "account_usage", None)
+            usage_maintenance = bool(service and service.state(ident).get("maintenance"))
+            usage_refreshing = bool(usage.get("refreshing"))
+            usage = {key: usage.get(key) for key in ("status", "stale", "lastSuccessAt", "lastAttemptAt",
+                                                    "messageCode", "source", "fiveHour", "weekly")}
+            for key in ("fiveHour", "weekly"):
+                window = usage[key] or {}
+                usage[key] = {field: window.get(field) for field in ("status", "remainingPercent", "resetsAt", "windowMinutes")}
             status_text = states.get(state, state)
             if state == "authenticated":
                 status_text = {"model_limited": "بعض النماذج غير متاحة مؤقتًا",
@@ -245,9 +305,11 @@ class Bridge(QObject):
                          "uncertain": health == "execution_uncertain",
                          "subscription": str(account.get("subscription") or ""),
                          "inFlight": int(account.get("in_flight") or 0),
-                         "busy": bool(operation or ident in self._account_pending_owners.values()),
+                         "busy": bool(operation or ident in self._account_pending_owners.values() or usage_maintenance),
                          "loggingIn": operation == "login", "needsCode": login.get("mode") == "code",
                          "statusText": status_text,
+                         "usageRefreshing": usage_refreshing, "usageMaintenance": usage_maintenance, "usage": usage,
+                         "cooldownText": ("إعادة فحص توفر التنفيذ بعد " + str((cooldown + 59) // 60) + " دقيقة") if cooldown else "",
                          "error": error, "quotaText": ("يُعاد الفحص بعد " + str((cooldown + 59) // 60) + " دقيقة")
                          if cooldown else "الحصة المتبقية غير معروفة"})
         account_changed = self._accounts_model._items != rows
@@ -261,9 +323,11 @@ class Bridge(QObject):
 
     def _account_mutable(self, ident):
         account = self._account(ident)
+        service = getattr(self.scheduler, "account_usage", None)
+        maintenance = bool(service and service.state(ident).get("maintenance"))
         return bool(account and not account.get("in_flight") and ident not in self._account_ops
                     and ident not in self._account_pending_owners.values()
-                    and not self._accounts_closing)
+                    and not maintenance and not self._accounts_closing)
 
     @Slot(str)
     def addAccount(self, alias):
@@ -348,6 +412,7 @@ class Bridge(QObject):
             self.scheduler.accounts.set_login_state(ident, "authorizing")
         except Exception:
             return
+        self._invalidate_account_usage(ident)
         generation = self._account_generations.get(ident, 0) + 1
         self._account_generations[ident] = generation
         self._account_ops[ident] = "login"
@@ -410,6 +475,7 @@ class Bridge(QObject):
             self.scheduler.accounts.set_login_state(ident, "removing")
         except Exception:
             return
+        self._invalidate_account_usage(ident)
         generation = self._account_generations.get(ident, 0) + 1
         self._account_generations[ident] = generation
         self._account_ops[ident] = "remove"
@@ -486,6 +552,10 @@ class Bridge(QObject):
     def closeAccounts(self):
         # Invalidate callbacks before scheduler.shutdown closes native runtimes.
         self._accounts_closing = True
+        self._account_usage_timer.stop()
+        service = getattr(self.scheduler, "account_usage", None)
+        if service:
+            service.stop()
         self._account_generations = {key: value + 1 for key, value in self._account_generations.items()}
 
     @Property(bool, notify=sourceChanged)

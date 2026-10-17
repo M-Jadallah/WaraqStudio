@@ -89,6 +89,102 @@ class Runtime:
         pass
 
 
+class UsageMonitorDouble:
+    """Asynchronous safe telemetry double; deliberately separate from native auth."""
+    def __init__(self):
+        self.callback = None
+        self.snapshots = {}
+        self.pending = set()
+        self.epochs = {}
+        self.requests = []
+        self.applied_threads = []
+        self.gate = threading.Event()
+        self.workers = []
+        self.stopped = False
+        self.scheduled = 0
+        self.maintenance = set()
+
+    def set_callback(self, callback):
+        self.callback = callback
+
+    def state(self, ident):
+        return {"refreshing": ident in self.pending, "maintenance": ident in self.maintenance}
+
+    def public_snapshot(self, ident):
+        window = {"status": "unavailable", "remainingPercent": None, "resetsAt": None, "windowMinutes": None}
+        snapshot = copy.deepcopy(self.snapshots.get(ident, {
+            "status": "unavailable", "stale": False, "lastSuccessAt": None, "lastAttemptAt": None,
+            "messageCode": "not_checked", "source": "", "fiveHour": dict(window), "weekly": dict(window)}))
+        snapshot["refreshing"] = ident in self.pending
+        return snapshot
+
+    def request(self, ident, manual=False):
+        if self.stopped or ident in self.pending:
+            return False
+        self.pending.add(ident)
+        self.requests.append((ident, manual))
+        epoch = self.epochs.get(ident, 0)
+        def work():
+            self.gate.wait(3)
+            self.callback({"account_id": ident, "auth_epoch": epoch})
+        worker = threading.Thread(target=work, daemon=True)
+        self.workers.append(worker)
+        worker.start()
+        return True
+
+    def request_all(self):
+        return sum(self.request(ident, True) for ident in self.snapshots)
+
+    def apply(self, payload):
+        self.applied_threads.append(threading.get_ident())
+        ident = payload["account_id"]
+        if self.stopped or ident not in self.pending or self.epochs.get(ident, 0) != payload["auth_epoch"]:
+            return False
+        self.pending.discard(ident)
+        self.snapshots[ident] = {
+            "status": "available", "stale": False, "lastSuccessAt": 1800000000, "lastAttemptAt": 1800000000,
+            "messageCode": "usage_available", "source": "legacy_codex_usage",
+            "fiveHour": {"status": "available", "remainingPercent": 0, "resetsAt": 1800018000, "windowMinutes": 300},
+            "weekly": {"status": "available", "remainingPercent": 43, "resetsAt": 1800604800, "windowMinutes": 10080}}
+        return True
+
+    def invalidate(self, ident):
+        self.epochs[ident] = self.epochs.get(ident, 0) + 1
+        self.pending.discard(ident)
+        self.snapshots.pop(ident, None)
+
+    def schedule_due(self):
+        self.scheduled += 1
+
+    def stop(self):
+        self.stopped = True
+        self.pending.clear()
+
+
+def attach_usage(env):
+    monitor = UsageMonitorDouble()
+    env.scheduler.account_usage = monitor
+    monitor.set_callback(env.bridge._accountUsageReady.emit)
+    return monitor
+
+
+def phone_usage_fixtures():
+    """Shared deterministic presentation cases; contains no real account material."""
+    empty = UsageMonitorDouble().public_snapshot("unknown")
+    available = {**empty, "status": "available", "messageCode": "usage_available", "lastSuccessAt": 1800000000,
+                 "source": "legacy_codex_usage",
+                 "fiveHour": {"status": "available", "remainingPercent": 0, "resetsAt": 1800018000, "windowMinutes": 300},
+                 "weekly": {"status": "available", "remainingPercent": 43, "resetsAt": 1800604800, "windowMinutes": 10080}}
+    stale = {**available, "status": "unavailable", "stale": True, "messageCode": "timeout",
+             "fiveHour": {**available["fiveHour"], "status": "stale"}, "weekly": dict(empty["weekly"])}
+    unsupported = {**empty, "status": "unsupported", "messageCode": "token_sharing_unsupported"}
+    return [{"displayKey": "display-" + str(index), "alias": alias, "usageRefreshing": False, "usage": usage}
+            for index, (alias, usage) in enumerate((
+                ("اسم مشترك", available), ("اسم مشترك", stale),
+                ('<img src=x onerror="window.__quota_xss=1"> حساب طويل لمتابعة الدروس والملفات', unsupported),
+                ("حساب غير معروف", empty)))]
+
+
 def pump(app, predicate, timeout=3):
     deadline = time.monotonic() + timeout
     while not predicate() and time.monotonic() < deadline:
@@ -315,3 +411,96 @@ def test_health_status_distinguishes_limits_without_claiming_remaining_quota(acc
     assert row["quotaText"] == "الحصة المتبقية غير معروفة"
     assert "%" not in row["statusText"] + row["quotaText"]
     assert not env.runtime.calls
+
+
+def test_usage_is_queued_independent_of_auth_busy_and_active_jobs(account_ui):
+    env = account_ui
+    ident = add_account(env)
+    env.accounts.row(ident).update(login_state="authenticated", in_flight=2)
+    monitor = attach_usage(env)
+    resets = []
+    env.bridge.accountsModel.modelReset.connect(lambda: resets.append(True))
+    env.bridge.refreshAccountUsage(ident)
+    env.bridge.refreshAccountUsage(ident)
+    assert monitor.requests == [(ident, True)]
+    assert env.bridge.accountsModel._items[0]["usageRefreshing"]
+    assert not env.bridge.accountBusy and not env.bridge._account_pending and not env.runtime.calls
+    # Polling cache for desktop or phone must never schedule extra reads.
+    env.bridge.refresh()
+    env.bridge.internet_commands._snapshot()
+    assert monitor.requests == [(ident, True)] and monitor.scheduled == 0
+    monitor.gate.set()
+    for worker in monitor.workers:
+        worker.join(1)
+    assert not monitor.applied_threads  # Signal reached GUI only after event pumping.
+    pump(env.app, lambda: not monitor.pending)
+    assert monitor.applied_threads == [threading.get_ident()]
+    row = env.bridge.accountsModel._items[0]
+    assert row["usage"]["fiveHour"]["remainingPercent"] == 0
+    assert not row["usageRefreshing"] and row["inFlight"] == 2
+    assert env.accounts.row(ident)["login_state"] == "authenticated"
+    assert not resets
+
+
+@pytest.mark.parametrize("action", ["login", "remove", "close"])
+def test_usage_callbacks_cannot_survive_auth_invalidation_or_close(account_ui, action):
+    env = account_ui
+    ident = add_account(env)
+    monitor = attach_usage(env)
+    env.bridge.refreshAccountUsage(ident)
+    if action == "login":
+        env.bridge.loginAccount(ident)
+    elif action == "remove":
+        env.bridge.removeAccount(ident)
+    else:
+        start = time.monotonic()
+        env.bridge.closeAccounts()
+        assert time.monotonic() - start < 0.2
+        assert monitor.stopped and not env.bridge._account_usage_timer.isActive()
+    monitor.gate.set()
+    for worker in monitor.workers:
+        worker.join(1)
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert ident not in monitor.snapshots
+
+
+def test_usage_refresh_never_holds_autostop_and_metadata_keeps_usage_epoch(account_ui):
+    env = account_ui
+    ident = add_account(env)
+    monitor = attach_usage(env)
+    env.bridge.refreshAccountUsage(ident)
+    env.bridge.refreshAccount(ident)
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert monitor.epochs == {}, "metadata check is not a new authentication identity"
+    reached = []
+    env.bridge.autoStopReached.connect(lambda: reached.append(True))
+    env.scheduler.running = True
+    env.bridge._auto_stop = env.bridge._auto_stop_seen = True
+    env.bridge.refresh()
+    assert reached and monitor.pending and not env.bridge.accountBusy
+    monitor.gate.set()
+    for worker in monitor.workers:
+        worker.join(1)
+    pump(env.app, lambda: not monitor.pending)
+
+
+@pytest.mark.parametrize("action", ["loginAccount", "removeAccount"])
+def test_usage_maintenance_keeps_cache_and_auth_action_available_after_reservation(account_ui, action):
+    env = account_ui
+    ident = add_account(env)
+    monitor = attach_usage(env)
+    monitor.snapshots[ident] = phone_usage_fixtures()[0]["usage"]
+    before = copy.deepcopy(monitor.snapshots)
+    monitor.maintenance.add(ident)
+    env.bridge.refresh()
+    row = env.bridge.accountsModel._items[0]
+    assert row["busy"] and row["usageMaintenance"] and not env.bridge.accountBusy
+    getattr(env.bridge, action)(ident)
+    assert not env.runtime.calls and not env.bridge.accountBusy
+    assert monitor.snapshots == before and monitor.epochs == {}
+    monitor.maintenance.clear()
+    env.bridge.refresh()
+    assert not env.bridge.accountsModel._items[0]["busy"]
+    getattr(env.bridge, action)(ident)
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert env.runtime.calls and monitor.epochs[ident] == 1

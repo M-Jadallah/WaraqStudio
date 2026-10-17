@@ -1,4 +1,4 @@
-"""Native OpenCode 2 account processes. Secrets never leave their native profile.
+"""Native OpenCode 2 account processes. Credentials persist only in native profiles.
 
 Protocol pinned to anomalyco/opencode v2.0.27, packages/protocol/src/groups/
 {integration,credential,session,server}.ts and packages/cli/src/server-process.ts.
@@ -15,12 +15,90 @@ import queue
 import re
 import secrets
 import signal
+import ssl
 import subprocess
 import threading
 import time
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 from urllib.error import HTTPError, URLError
+
+from .opencode_usage import (classify_usage_capability, finite_number,
+                             parse_usage_response, usage_result)
+from . import __version__
+
+_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+_USAGE_LIMIT = 256 * 1024
+
+
+def _cancelled(cancel):
+    return cancel is not None and cancel.is_set()
+
+
+def _retry_after(headers):
+    # Server messages are private; only bounded numeric delay is telemetry.
+    try:
+        raw = headers.get("Retry-After", "")
+        try:
+            value = float(raw)
+        except (ValueError, TypeError):
+            value = parsedate_to_datetime(raw).timestamp() - time.time()
+        return value if finite_number(value) is not None and 0 <= value <= 366 * 86400 else 0
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return 0
+
+
+def _usage_https(access, account, cancel):
+    """The only remote usage route. No body, header or exception escapes raw."""
+    if _cancelled(cancel):
+        return usage_result("cancelled", "cancelled")
+    headers = {"Authorization": "Bearer " + access, "Accept": "application/json",
+               "User-Agent": "WaraqStudio/" + __version__ + " (account-usage)"}
+    if account:
+        headers["ChatGPT-Account-Id"] = account
+    req = Request(_USAGE_URL, method="GET", headers=headers)
+    try:
+        # Explicit verified TLS, no environment proxies, no redirects. A small
+        # socket timeout bounds cancellation while an HTTP read is blocked.
+        from urllib.request import HTTPSHandler
+        opener = build_opener(ProxyHandler({}), _NoRedirect(),
+                              HTTPSHandler(context=ssl.create_default_context()))
+        with opener.open(req, timeout=5) as response:
+            chunks, count, deadline = [], 0, time.monotonic() + 10
+            while True:
+                if _cancelled(cancel):
+                    return usage_result("cancelled", "cancelled")
+                if time.monotonic() >= deadline:
+                    return usage_result("unavailable", "timeout")
+                block = response.read(min(16384, _USAGE_LIMIT + 1 - count))
+                if not block:
+                    break
+                chunks.append(block)
+                count += len(block)
+                if count > _USAGE_LIMIT:
+                    return usage_result("unavailable", "response_too_large")
+            if _cancelled(cancel):
+                return usage_result("cancelled", "cancelled")
+            payload = json.loads(b"".join(chunks))
+            if isinstance(payload, dict) and "account_id" in payload and payload["account_id"] != account:
+                return usage_result("auth_unavailable", "binding_changed")
+            return parse_usage_response(payload, time.time())
+    except HTTPError as exc:
+        code = exc.code
+        delay = _retry_after(exc.headers) if code == 429 else 0
+        exc.close()
+        if _cancelled(cancel):
+            return usage_result("cancelled", "cancelled")
+        if code == 401:
+            return usage_result("auth_unavailable", "unauthorized")
+        if code in (403, 404):
+            return usage_result("unsupported", "endpoint_unavailable")
+        if code == 429:
+            return usage_result("unavailable", "throttled", retry_after=delay)
+        return usage_result("unavailable", "http_error")
+    except (URLError, OSError, ValueError, TypeError, OverflowError):
+        return usage_result("cancelled", "cancelled") if _cancelled(cancel) else usage_result("unavailable", "connection_failed")
 
 
 class RuntimeError(Exception):
@@ -173,7 +251,7 @@ def _profile_lock(profile):
 
 
 class AccountRuntime:
-    def __init__(self, manager, account_id, profile, executable, startup_timeout=30):
+    def __init__(self, manager, account_id, profile, executable, startup_timeout=30, start_guard=None):
         self.manager, self.account_id, self.profile = manager, account_id, profile
         self.executable = executable
         self.password = secrets.token_urlsafe(32)
@@ -181,6 +259,8 @@ class AccountRuntime:
         self.url = ""
         self.process = None
         self._lock = threading.RLock()
+        self._stopping = False
+        self._start_guard = start_guard
         self.sessions = set()
         self.env = isolated_environment(profile)
         self._profile_lease = _profile_lock(profile)
@@ -197,10 +277,14 @@ class AccountRuntime:
                 # when initialisation cleanup cannot prove child termination.
                 manager._runtimes[account_id] = self
                 raise ExecutionOwnershipError("Account startup failed and native shutdown is unverified.") from None
-            self._profile_lease.close()
+            if self._profile_lease:
+                self._profile_lease.close()
+                self._profile_lease = None
             raise
 
     def _start(self, timeout):
+        if self.manager._closed or (self._start_guard and not self._start_guard()):
+            raise RuntimeError("Account runtime startup was cancelled.")
         env = dict(self.env, OPENCODE_PASSWORD=self.password)
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         self.process = subprocess.Popen(
@@ -227,7 +311,15 @@ class AccountRuntime:
         try:
             atomic_json(self.profile / "runtime-owner.json", {"pid": self.process.pid, "instance_id": self.instance_id})
             threading.Thread(target=drain, daemon=True).start()
-            url = ready.get(timeout=timeout)
+            deadline, url = time.monotonic() + timeout, None
+            while time.monotonic() < deadline:
+                if self.manager._closed or (self._start_guard and not self._start_guard()):
+                    raise RuntimeError("Account runtime startup was cancelled.")
+                try:
+                    url = ready.get(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
+                    break
+                except queue.Empty:
+                    continue
             parsed = urlsplit(url or "")
             if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or
                     not parsed.port or parsed.username or parsed.password or parsed.path not in ("", "/") or
@@ -273,6 +365,9 @@ class AccountRuntime:
 
     def create_session(self, directory, env=None):
         with self._lock:
+            if (self._stopping or self.manager._closed or
+                    self.account_id in self.manager._usage_maintenance):
+                raise RuntimeError("Account runtime is reserved or stopped.")
             result = self.request("POST", "/api/session", {"location": {"directory": str(Path(directory).resolve())}})
             ident = result["data"]["id"]
             self.sessions.add(ident)
@@ -294,13 +389,17 @@ class AccountRuntime:
         return session_id not in result["data"]
 
     def abort_and_wait(self, session_id, directory=None, timeout=15):
+        with self._lock:
+            return self._abort_and_wait_locked(session_id, directory, timeout)
+
+    def _abort_and_wait_locked(self, session_id, directory=None, timeout=15):
         """Only a native acknowledgement plus absence from active permits replay."""
         try:
             self.request("POST", "/api/session/" + quote(session_id, safe="") + "/interrupt", timeout=min(timeout, 10))
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if self.inactive(session_id):
-                    self.sessions.discard(session_id)
+                    self.release_session(session_id)
                     return True
                 time.sleep(0.1)
         except Exception:
@@ -309,9 +408,15 @@ class AccountRuntime:
         return False
 
     def release_session(self, session_id):
-        self.sessions.discard(session_id)
+        with self._lock:
+            self.sessions.discard(session_id)
 
     def stop(self):
+        with self._lock:
+            self._stopping = True
+            return self._stop_locked()
+
+    def _stop_locked(self):
         proc = self.process
         if not proc:
             return
@@ -339,19 +444,21 @@ class AccountRuntime:
             pass
         if self._profile_lease:
             self._profile_lease.close()
+            self._profile_lease = None
 
 
 def _safe_credential_metadata(entries):
     result = {"authenticated": False, "identity": "", "identity_verified": False, "email": "", "subscription": ""}
-    candidates = [e for e in entries if e.get("integrationID") == "openai" and
-                  e.get("value", {}).get("type") == "oauth" and
-                  "chatgpt" in e.get("value", {}).get("methodID", "").lower()]
+    candidates = [e for e in entries if isinstance(e, dict) and e.get("integrationID") == "openai" and
+                  isinstance(e.get("value"), dict) and e["value"].get("type") == "oauth" and
+                  "chatgpt" in str(e["value"].get("methodID", "")).lower()]
     active = next((e for e in candidates if e.get("active")), None)
     if not active:
         return result
     result["authenticated"] = True
     value = active["value"]
     metadata = value.get("metadata") or {}
+    metadata = metadata if isinstance(metadata, dict) else {}
     # Native OAuth validates the ID token. This only extracts labels from the
     # stored access token; its claims never authorise network access here.
     claims = {}
@@ -369,7 +476,7 @@ def _safe_credential_metadata(entries):
     auth = auth if isinstance(auth, dict) else {}
     profile = profile if isinstance(profile, dict) else {}
     subject = metadata.get("sub") or claims.get("sub")
-    account = metadata.get("account_id") or auth.get("chatgpt_account_id")
+    account = metadata.get("accountID") or metadata.get("account_id") or auth.get("chatgpt_account_id")
     if isinstance(subject, str) and subject:
         identity = "openai:" + subject + ":" + (account if isinstance(account, str) else "")
         result.update(identity=hashlib.sha256(identity.encode()).hexdigest(), identity_verified=True)
@@ -377,6 +484,42 @@ def _safe_credential_metadata(entries):
                         "subscription": (metadata.get("subscription"), auth.get("chatgpt_plan_type"))}.items():
         result[key] = next((v[:200] for v in values if isinstance(v, str) and v), "")
     return result
+
+
+def _usage_credential(entries):
+    """Return a PRIVATE snapshot; callers must never expose this object."""
+    if not isinstance(entries, list):
+        return None
+    candidates = [entry for entry in entries if isinstance(entry, dict) and
+                  entry.get("active") is True and entry.get("integrationID") == "openai" and
+                  isinstance(entry.get("value"), dict) and entry["value"].get("type") == "oauth"]
+    if len(candidates) != 1:
+        return None
+    entry, value = candidates[0], candidates[0]["value"]
+    ident, access, method = entry.get("id"), value.get("access"), value.get("methodID")
+    if (not isinstance(ident, str) or not ident or len(ident) > 200 or
+            not isinstance(method, str) or not isinstance(access, str) or
+            not access or len(access) > 100000 or any(ord(c) < 33 or ord(c) > 126 for c in access)):
+        return None
+    metadata = _safe_credential_metadata([entry])
+    if not metadata["identity_verified"]:
+        return None
+    native_metadata = value.get("metadata")
+    account = native_metadata.get("accountID") if isinstance(native_metadata, dict) else None
+    if not account and isinstance(native_metadata, dict):
+        account = native_metadata.get("account_id")
+    if not account and access.count(".") == 2:
+        try:
+            encoded = access.split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+            account = claims.get("https://api.openai.com/auth", {}).get("chatgpt_account_id")
+        except (ValueError, TypeError, AttributeError):
+            pass
+    if not isinstance(account, str) or not account or len(account) > 200 or any(ord(c) < 33 or ord(c) > 126 for c in account):
+        return None
+    expiry = finite_number(value.get("expires"))
+    return {"id": ident, "method": method, "access": access, "account": account,
+            "expires": expiry, "identity": hashlib.sha256(metadata["identity"].encode()).hexdigest()}
 
 
 class AccountRuntimeManager:
@@ -387,6 +530,9 @@ class AccountRuntimeManager:
         self._runtimes = {}
         self._login = None
         self._closed = False
+        self._usage_epochs = {}
+        self._usage_maintenance = set()
+        self._account_locks = {}
 
     def profile_path(self, account_id):
         if not isinstance(account_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", account_id):
@@ -396,20 +542,35 @@ class AccountRuntimeManager:
             raise RuntimeError("Account profile escaped its private root.")
         return path
 
-    def ensure(self, account_id, cfg=None):
-        from .services import resolve_opencode, opencode_version
+    def _account_lock(self, account_id):
         with self._lock:
+            return self._account_locks.setdefault(account_id, threading.RLock())
+
+    def ensure(self, account_id, cfg=None, *, _usage_reserved=False, _start_guard=None):
+        from .services import resolve_opencode, opencode_version
+        # Serialize owners for this account. Cold startup never holds the
+        # manager lock, so cancellation/close and other accounts stay responsive.
+        with self._account_lock(account_id):
+            epoch = self._usage_epochs.get(account_id, 0)
             if self._closed:
                 raise RuntimeError("Account runtime manager is closed.")
+            if account_id in self._usage_maintenance and not _usage_reserved:
+                raise RuntimeError("Account runtime is reserved for maintenance.")
             runtime = self._runtimes.get(account_id)
-            if runtime and runtime.healthy():
-                return runtime
             if runtime:
-                # A failed health probe cannot transfer ownership to a second
-                # process while an attempt may still be running in the first.
-                if runtime.sessions:
-                    raise ExecutionOwnershipError("Account execution ownership is uncertain.")
-                runtime.stop()
+                with runtime._lock:
+                    if not runtime._stopping and runtime.healthy():
+                        return runtime
+                    # Tracked sessions alone cannot prove native inactivity.
+                    if runtime.sessions:
+                        raise ExecutionOwnershipError("Account execution ownership is uncertain.")
+                    try:
+                        activity = runtime.request("GET", "/api/session/active", timeout=3)
+                    except RuntimeError:
+                        raise ExecutionOwnershipError("Account execution ownership is uncertain.") from None
+                    if not isinstance(activity, dict) or not isinstance(activity.get("data"), dict) or activity["data"]:
+                        raise ExecutionOwnershipError("Account execution ownership is uncertain.")
+                    runtime.stop()
             _reject_links(self.root)
             _private_directory(self.root)
             profile = _private_directory(self.profile_path(account_id), recursive=True)
@@ -428,9 +589,17 @@ class AccountRuntimeManager:
                 child.mkdir(parents=True, exist_ok=True)
             settings = cfg or self.config.snapshot()
             executable = resolve_opencode(settings["opencode_executable"])
-            if not opencode_version(executable).startswith("2."):
+            native_version = opencode_version(executable)
+            if not native_version.startswith("2."):
                 raise RuntimeError("Managed ChatGPT accounts require OpenCode 2.")
-            runtime = AccountRuntime(self, account_id, profile, executable)
+            def can_start():
+                return (not self._closed and self._usage_epochs.get(account_id, 0) == epoch and
+                        (_start_guard is None or _start_guard()))
+            runtime = AccountRuntime(self, account_id, profile, executable, start_guard=can_start)
+            runtime.native_version = native_version
+            if not can_start():
+                runtime.stop()
+                raise RuntimeError("Account runtime startup was cancelled.")
             self._runtimes[account_id] = runtime
             return runtime
 
@@ -438,6 +607,149 @@ class AccountRuntimeManager:
         runtime = self.ensure(account_id)
         result = _safe_credential_metadata(runtime.request("GET", "/api/credential")["data"])
         return dict(result, account_id=account_id)
+
+    def _usage_capture(self, runtime, expected_binding):
+        response = runtime.request("GET", "/api/credential", timeout=3)
+        entries = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(entries, list):
+            return None, usage_result("auth_unavailable", "credential_unavailable")
+        active = [e for e in entries if isinstance(e, dict) and e.get("active") is True and
+                  e.get("integrationID") == "openai" and isinstance(e.get("value"), dict)]
+        if len(active) != 1 or active[0]["value"].get("type") != "oauth":
+            return None, usage_result("auth_unavailable", "credential_unavailable")
+        gate = classify_usage_capability(active[0]["value"].get("methodID"), getattr(runtime, "native_version", ""))
+        if gate["status"] != "available":
+            return None, gate
+        credential = _usage_credential(entries)
+        if (not credential or credential["identity"] != expected_binding["identity"] or
+                expected_binding.get("credential_id") not in (None, credential["id"]) or
+                expected_binding.get("instance_id") not in (None, runtime.instance_id)):
+            return None, usage_result("auth_unavailable", "identity_unavailable")
+        return credential, gate
+
+    @staticmethod
+    def _valid_usage_binding(account_id, binding):
+        return (isinstance(binding, dict) and binding.get("account_id") == account_id and
+                isinstance(binding.get("identity"), str) and
+                re.fullmatch(r"[0-9a-f]{64}", binding["identity"]) is not None and
+                isinstance(binding.get("auth_epoch"), int) and not isinstance(binding["auth_epoch"], bool) and
+                binding["auth_epoch"] >= 0)
+
+    def read_usage(self, account_id, expected_binding, cancel=None):
+        """Capture privately, release all lifecycle locks for HTTPS, revalidate.
+
+        The registry owns auth_epoch validation at commit; this manager also
+        invalidates in-flight reads when login, deletion or shutdown starts.
+        """
+        if _cancelled(cancel):
+            return usage_result("cancelled", "cancelled")
+        if not self._valid_usage_binding(account_id, expected_binding):
+            return usage_result("auth_unavailable", "binding_invalid")
+        # Copy caller state so another thread cannot mutate the binding during IO.
+        expected_binding = dict(expected_binding)
+        try:
+            with self._lock:
+                if self._closed:
+                    return usage_result("unavailable", "runtime_changed")
+                runtime = self._runtimes.get(account_id)
+            if runtime is None:
+                return usage_result("deferred", "runtime_pending_idle")
+            with runtime._lock:
+                if self._closed or self._runtimes.get(account_id) is not runtime or runtime._stopping:
+                    return usage_result("unavailable", "runtime_changed")
+                if _cancelled(cancel):
+                    return usage_result("cancelled", "cancelled")
+                credential, gate = self._usage_capture(runtime, expected_binding)
+                if not credential:
+                    return gate
+                if credential["expires"] is not None and credential["expires"] <= time.time() * 1000:
+                    return usage_result("deferred", "expired_pending_idle")
+                epoch = self._usage_epochs.get(account_id, 0)
+                instance = runtime.instance_id
+            result = _usage_https(credential["access"], credential["account"], cancel)
+            for attempt in range(2):
+                with runtime._lock:
+                    if _cancelled(cancel):
+                        return usage_result("cancelled", "cancelled")
+                    if (self._closed or self._runtimes.get(account_id) is not runtime or runtime._stopping or
+                            runtime.instance_id != instance or self._usage_epochs.get(account_id, 0) != epoch):
+                        return usage_result("unavailable", "runtime_changed")
+                    current, _ = self._usage_capture(runtime, expected_binding)
+                    if not current or any(current[key] != credential[key] for key in ("id", "method", "identity", "account")):
+                        return usage_result("auth_unavailable", "binding_changed")
+                    retry = (attempt == 0 and result["reason_code"] == "unauthorized" and
+                             current["access"] != credential["access"])
+                    if retry and current["expires"] is not None and current["expires"] <= time.time() * 1000:
+                        return usage_result("deferred", "expired_pending_idle")
+                    if not retry:
+                        return result
+                    credential = current
+                # Only native-owned credential rotation authorizes one retry.
+                result = _usage_https(credential["access"], credential["account"], cancel)
+        except Exception:
+            # Native and transport exceptions may carry private response data.
+            return usage_result("cancelled", "cancelled") if _cancelled(cancel) else usage_result("unavailable", "native_unavailable")
+        return usage_result("unavailable", "native_unavailable")
+
+    def restart_idle_for_usage(self, account_id, reservation, cancel=None):
+        """Use only a scheduler maintenance lease with a lock-free validator.
+
+        Native activity independently proves idle. A lease covers jobs whose
+        sessions have not been created yet, and blocks new session creation.
+        """
+        valid = reservation.get("is_valid") if isinstance(reservation, dict) else None
+        if not self._valid_usage_binding(account_id, reservation) or not callable(valid):
+            return usage_result("deferred", "maintenance_unreserved")
+        reserved = False
+        try:
+            with self._lock:
+                if self._closed or _cancelled(cancel) or not valid():
+                    return usage_result("cancelled", "cancelled")
+                if account_id in self._usage_maintenance:
+                    return usage_result("deferred", "account_busy")
+                self._usage_maintenance.add(account_id)
+                reserved = True
+                runtime = self._runtimes.get(account_id)
+            if runtime is not None:
+                with runtime._lock:
+                    if runtime.sessions or (self._login and self._login[0] == account_id):
+                        return usage_result("deferred", "account_busy")
+                    current, gate = self._usage_capture(runtime, reservation)
+                    if not current:
+                        return gate
+                    activity = runtime.request("GET", "/api/session/active", timeout=3)
+                    if not isinstance(activity, dict) or not isinstance(activity.get("data"), dict):
+                        return usage_result("deferred", "activity_unverified")
+                    if activity["data"]:
+                        return usage_result("deferred", "account_busy")
+                    if self._closed or _cancelled(cancel) or not valid():
+                        return usage_result("cancelled", "cancelled")
+                    runtime.stop()  # Failure preserves the old owner and lock.
+                with self._lock:
+                    if self._runtimes.get(account_id) is runtime:
+                        self._runtimes.pop(account_id)
+                    self._usage_epochs[account_id] = self._usage_epochs.get(account_id, 0) + 1
+            with self._lock:
+                if self._closed or _cancelled(cancel) or not valid():
+                    return usage_result("cancelled", "cancelled")
+            runtime = self.ensure(account_id, _usage_reserved=True,
+                                  _start_guard=lambda: not _cancelled(cancel) and valid())
+            # Location initialisation is the native refresh owner. This GET may
+            # contact OAuth, so no manager/scheduler/store lock surrounds it.
+            with runtime._lock:
+                if self._closed or _cancelled(cancel) or not valid() or runtime._stopping:
+                    return usage_result("cancelled", "cancelled")
+                current, gate = self._usage_capture(runtime, reservation)
+                if not current:
+                    return gate
+                runtime.request("GET", "/api/integration", timeout=10)
+            return usage_result("partial", "native_refreshed")
+        except Exception:
+            return usage_result("cancelled", "cancelled") if _cancelled(cancel) else usage_result("deferred", "refresh_unavailable")
+        finally:
+            if reserved:
+                with self._lock:
+                    self._usage_maintenance.discard(account_id)
 
     def require_subscription(self, account_id):
         runtime = self.ensure(account_id)
@@ -463,6 +775,7 @@ class AccountRuntimeManager:
         with self._lock:
             if self._login:
                 raise RuntimeError("Complete or cancel the current ChatGPT sign-in first.")
+            self._usage_epochs[account_id] = self._usage_epochs.get(account_id, 0) + 1
             methods = self.auth_methods(account_id)
             selected = next((m for m in methods if method is None or m["id"] == method), None)
             if not selected:
@@ -512,19 +825,22 @@ class AccountRuntimeManager:
         with self._lock:
             runtime = self._runtimes.get(account_id)
             if runtime and (not instance_id or runtime.instance_id == instance_id):
-                if not session_id:
-                    # Startup can fail before creating a session. Stop that
-                    # idle owner explicitly instead of interrupting an empty
-                    # session ID, while preserving any unrelated live work.
-                    if runtime.sessions:
-                        return False
-                    try:
-                        runtime.stop()
-                    except RuntimeError:
-                        return False
-                    self._runtimes.pop(account_id, None)
-                    return True
-                return runtime.abort_and_wait(session_id, workpath)
+                with runtime._lock:
+                    if not session_id:
+                        # Coordinate with session creation before deciding that
+                        # an owner with no tracked attempt may be shut down.
+                        if runtime.sessions:
+                            return False
+                        try:
+                            activity = runtime.request("GET", "/api/session/active", timeout=3)
+                            if not isinstance(activity, dict) or not isinstance(activity.get("data"), dict) or activity["data"]:
+                                return False
+                            runtime.stop()
+                        except RuntimeError:
+                            return False
+                        self._runtimes.pop(account_id, None)
+                        return True
+                    return runtime.abort_and_wait(session_id, workpath)
             owner = self.profile_path(account_id) / "runtime-owner.json"
             if not owner.exists():
                 return True
@@ -535,21 +851,26 @@ class AccountRuntimeManager:
                 return False
 
     def delete_auth(self, account_id):
-        self.cancel_login(account_id)
-        runtime = self.ensure(account_id)
-        if runtime.sessions:
-            raise RuntimeError("Cannot disconnect an account with running attempts.")
-        entries = runtime.request("GET", "/api/credential")["data"]
-        for entry in entries:
-            if entry.get("integrationID") == "openai":
-                runtime.request("DELETE", "/api/credential/" + quote(entry["id"], safe=""))
+        with self._lock:
+            self._usage_epochs[account_id] = self._usage_epochs.get(account_id, 0) + 1
+            self.cancel_login(account_id)
+            runtime = self.ensure(account_id)
+            with runtime._lock:
+                if runtime.sessions:
+                    raise RuntimeError("Cannot disconnect an account with running attempts.")
+                entries = runtime.request("GET", "/api/credential")["data"]
+                for entry in entries:
+                    if entry.get("integrationID") == "openai":
+                        runtime.request("DELETE", "/api/credential/" + quote(entry["id"], safe=""))
 
     def stop(self, account_id):
         with self._lock:
+            self._usage_epochs[account_id] = self._usage_epochs.get(account_id, 0) + 1
             try:
                 self.cancel_login(account_id)
             except RuntimeError:
                 pass
+        with self._account_lock(account_id):
             runtime = self._runtimes.get(account_id)
             if runtime:
                 runtime.stop()
@@ -558,11 +879,12 @@ class AccountRuntimeManager:
     def close(self):
         with self._lock:
             self._closed = True
-            errors = []
-            for account_id in list(self._runtimes):
-                try:
-                    self.stop(account_id)
-                except RuntimeError as exc:
-                    errors.append(exc)
-            if errors:
-                raise RuntimeError("Some account servers could not be confirmed stopped.")
+            account_ids = set(self._runtimes) | set(self._account_locks)
+        errors = []
+        for account_id in account_ids:
+            try:
+                self.stop(account_id)
+            except RuntimeError as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError("Some account servers could not be confirmed stopped.")

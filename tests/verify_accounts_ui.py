@@ -9,14 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QPoint, QUrl, Qt, qInstallMessageHandler
+from PySide6.QtCore import QPoint, QPointF, QUrl, Qt, qInstallMessageHandler
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from scheduler_test_support import SchedulerHarness
-from test_account_bridge import Runtime
+from test_account_bridge import Runtime, UsageMonitorDouble
 from waraq.bridge import Bridge
 from waraq.config import Config
 from waraq.scheduler import Scheduler
@@ -35,6 +35,9 @@ def main():
         native_runtime = scheduler.account_runtime
         runtime = Runtime()
         scheduler.account_runtime = runtime
+        scheduler.account_usage.stop()
+        usage = UsageMonitorDouble()
+        scheduler.account_usage = usage
         bridge = Bridge(store, config, None, scheduler)
         bridge.timer.stop()
         opened = []
@@ -60,6 +63,18 @@ def main():
         def click(name, parent=None):
             item = find(name, parent)
             assert item.isVisible() and item.property("enabled"), name
+            # Quota cards can exceed the viewport at large text sizes. Exercise
+            # the same nested list/page scrolling a keyboard or touch user needs.
+            ancestor = item.parentItem()
+            while ancestor:
+                if ancestor.property("contentY") is not None and ancestor.property("contentHeight") is not None:
+                    center = item.mapToItem(ancestor, item.boundingRect().center()).y()
+                    current = ancestor.property("contentY")
+                    limit = max(0, ancestor.property("contentHeight") - ancestor.property("height"))
+                    if center < 20 or center > ancestor.property("height") - 20:
+                        ancestor.setProperty("contentY", min(limit, max(0, current + center - ancestor.property("height") / 2)))
+                        QTest.qWait(45)
+                ancestor = ancestor.parentItem()
             position = item.mapToScene(item.boundingRect().center())
             QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(position.x()), int(position.y())))
             QTest.qWait(45)
@@ -95,7 +110,31 @@ def main():
             click("accountRefreshButton", first)
             settle(lambda: not bridge.accountBusy)
             assert "Plus" in find("accountStatus", first).property("text")
-            assert "غير معروفة" in find("accountStatus", first).property("text")
+            assert "غير معروف" in find("accountUsageFiveHour", first).property("text")
+            usage.gate.set()
+            click("accountUsageRefreshButton", first)
+            settle(lambda: not usage.pending)
+            assert usage.requests[-1] == (ident, True)
+            assert "0٪" in find("accountUsageFiveHour", first).property("text")
+            assert "43٪" in find("accountUsageWeekly", first).property("text")
+            assert "غير معروف" not in find("accountUsageUpdated", first).property("text")
+            # Manual telemetry remains usable while an account executes work.
+            with store.lock:
+                lease, _ = scheduler.accounts.acquire("fixture-active-job", "fixture-worker", "model")
+            assert lease and lease["account_id"] == ident
+            bridge.refresh()
+            assert find("accountUsageRefreshButton", first).property("enabled")
+            assert not find("accountLoginButton", first).property("enabled")
+            scheduler.accounts.release(lease)
+            bridge.refresh()
+            usage.maintenance.add(ident)
+            bridge.refresh()
+            assert not find("accountLoginButton", first).property("enabled")
+            assert not find("accountRemoveButton", first).property("enabled")
+            assert not bridge.accountBusy
+            usage.maintenance.clear()
+            bridge.refresh()
+            assert find("accountLoginButton", first).property("enabled")
             click("accountPreferButton", first)
             assert scheduler.accounts.list()[0]["preferred"]
             click("accountDownButton", first)
@@ -105,6 +144,16 @@ def main():
             bridge.accountsModel.modelReset.connect(lambda: resets.append(True))
             bridge.refresh()
             assert not resets
+            rows = scheduler.accounts.list()
+            available = usage.snapshots[ident]
+            usage.snapshots[rows[0]["id"]] = {**available, "stale": True, "messageCode": "timeout",
+                "fiveHour": {**available["fiveHour"], "status": "stale"},
+                "weekly": {"status": "unavailable", "remainingPercent": None, "resetsAt": None, "windowMinutes": None}}
+            usage.snapshots[rows[2]["id"]] = {**usage.public_snapshot("unknown"),
+                "status": "unsupported", "messageCode": "token_sharing_unsupported"}
+            bridge.refresh()
+            assert "قراءة قديمة" in find("accountUsageFiveHour").property("text")
+            assert "غير معروف" in find("accountUsageWeekly").property("text")
             # Exercise long names, maximum text scale and compact/comfortable themes.
             scheduler.accounts.update(scheduler.accounts.list()[0]["id"], alias="الحساب المخصص لمعالجة الدروس العربية ومتابعة الملفات والتحقق من النتائج العلمية")
             bridge.refresh()
@@ -122,14 +171,21 @@ def main():
                 for card in find_all(root.contentItem(), "accountCard"):
                     content = find("accountContent", card)
                     assert content.property("width") > 0
-                    for label_name in ("accountStatus", "accountError", "accountAliasLabel"):
+                    for label_name in ("accountStatus", "accountError", "accountAliasLabel", "accountUsagePanel"):
                         label = find(label_name, card)
                         if label.isVisible():
                             assert label.property("y") + label.property("height") <= content.property("height") + 1
-                    for button in find_all(card, "accountRemoveButton") + find_all(card, "accountLoginButton"):
+                    for button in find_all(card, "accountRemoveButton") + find_all(card, "accountLoginButton") + find_all(card, "accountUsageRefreshButton"):
                         assert button.property("x") + button.property("width") <= content.property("width") + 1
-                assert root.grabWindow().save(str(screenshots / f"accounts-{theme}-{scale}-{compact}.png"))
+                # Present one coherent card in the viewport, without a routine
+                # settings toast left over from the action checks above.
+                root.setProperty("toastText", "")
+                find("accountList").setProperty("contentY", 0)
                 scroller = find("workersPageScroll").property("contentItem")
+                list_top = find("accountList").mapToItem(scroller, QPointF(0, 0)).y() + scroller.property("contentY")
+                scroller.setProperty("contentY", min(list_top, max(0, scroller.property("contentHeight") - scroller.property("height"))))
+                QTest.qWait(75)
+                assert root.grabWindow().save(str(screenshots / f"accounts-{theme}-{scale}-{compact}.png"))
                 scroller.setProperty("contentY", max(0, scroller.property("contentHeight") - scroller.property("height")))
                 QTest.qWait(75)
                 worker_position = workers.mapToScene(workers.boundingRect().center())

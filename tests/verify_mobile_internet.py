@@ -13,6 +13,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from test_account_bridge import phone_usage_fixtures
 
 
 def main():
@@ -34,6 +36,7 @@ def main():
                 "capabilities": {key: record["library_capable"] for key in ("library", "library_preview", "library_delete", "library_organize")},
                 "workers": [], "source": {"busy": False, "error": "", "revision": 1,
                                              "title": "", "items": []},
+                "accountUsage": phone_usage_fixtures(),
                 "jobs": [{"id": "job-" + device, "title": "درس " + names[device],
                           "status": "completed", "statusLabel": "مكتملة", "stageLabel": "",
                           "template": "", "folder_name": "", "files": ["document"]}]}
@@ -156,6 +159,17 @@ def main():
             expect(page.locator("#workspace")).to_be_visible()
             expect(page.locator("#jobs a")).to_have_attribute("href", "/api/devices/device-a/files/job-device-a/document")
             assert page.evaluate("localStorage.length") == 0
+            page.locator('[data-tab="workers"]').click()
+            expect(page.locator("#account-usage article")).to_have_count(4)
+            expect(page.locator("#account-usage article").nth(0)).to_contain_text("0٪")
+            expect(page.locator("#account-usage article").nth(1)).to_contain_text("قراءة قديمة")
+            expect(page.locator("#account-usage article").nth(2)).to_contain_text("غير مدعومة")
+            assert page.evaluate("window.__quota_xss") is None
+            assert page.locator("#account-usage img, #account-usage button").count() == 0
+            assert page.evaluate("sessionStorage.length") == 0
+            if output:
+                page.screenshot(path=str(output / "internet-account-usage.png"), full_page=True)
+            page.locator('[data-tab="queue"]').click()
             page.locator("#queue-toggle").click()
             page.locator("#confirm-yes").click()
             expect(page.locator("#toast")).to_have_text("تم التنفيذ")
@@ -242,6 +256,7 @@ def main():
             expect(page.locator("#workspace")).to_be_hidden()
             expect(page.locator("#jobs article")).to_have_count(0)
             expect(page.locator("#library-files article")).to_have_count(0)
+            expect(page.locator("#account-usage article")).to_have_count(0)
             record["deny_state"], record["revoke_preview"] = False, False
             page.evaluate("async () => { window.poll=window.resumeAuthorizedPoll; await poll(); }")
             expect(page.locator("#workspace")).to_be_visible()
@@ -266,6 +281,7 @@ def main():
             page.locator("#refresh").click()
             expect(page.locator("#offline")).to_contain_text("الجهاز غير متصل")
             expect(page.locator("#queue-toggle")).to_be_disabled()
+            expect(page.locator("#account-usage .usage-cached")).to_have_count(4)
             expect(page.locator("#device-name")).to_have_text(names["device-a"])
             if output:
                 page.screenshot(path=str(output / "internet-device-offline.png"), full_page=True)
@@ -281,9 +297,11 @@ def main():
             record["uncertain"] = False
             for scheme in ("light", "dark"):
                 page.emulate_media(color_scheme=scheme)
-                for width, height in ((320, 740), (375, 812), (844, 390), (768, 1024)):
+                for width, height in ((320, 740), (375, 812), (844, 390), (768, 1024), (1440, 900)):
                     page.set_viewport_size({"width": width, "height": height})
-                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                    for tab in ("queue", "source", "workers", "files"):
+                        page.locator(f'[data-tab="{tab}"]').click()
+                        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 page.set_viewport_size({"width": 320, "height": 740})
                 page.evaluate("document.documentElement.style.fontSize='32px'")
                 for tab in ("queue", "source", "workers", "files"):

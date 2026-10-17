@@ -145,10 +145,10 @@ def main():
                 keys=page.evaluate("async()=>{let all=[];for(const name of await caches.keys()){const c=await caches.open(name);all.push(...(await c.keys()).map(r=>new URL(r.url).pathname));}return all;}")
                 assert len(keys)==13 and '/pwa-shell.html' in keys and '/assets/vendor/jsQR.js' in keys,keys
                 # Actual API/file activity must not add anything to cache.
-                page.evaluate("async()=>{await fetch('/api/devices');await fetch('/api/devices/device-A/files/job/document');await fetch('/api/preview');}")
+                page.evaluate("async()=>{await fetch('/api/devices');await fetch('/api/devices/device-A/state');await fetch('/api/state');await fetch('/api/devices/device-A/files/job/document');await fetch('/api/preview');}")
                 assert page.evaluate("async()=>{let a=[];for(const n of await caches.keys()){for(const r of await(await caches.open(n)).keys())a.push(r.url)}return a.every(x=>!x.includes('/api/')&&!x.includes('/devices/')&&!x.includes('#'));}")
                 context.set_offline(True)
-                for private in ('/api/devices','/api/devices/device-A/files/job/document','/api/preview'):
+                for private in ('/api/devices','/api/devices/device-A/state','/api/state','/api/devices/device-A/files/job/document','/api/preview'):
                     assert page.evaluate("async p=>{try{await fetch(p);return false}catch{return true}}",private)
                 page.reload();expect(page.locator('#internet-home')).to_be_visible()
                 expect(page.locator('#login')).to_be_hidden()

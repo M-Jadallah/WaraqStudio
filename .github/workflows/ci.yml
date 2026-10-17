@@ -54,8 +54,17 @@ jobs:
       - name: Native OpenCode 2 acceptance (local model, no paid requests)
         run: python tests/verify_opencode_v2.py
 
+      - name: Native managed account isolation and failover (local model)
+        run: python tests/verify_opencode_accounts.py
+
+      - name: Native quota reader contract (synthetic credentials, no model calls)
+        run: python tests/verify_opencode_accounts.py --usage-only
+
       - name: Native UI interaction checks
         run: python tests/verify_ui.py
+
+      - name: Native account management and quota UI checks
+        run: python tests/verify_accounts_ui.py
 
       - name: Native queue scrolling stress
         run: python tests/verify_queue_scroll.py

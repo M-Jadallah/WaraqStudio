@@ -30,6 +30,7 @@ class RemoteCommands(QObject):
             bridge._remote_library = RemoteLibrary(bridge)
         self.library = bridge._remote_library
         self._generation = secrets.token_hex(16)
+        self._account_display_keys = {}
         self._source = {"revision": "", "busy": False, "title": "", "items": [], "error": ""}
         self._discovery_cancel = threading.Event()
         self._source_ready.connect(self._accept_source, Qt.QueuedConnection)
@@ -41,6 +42,7 @@ class RemoteCommands(QObject):
     def stop(self):
         self._discovery_cancel.set()
         self._generation = secrets.token_hex(16)
+        self._account_display_keys.clear()
         self._source = {"revision": "", "busy": False, "title": "", "items": [], "error": ""}
 
     def _snapshot(self):
@@ -51,10 +53,27 @@ class RemoteCommands(QObject):
         workers = ("id", "name", "stage", "stageLabel", "enabled", "paused", "autoBlocked", "job_id",
                    "elapsed", "error", "cooldownSeconds", "providerLabel", "modelResolved",
                    "accountName", "accountStatus", "accountWaitUntil")
+        # This is a display-only projection of the GUI cache. Native identifiers,
+        # auth/profile metadata and arbitrary error strings never reach a phone.
+        account_usage = []
+        account_rows = getattr(getattr(b, "accountsModel", None), "_items", [])
+        live_ids = {row["id"] for row in account_rows}
+        self._account_display_keys = {ident: key for ident, key in self._account_display_keys.items() if ident in live_ids}
+        for row in account_rows:
+            ident = row["id"]
+            usage = row.get("usage") or {}
+            projected = {key: usage.get(key) for key in ("status", "stale", "lastSuccessAt", "lastAttemptAt", "messageCode", "source")}
+            for key in ("fiveHour", "weekly"):
+                window = usage.get(key) or {}
+                projected[key] = {field: window.get(field) for field in ("status", "remainingPercent", "resetsAt", "windowMinutes")}
+            account_usage.append({"displayKey": self._account_display_keys.setdefault(ident, secrets.token_hex(12)),
+                                  "alias": row["alias"], "usageRefreshing": bool(row.get("usageRefreshing")),
+                                  "usage": projected})
         return {"capabilities": dict(CAPABILITIES), "version": __version__, "running": b.running, "autoStop": b._auto_stop, "stats": b.stats,
                 "jobs": [{**{key: job.get(key, "") for key in fields},
                           "files": [kind for kind in ("document", "transcript") if job.get(kind)]} for job in b.jobs],
                 "workers": [{key: worker.get(key, "") for key in workers} for worker in b.workers],
+                "accountUsage": account_usage,
                 "templates": [{"id": t["id"], "name": t["name"]} for t in b.templates],
                 "folders": b.folders, "source": self._source}
 

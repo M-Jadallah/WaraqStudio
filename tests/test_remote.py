@@ -72,6 +72,42 @@ def add_job(store, config):
     return store.add([{"video_id": "one", "title": "درس عربي", "position": 1}], config.snapshot())[0]
 
 
+def test_phone_usage_projection_is_cached_private_and_has_session_display_keys(remote_env, monkeypatch):
+    bridge, remote, store, config, client, request, pair, base, app = remote_env
+    accounts = bridge.scheduler.accounts
+    first = accounts.create("اسم مشترك")
+    second = accounts.create("اسم مشترك")
+    # Native identity/auth fields must not be projected even if the cache fixture contains them.
+    snapshot = {"status": "available", "stale": True, "lastSuccessAt": 1800000000, "lastAttemptAt": 1800000100,
+                "messageCode": "usage_available", "source": "legacy_codex_usage", "refreshing": False,
+                "fiveHour": {"status": "stale", "remainingPercent": 0, "resetsAt": 1800018000, "windowMinutes": 300,
+                             "token": "PRIVATE_TOKEN"},
+                "weekly": {"status": "unavailable", "remainingPercent": None, "resetsAt": None, "windowMinutes": None},
+                "email": "PRIVATE_EMAIL", "identity": "PRIVATE_IDENTITY", "error": "PRIVATE_ERROR"}
+    monkeypatch.setattr(bridge.scheduler.account_usage, "public_snapshot", lambda ident: snapshot)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Phone polling cannot fetch account usage")
+    monkeypatch.setattr(bridge.scheduler.account_usage, "request", forbidden)
+    monkeypatch.setattr(bridge.scheduler.account_usage, "schedule_due", forbidden)
+    bridge._account_usage_timer.stop()
+    pair()
+    state = request("/api/state").json
+    rows = state["accountUsage"]
+    assert len(rows) == 2 and rows[0]["alias"] == rows[1]["alias"]
+    assert rows[0]["displayKey"] != rows[1]["displayKey"]
+    assert rows == request("/api/state").json["accountUsage"]
+    assert rows[0]["usage"]["fiveHour"]["remainingPercent"] == 0
+    assert rows[0]["usage"]["weekly"]["remainingPercent"] is None
+    public = json.dumps(rows)
+    for private in (first["id"], second["id"], "PRIVATE_TOKEN", "PRIVATE_EMAIL", "PRIVATE_IDENTITY", "PRIVATE_ERROR",
+                    '"email"', '"identity"', '"token"', '"account_id"', '"profile"'):
+        assert private not in public
+    # Display-only data creates no new action that can mutate or refresh an account.
+    assert request("/api/action/account_usage", {"id": rows[0]["displayKey"]}).status_code == 404
+    bridge.remote.commands.stop()
+    assert bridge.remote.commands._snapshot()["accountUsage"][0]["displayKey"] != rows[0]["displayKey"]
+
+
 def test_opt_in_and_assets_do_not_expose_state(remote_env):
     bridge, remote, _, _, _, request, _, _, _ = remote_env
     assert request("/").status_code == 200

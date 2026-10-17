@@ -52,6 +52,61 @@ ApplicationWindow {
     function fs(n) { return Math.max(9, Math.round(n * uiScale)) }
     function rh(n) { return Math.max(20, Math.round(n * uiScale * density)) }
     function rs(n) { return Math.max(2, Math.round(n * density)) }
+    function usageDate(value) {
+        return typeof value === "number" && isFinite(value) && value > 0
+            ? new Date(value * 1000).toLocaleString(Qt.locale(), "dd/MM/yyyy hh:mm") : "غير معروف"
+    }
+    function usageWindow(label, value) {
+        value = value || {}
+        var known = ["available", "stale"].indexOf(value.status) >= 0 && typeof value.remainingPercent === "number" && isFinite(value.remainingPercent)
+        return label + " · المتبقي: " + (known ? value.remainingPercent + "٪" : "غير معروف")
+            + (value.status === "stale" ? " (قراءة قديمة)" : "") + " · موعد التجدد (توقيت الجهاز): " + win.usageDate(value.resetsAt)
+    }
+    function usageMessage(usage, refreshing) {
+        usage = usage || {}
+        var messages = {unsupported: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+            unsupported_method: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+            signed_out: "سجّل الدخول لقراءة الحصة.", auth_required: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+            authentication_required: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+            network_error: "تعذّر الاتصال لقراءة الحصة. يمكنك إعادة المحاولة.",
+            rate_limited: "خدمة الحصص طلبت الانتظار قبل إعادة المحاولة.",
+            timeout: "انتهت مهلة قراءة الحصة. يمكنك إعادة المحاولة.",
+            invalid_response: "تعذّر تفسير بيانات الحصة.", not_fetched: "لم تُقرأ الحصة بعد.", not_checked: "لم تُقرأ الحصة بعد.",
+            token_sharing_unsupported: "قراءة الحصة غير مدعومة لتسجيل Sign in with ChatGPT الحالي.",
+            method_unsupported: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+            native_version_unverified: "لم يُتحقق من دعم قراءة الحصة في إصدار OpenCode المثبّت.",
+            usage_available: "", usage_partial: "بعض نوافذ الحصة غير متاحة.",
+            windows_missing: "لم تُرجع الخدمة نوافذ الحصة.", usage_windows_unavailable: "نوافذ الحصة غير متاحة.",
+            usage_read_failed: "تعذّرت قراءة الحصة. أعد المحاولة لاحقًا.",
+            usage_unavailable: "الحصة غير متاحة حاليًا.",
+            usage_cancelled: "أُلغي تحديث الحصة.", cancelled: "أُلغي تحديث الحصة.",
+            usage_refresh_deferred: "تحديث الحصة مؤجّل حتى يصبح الحساب متاحًا.",
+            account_not_ready: "الحساب غير جاهز لقراءة الحصة.",
+            usage_runtime_unsupported: "إصدار OpenCode الحالي لا يدعم قراءة الحصة.",
+            legacy_supported: "طريقة الدخول تدعم قراءة الحصة.",
+            response_too_large: "تعذّر قبول استجابة خدمة الحصص.",
+            unauthorized: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+            endpoint_unavailable: "قراءة الحصة غير مدعومة حاليًا لدى الخدمة.",
+            throttled: "خدمة الحصص طلبت الانتظار قبل إعادة المحاولة.",
+            http_error: "تعذّرت قراءة الحصة من الخدمة.",
+            connection_failed: "تعذّر الاتصال بخدمة الحصص.",
+            binding_invalid: "تغيّر تسجيل الحساب؛ يلزم التحقق من الدخول.",
+            runtime_changed: "تغيّرت جلسة OpenCode؛ أعد تحديث الحصة.",
+            identity_unavailable: "تعذّر التحقق من هوية الحساب لقراءة الحصة.",
+            expired_pending_idle: "انتهت صلاحية الدخول؛ يُؤجّل تجديده حتى اكتمال مهام الحساب.",
+            binding_changed: "تغيّرت هوية الحساب؛ أعد تحديث الحصة.",
+            native_unavailable: "OpenCode غير متاح لقراءة الحصة.",
+            maintenance_unreserved: "تحديث الحصة مؤجّل حتى يصبح الحساب متاحًا.",
+            runtime_unavailable: "جلسة OpenCode غير متاحة لقراءة الحصة.",
+            account_busy: "تحديث الحصة مؤجّل حتى اكتمال مهام الحساب.",
+            activity_unverified: "يلزم التحقق من توقف جلسة الحساب السابقة.",
+            native_refreshed: "جُدّد الدخول؛ يمكن تحديث الحصة.",
+            refresh_unavailable: "تعذّر تجديد الدخول لقراءة الحصة.",
+            runtime_pending_idle: "تحديث الحصة مؤجّل حتى اكتمال مهام الحساب."}
+        var message = messages[usage.messageCode] || (usage.status === "unsupported" ? messages.unsupported
+            : usage.status === "available" ? "" : "الحصة غير معروفة حاليًا؛ أعد المحاولة لاحقًا.")
+        return (refreshing ? "جارٍ تحديث الحصة… " : "") + (usage.stale ? "قراءة قديمة. " : "") + message
+    }
     function transcriptTemplateId() { return backend.templates.length > 0 ? (templateBox.currentValue || "") : "" }
     function chooseSourceOutputFolder() {
         var path = backend.choosePath("folder")
@@ -748,6 +803,23 @@ ApplicationWindow {
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
                                 text: "تُوزَّع مهام مزود تسجيل الدخول على الحسابات بحسب التفضيل والترتيب. الموافقة تتم في المتصفح؛ كل حساب معزول. تغييرات الحسابات تسري على المهام المنتظرة."
                             }
+                            Flow {
+                                Layout.fillWidth: true; spacing: win.rs(8)
+                                AppButton { objectName: "accountUsageRefreshAllButton"; text: "تحديث الحصص"; onClicked: backend.refreshAllAccountUsage(); Accessible.name: "تحديث حصص جميع حسابات ChatGPT" }
+                                CheckBox {
+                                    objectName: "accountUsageAutoRefresh"; text: "تحديث الحصص تلقائيًا"; palette.windowText: win.ink
+                                    checked: settings.chatgpt_usage_auto_refresh !== false
+                                    onClicked: { settings.chatgpt_usage_auto_refresh = checked; win.save() }
+                                    Accessible.name: text
+                                }
+                                LabelText { text: "الفاصل بالثواني"; height: usageInterval.height; verticalAlignment: Text.AlignVCenter }
+                                SpinBox {
+                                    id: usageInterval; objectName: "accountUsageRefreshInterval"; from: 60; to: 1800; stepSize: 30
+                                    value: settings.chatgpt_usage_refresh_seconds || 300
+                                    onValueModified: { settings.chatgpt_usage_refresh_seconds = value; win.save() }
+                                    Accessible.name: "الفاصل بين تحديثات حصص ChatGPT بالثواني"
+                                }
+                            }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: win.rs(8)
                                 LabelText { text: "اسم الحساب" }
@@ -763,7 +835,7 @@ ApplicationWindow {
                             }
                             PinList {
                                 id: accountList; objectName: "accountList"
-                                Layout.fillWidth: true; Layout.preferredHeight: count ? Math.min(win.rh(210), contentHeight) : win.rh(28)
+                                Layout.fillWidth: true; Layout.preferredHeight: count ? Math.min(win.rh(380), contentHeight) : win.rh(28)
                                 spacing: win.rs(5); clip: true; model: backend.accountsModel
                                 ScrollBar.vertical: ScrollBar {}
                                 delegate: Box {
@@ -781,14 +853,23 @@ ApplicationWindow {
                                                 onClicked: backend.setAccountEnabled(accountData.id, checked)
                                                 Accessible.name: "تفعيل الحساب " + accountData.alias
                                             }
-                                            LabelText { objectName: "accountAliasLabel"; text: (accountData.preferred ? "المفضّل · " : "") + accountData.alias; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                            LabelText { objectName: "accountAliasLabel"; textFormat: Text.PlainText; text: (accountData.preferred ? "المفضّل · " : "") + accountData.alias; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
                                             SubText { text: "#" + (index + 1) }
                                         }
                                         SubText {
                                             objectName: "accountStatus"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
-                                            text: accountData.statusText + " · " + accountData.quotaText + (accountData.inFlight ? " · يعالج " + accountData.inFlight + " مهمة" : "")
+                                            text: accountData.statusText + (accountData.inFlight ? " · يعالج " + accountData.inFlight + " مهمة" : "")
                                                   + (accountData.subscription ? " · " + accountData.subscription : "") + (accountData.email ? " · " + accountData.email : "")
                                             Accessible.name: text
+                                        }
+                                        SubText { text: accountData.cooldownText || ""; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                        ColumnLayout {
+                                            objectName: "accountUsagePanel"; Layout.fillWidth: true; spacing: win.rs(3)
+                                            property var usage: accountData.usage || ({})
+                                            SubText { objectName: "accountUsageFiveHour"; textFormat: Text.PlainText; text: win.usageWindow("خمس ساعات", parent.usage.fiveHour); Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageWeekly"; textFormat: Text.PlainText; text: win.usageWindow("أسبوعية", parent.usage.weekly); Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageUpdated"; text: "آخر قراءة ناجحة (توقيت الجهاز): " + win.usageDate(parent.usage.lastSuccessAt); Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageMessage"; text: win.usageMessage(parent.usage, accountData.usageRefreshing); visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
                                         }
                                         SubText { objectName: "accountError"; text: accountData.error; visible: !!accountData.error; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; color: win.dark ? "#f4b880" : "#9a4409" }
                                         Flow {
@@ -796,6 +877,7 @@ ApplicationWindow {
                                             AppButton { objectName: "accountLoginButton"; text: "تسجيل / إعادة الدخول"; enabled: !accountData.busy && !accountData.inFlight && !backend.accountBusy; onClicked: backend.loginAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
                                             AppButton { objectName: "accountCancelLoginButton"; text: "إلغاء الدخول"; visible: accountData.loggingIn; onClicked: backend.cancelAccountLogin(accountData.id); Accessible.name: text + " " + accountData.alias }
                                             AppButton { objectName: "accountRefreshButton"; text: "فحص الحساب"; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.refreshAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { objectName: "accountUsageRefreshButton"; text: accountData.usageRefreshing ? "جارٍ تحديث الحصة…" : "تحديث الحصة"; enabled: !accountData.usageRefreshing && !accountData.loggingIn && !accountData.busy; onClicked: backend.refreshAccountUsage(accountData.id); Accessible.name: "تحديث الحصة " + accountData.alias }
                                             AppButton { text: "فحص الجلسة السابقة"; visible: accountData.uncertain; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.recheckAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
                                             AppButton { objectName: "accountPreferButton"; text: "تفضيل"; enabled: !accountData.preferred && !accountData.busy; onClicked: backend.preferAccount(accountData.id); Accessible.name: "تفضيل " + accountData.alias }
                                             AppButton { objectName: "accountUpButton"; text: "للأعلى"; enabled: index > 0 && !accountData.busy; onClicked: backend.moveAccount(accountData.id, -1); Accessible.name: "رفع أولوية " + accountData.alias }

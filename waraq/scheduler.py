@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from .config import compose_model, credential_name, key_env_for, provider_info, provider_of
+from .account_usage import AccountUsageMonitor
 from .library import Library
 from .opencode_accounts import OpenCodeAccounts, _finite_number
 from .opencode_runtime import AccountRuntimeManager
@@ -42,6 +43,7 @@ class Scheduler:
         self.provider_override_variant = ""
         self._keys = {}
         self.thread = None
+        self.account_usage = AccountUsageMonitor(self)
 
     def set_provider_override(self, provider, model="", variant=""):
         """Session-only: force one provider, model and reasoning level on every OpenCode worker."""
@@ -163,7 +165,54 @@ class Scheduler:
             self.accounts.clear_holds(held_jobs)
             return next(account for account in self.accounts.list() if account["id"] == ident)
 
+    def refresh_account_usage(self, ident, binding, cancel, allow_idle_refresh=True):
+        """Read telemetry; native renewal is guarded separately from job leases."""
+        def deferred(reason="usage_refresh_deferred"):
+            return {"status": "cancelled" if cancel.is_set() or self.stop_event.is_set() else "deferred",
+                    "reason_code": reason, "observed_at": time.time()}
+
+        with self.lock:
+            with self.store.lock:
+                if cancel.is_set() or self.stop_event.is_set():
+                    return deferred("usage_cancelled")
+                if (not self.accounts._matches_usage_binding(ident, binding)
+                        or not self.accounts.usage_eligible(ident)):
+                    return deferred("account_not_ready")
+        # Neither registry nor scheduler locks may span HTTP/native process work.
+        read = getattr(self.account_runtime, "read_usage", None)
+        if read is None:
+            return {"status": "unsupported", "reason_code": "usage_runtime_unsupported"}
+        result = read(ident, binding, cancel)
+        if (not allow_idle_refresh or not isinstance(result, dict)
+                or result.get("status") != "deferred"
+                or result.get("reason_code") not in ("expired_pending_idle", "runtime_pending_idle")):
+            return result
+        with self.lock:
+            if cancel.is_set() or self.stop_event.is_set():
+                return deferred("usage_cancelled")
+            reservation = self.accounts.reserve_usage_maintenance(ident, binding)
+        if reservation is None:
+            return result
+        # This callable is deliberately lock-free: runtime lifecycle guards can
+        # invoke it without acquiring scheduler/store locks in reverse order.
+        reservation["is_valid"] = lambda: not (reservation["cancel"].is_set()
+                                                 or cancel.is_set() or self.stop_event.is_set())
+        try:
+            restart = getattr(self.account_runtime, "restart_idle_for_usage", None)
+            if restart is None or not reservation["is_valid"]():
+                return result
+            refreshed = restart(ident, reservation, cancel)
+            if not reservation["is_valid"]():
+                return deferred("usage_cancelled")
+            if isinstance(refreshed, dict) and refreshed.get("reason_code") == "native_refreshed":
+                return read(ident, binding, cancel)
+            return refreshed
+        finally:
+            with self.lock:
+                self.accounts.release_usage_maintenance(reservation)
+
     def shutdown(self):
+        self.account_usage.stop()
         with self.lock:
             self.running = False
             self.stop_event.set()
