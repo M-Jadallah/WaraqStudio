@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import hmac
 import json
@@ -233,8 +233,9 @@ class RemoteLibrary:
 
     def _connect(self):
         database = sqlite3.connect(self._index)
-        database.row_factory = sqlite3.Row
-        database.executescript('''
+        try:
+            database.row_factory = sqlite3.Row
+            database.executescript('''
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY,root TEXT NOT NULL,relative TEXT NOT NULL,
@@ -242,7 +243,10 @@ class RemoteLibrary:
                 group_id TEXT NOT NULL,group_name TEXT NOT NULL,size INTEGER NOT NULL,modified REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY,root TEXT NOT NULL,name TEXT NOT NULL,
                 UNIQUE(root,name));
-        ''')
+            ''')
+        except BaseException:
+            database.close()
+            raise
         return database
 
     def _scan(self, cfg, context=None):
@@ -286,7 +290,10 @@ class RemoteLibrary:
                                                   version=_version(info),name=path.name,kind=kind,group_name=group,
                                                   size=info.st_size,modified=info.st_mtime,protected=(info.st_dev,info.st_ino) in origins))
                             except (OSError,RemoteError): continue
-                with self._connect() as db:
+                # sqlite3's context manager commits/rolls back; it does not
+                # close the handle. Release it even when a scan fails, rather
+                # than leaving Windows file locks until a later GC cycle.
+                with closing(self._connect()) as db, db:
                     meta = dict(db.execute('SELECT key,value FROM meta').fetchall())
                     secret = meta.get('secret') or secrets.token_hex(32)
                     previous = {r['relative']:dict(r) for r in db.execute('SELECT * FROM files WHERE root=?',(str(root),))}

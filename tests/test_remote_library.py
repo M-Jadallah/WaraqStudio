@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from contextlib import closing
 import json
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import threading
@@ -31,6 +33,7 @@ def env(tmp_path):
     root=Path(config.data['library_root'])
     (root/'التفريغات').mkdir(parents=True)
     yield bridge,registry,root,config,store,app
+    bridge.closeAccounts()
     registry.close()
     deadline=time.monotonic()+10
     while registry.busy and time.monotonic()<deadline:time.sleep(.01)
@@ -38,13 +41,15 @@ def env(tmp_path):
     bridge.remote.stop()
     bridge.internet.stop()
     scheduler.shutdown()
+    bridge.deleteLater()
+    app.processEvents()
     store.db.close()
 
 
-def ready(registry,config,data=None):
+def ready(registry,config,data=None,timeout=15):
     request=dict(data or {})
     result=registry.list(request,config.snapshot())
-    deadline=time.monotonic()+15
+    deadline=time.monotonic()+timeout
     while result['busy'] and time.monotonic()<deadline:
         time.sleep(.01)
         request.pop('refresh',None)
@@ -54,8 +59,33 @@ def ready(registry,config,data=None):
     return result
 
 
-def refresh(registry,config):
-    return ready(registry,config,{'refresh':True})
+def refresh(registry,config,timeout=15):
+    return ready(registry,config,{'refresh':True},timeout=timeout)
+
+
+@pytest.mark.parametrize('fail_write', [False, True])
+def test_scan_closes_index_connection_after_commit_or_failure(env, monkeypatch, fail_write):
+    bridge,registry,root,config,store,app=env
+    (root/'التفريغات'/'retained.txt').write_text('retained',encoding='utf-8')
+    original=registry._connect
+    retained=[]
+    def connect():
+        database=original()
+        retained.append(database)  # Prevent GC from hiding a leaked connection.
+        if fail_write:
+            database.set_authorizer(lambda action,table,*args:
+                sqlite3.SQLITE_DENY if action==sqlite3.SQLITE_INSERT and table=='meta' else sqlite3.SQLITE_OK)
+        return database
+    monkeypatch.setattr(registry,'_connect',connect)
+    registry._scan(config.snapshot())
+    assert registry._loaded is not fail_write
+    assert bool(registry._error) is fail_write
+    assert len(retained)==1
+    with pytest.raises(sqlite3.ProgrammingError,match='closed'):
+        retained[0].execute('SELECT 1')
+    if not fail_write:
+        with closing(sqlite3.connect(registry._index)) as database:
+            assert database.execute('SELECT name FROM files').fetchone()[0]=='retained.txt'
 
 
 def test_shared_registry_capabilities_and_transport_stop(env):
@@ -75,7 +105,9 @@ def test_large_library_cursor_groups_filters_and_restart_stability(env):
     for i in range(3021):(root/'التفريغات'/f'{i:04d}-عربي.txt').write_text(str(i),encoding='utf-8')
     group=root/'مادة خاصة'/'Word';group.mkdir(parents=True)
     (group/'شرح.docx').write_bytes(b'docx')
-    result=ready(registry,config,{'limit':100})
+    # This deliberately scans thousands of real Windows files; allow slower
+    # filesystem/security inspection while retaining a bounded completion check.
+    result=ready(registry,config,{'limit':100},timeout=60)
     assert result['total']==3022
     assert len(result['groups'])==2
     seen=[]
@@ -92,12 +124,12 @@ def test_large_library_cursor_groups_filters_and_restart_stability(env):
         assert exc.value.status==409
     revision=first['revision']
     registry._loaded=False
-    restarted=ready(registry,config,{'limit':1})
+    restarted=ready(registry,config,{'limit':1},timeout=60)
     assert restarted['revision']==revision
     assert restarted['files'][0]['file_id']==first['files'][0]['file_id']
     assert str(root) not in json.dumps(first,ensure_ascii=False)
     (root/'التفريغات'/'new.txt').write_text('new')
-    refresh(registry,config)
+    refresh(registry,config,timeout=60)
     with pytest.raises(RemoteError) as exc:registry.list({'cursor':cursor},config.snapshot())
     assert exc.value.status==409
 

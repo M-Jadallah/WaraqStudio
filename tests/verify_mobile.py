@@ -172,53 +172,70 @@ def main():
         scheduler.start = lambda: setattr(scheduler, "running", True)
         bridge = Bridge(store, config, None, scheduler)
         bridge.timer.stop()
-        store.create_folder("مادة الهاتف")
-        ids = store.add([{"video_id": str(i), "position": i + 1, "title": title} for i, title in enumerate([
-            "درس مكتمل", "درس ينتظر المعالجة", '<img src=x onerror="window.__waraq_xss=1">'
-        ])], config.snapshot())
-        for stage in STAGES:
-            store.set_stage(ids[0], stage, "completed")
-        store.set_stage(ids[2], "download", "failed", error="خطأ تجريبي للشبكة")
-        folder = Path(store.get(ids[0])["folder"])
-        folder.mkdir(parents=True)
-        document = folder / "lesson.docx"
-        document.write_bytes(b"synthetic-docx-output")
-        store.db.execute("UPDATE jobs SET document=? WHERE id=?", (str(document), ids[0]))
-        scheduler.youtube.discover = lambda *args: {"title": "قائمة الهاتف", "items": [
-            {"video_id": str(i), "title": f"درس جديد {i}", "position": i,
-             "url": f"https://www.youtube.com/watch?v={i}", "available": True, "selected": True} for i in (1, 2)]}
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        bridge.remote.start(port)
-        assert bridge.remoteAccess["enabled"]
-        urls = bridge.remoteAccess["urls"]
-        base = urls[0] if urls else f"http://127.0.0.1:{port}"
-        failures = []
-        def run_browser():
-            try:
-                browser_checks(base, bridge.remoteAccess["code"], output)
-            except BaseException:
-                failures.append(traceback.format_exc())
-        thread = threading.Thread(target=run_browser, daemon=True)
-        thread.start()
-        deadline = time.monotonic() + 180
-        while thread.is_alive() and time.monotonic() < deadline:
-            app.processEvents()
-            time.sleep(0.003)
-        bridge.remote.stop()
-        bridge.closeAccounts()
-        thread.join(3)
-        assert not thread.is_alive(), "Browser acceptance timed out"
-        if failures:
-            raise AssertionError("\n".join(failures))
-        jobs = store.jobs()
-        assert len(jobs) == 5
-        uploaded = next(j for j in jobs if j["title"] == "درس مرفوع")
-        assert Path(uploaded["transcript"]).read_bytes().startswith(b"\xef\xbb\xbf")
-        assert store.folder_name(uploaded["folder_id"]) == "مادة الهاتف"
-        scheduler.shutdown()
-        store.db.close()
+        thread = None
+        try:
+            store.create_folder("مادة الهاتف")
+            ids = store.add([{"video_id": str(i), "position": i + 1, "title": title} for i, title in enumerate([
+                "درس مكتمل", "درس ينتظر المعالجة", '<img src=x onerror="window.__waraq_xss=1">'
+            ])], config.snapshot())
+            for stage in STAGES:
+                store.set_stage(ids[0], stage, "completed")
+            store.set_stage(ids[2], "download", "failed", error="خطأ تجريبي للشبكة")
+            folder = Path(store.get(ids[0])["folder"])
+            folder.mkdir(parents=True)
+            document = folder / "lesson.docx"
+            document.write_bytes(b"synthetic-docx-output")
+            store.db.execute("UPDATE jobs SET document=? WHERE id=?", (str(document), ids[0]))
+            scheduler.youtube.discover = lambda *args: {"title": "قائمة الهاتف", "items": [
+                {"video_id": str(i), "title": f"درس جديد {i}", "position": i,
+                 "url": f"https://www.youtube.com/watch?v={i}", "available": True, "selected": True} for i in (1, 2)]}
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            bridge.remote.start(port)
+            assert bridge.remoteAccess["enabled"]
+            urls = bridge.remoteAccess["urls"]
+            base = urls[0] if urls else f"http://127.0.0.1:{port}"
+            failures = []
+            def run_browser():
+                try:
+                    browser_checks(base, bridge.remoteAccess["code"], output)
+                except BaseException:
+                    failures.append(traceback.format_exc())
+            thread = threading.Thread(target=run_browser, daemon=True)
+            thread.start()
+            deadline = time.monotonic() + 180
+            while thread.is_alive() and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.003)
+            bridge.remote.stop()
+            bridge.closeAccounts()
+            thread.join(3)
+            assert not thread.is_alive(), "Browser acceptance timed out"
+            if failures:
+                raise AssertionError("\n".join(failures))
+            jobs = store.jobs()
+            assert len(jobs) == 5
+            uploaded = next(j for j in jobs if j["title"] == "درس مرفوع")
+            assert Path(uploaded["transcript"]).read_bytes().startswith(b"\xef\xbb\xbf")
+            assert store.folder_name(uploaded["folder_id"]) == "مادة الهاتف"
+        finally:
+            bridge.timer.stop()
+            bridge.closeAccounts()
+            bridge.remote.stop()
+            bridge.stopInternet()
+            if thread is not None:
+                thread.join(5)
+                assert not thread.is_alive(), "Browser remained live during cleanup"
+            bridge.closeRemoteLibrary()
+            deadline = time.monotonic() + 10
+            while bridge._remote_library.busy and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.01)
+            assert not bridge._remote_library.busy, "Library work remained live during cleanup"
+            bridge._remote_library._pool.shutdown(wait=True)
+            scheduler.shutdown()
+            store.db.close()
     print("Mobile browser passed: pairing, queue start/pause, retry, YouTube selection/enqueue, UTF-8 upload, "
           "service pause/resume, Word/TXT download, XSS text safety, reload/logout, offline/reconnect, "
           "6 viewport sizes including320px in both themes, 200% text, no horizontal overflow or JavaScript errors.")
