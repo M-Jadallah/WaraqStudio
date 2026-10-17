@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QObject, QPoint, QPointF, QUrl, Qt, qInstallMessageHandler
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from scheduler_test_support import SchedulerHarness
@@ -91,11 +91,32 @@ def main():
 
         def choose_method(label):
             settle(lambda: not bridge.accountLoginChoice.get("loading"))
-            buttons = find_all(root.contentItem(), "accountLoginMethodButton")
+            dialog = find("accountLoginMethodDialog")
+            settle(lambda: dialog.property("opened"))
+            # A queued catalog result creates delegates before Qt Quick's next
+            # polish/render pass. Their initial rectangles can overlap, so a
+            # click at the requested label can otherwise hit the last method.
+            # Two presented frames also drain any frame already in flight when
+            # the catalog arrived; wait for lifecycle signals, not a fixed sleep.
+            for _ in range(2):
+                presented = QSignalSpy(root.frameSwapped)
+                root.update()
+                settle(lambda: presented.count() > 0)
+            buttons = find_all(dialog.property("contentItem"), "accountLoginMethodButton")
             method_button = next(button for button in buttons if button.property("text") == label)
             position = method_button.mapToScene(method_button.boundingRect().center())
+            geometry = [{"label": button.property("text"), "center":
+                         (button.mapToScene(button.boundingRect().center()).x(),
+                          button.mapToScene(button.boundingRect().center()).y())}
+                        for button in buttons]
+            assert method_button.isVisible() and method_button.property("enabled"), geometry
+            assert not any(button is not method_button and button.isVisible()
+                           and button.contains(button.mapFromScene(position)) for button in buttons), geometry
+            before = len(runtime.selected_methods)
             QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(position.x()), int(position.y())))
-            QTest.qWait(45)
+            settle(lambda: len(runtime.selected_methods) > before)
+            expected = next(method["id"] for method in runtime.methods if method["label"] == label)
+            assert runtime.selected_methods[before:] == [expected], (label, geometry, runtime.selected_methods)
 
         with patch("waraq.bridge.QDesktopServices.openUrl", lambda url: opened.append(url.toString()) or True):
             assert not runtime.calls and not config.data["chatgpt_accounts_enabled"]
