@@ -49,7 +49,8 @@ class RemoteCommands(QObject):
         fields = ("id", "title", "position", "status", "statusLabel", "current", "stageLabel", "error",
                   "progress", "retryAt", "template", "folder_name", "steps")
         workers = ("id", "name", "stage", "stageLabel", "enabled", "paused", "autoBlocked", "job_id",
-                   "elapsed", "error", "cooldownSeconds", "providerLabel", "modelResolved")
+                   "elapsed", "error", "cooldownSeconds", "providerLabel", "modelResolved",
+                   "accountName", "accountStatus", "accountWaitUntil")
         return {"capabilities": dict(CAPABILITIES), "version": __version__, "running": b.running, "autoStop": b._auto_stop, "stats": b.stats,
                 "jobs": [{**{key: job.get(key, "") for key in fields},
                           "files": [kind for kind in ("document", "transcript") if job.get(kind)]} for job in b.jobs],

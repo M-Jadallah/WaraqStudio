@@ -107,6 +107,7 @@ def main():
         return 2
     root = engine.rootObjects()[0]
     root.setProperty("page", args.page)
+    app.aboutToQuit.connect(bridge.closeAccounts)
     app.aboutToQuit.connect(scheduler.shutdown)
     app.aboutToQuit.connect(bridge.stopRemote)
     app.aboutToQuit.connect(bridge.stopInternet)

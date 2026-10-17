@@ -828,7 +828,10 @@ def test_quota_line_matching():
 
 
 @pytest.mark.parametrize("raises", [True, False])
-@pytest.mark.parametrize("error", [{"data": {"statusCode": 429}}, {"type": "api", "status": 429, "message": "Too many requests"}])
+@pytest.mark.parametrize("error", [
+    {"data": {"statusCode": 429, "message": "The usage limit has been reached"}},
+    {"type": "api", "status": 429, "message": "The usage limit has been reached"},
+])
 def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises, error):
     import waraq.services as services
     store, cfg = env

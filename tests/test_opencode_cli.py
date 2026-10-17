@@ -209,10 +209,12 @@ def test_v2_process_uses_task_directory_and_worker_environment(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("error,limited", [
-    ({"type": "api", "message": "Too many requests", "status": 429}, True),
+    ({"type": "api", "message": "Too many requests", "status": 429}, False),
+    ({"type": "api", "message": "The usage limit has been reached", "status": 429}, True),
     ({"type": "api", "message": "Service unavailable", "status": 503}, False),
     ({"type": "api", "message": "Unauthorized", "status": 401}, False),
-    ({"data": {"statusCode": 429}}, True),
+    ({"data": {"statusCode": 429}}, False),
+    ({"data": {"statusCode": 429, "message": "The usage limit has been reached"}}, True),
 ])
 def test_quota_classification_accepts_both_error_formats(error, limited):
     assert services.limit_reached(json.dumps({"type": "error", "error": error})) is limited

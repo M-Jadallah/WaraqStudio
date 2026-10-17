@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform
 import queue
@@ -9,9 +10,11 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import zipfile
+import uuid
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -22,10 +25,15 @@ from .store import fingerprint
 
 
 class ServiceError(Exception):
-    def __init__(self, message, kind="failed", retry_after=0):
+    def __init__(self, message, kind="failed", retry_after=0, *, account_id="", reset_at=0,
+                 scope="unknown", confirmed=False):
         super().__init__(message)
         self.kind = kind
         self.retry_after = retry_after
+        self.account_id = account_id
+        self.reset_at = reset_at
+        self.scope = scope
+        self.confirmed = confirmed
 
 
 class Cancelled(ServiceError):
@@ -55,7 +63,7 @@ def safe_title(text):
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text).strip().rstrip(". ")[:55] or "درس"
 
 
-LIMIT_MESSAGE = "بلغ OpenCode حد استخدام اشتراك ChatGPT (نافذة الخمس ساعات)، ولم يُنتج الملف بعد."
+LIMIT_MESSAGE = "بلغ OpenCode حد استخدام اشتراك ChatGPT، ولم يُنتج الملف بعد."
 
 
 def worker_env(worker, provider, secret, cfg):
@@ -79,22 +87,94 @@ def worker_env(worker, provider, secret, cfg):
 
 
 def limit_reached(line):
-    """Match the subscription quota error on an opencode stdout line, not the exit code."""
-    lowered = line.lower()
-    if "usage limit has been reached" in lowered:
-        return True
-    if '"type":"error"' in line or '"type": "error"' in line:
-        try:
-            event = json.loads(line)
-        except ValueError:
-            return False
-        error = event.get("error") if isinstance(event, dict) else None
-        if not isinstance(error, dict):
-            return False
-        payload = error.get("data")
-        # V2 emits flat structured errors; V1 stores HTTP status in data.
-        return error.get("status") == 429 or (isinstance(payload, dict) and payload.get("statusCode") == 429)
-    return False
+    """429 alone can be transient overload; only explicit quota evidence counts."""
+    try:
+        event = json.loads(line)
+    except (ValueError, TypeError):
+        return _quota_evidence(str(line))
+    if not isinstance(event, dict) or event.get("type") != "error":
+        return False
+    return _quota_evidence(json.dumps(event.get("error", {})))
+
+
+def _quota_evidence(message):
+    lowered = str(message).lower()
+    return any(code in lowered for code in ("subscription_sharing_usage_limit_exceeded",
+        "usage limit has been reached", "usage_limit_reached", "usage_limit_exceeded"))
+
+
+def opencode_error(line, account_id=""):
+    """Classify native errors conservatively, preserving reset/scope when stated."""
+    try:
+        event = json.loads(line)
+    except (ValueError, TypeError):
+        return ServiceError(LIMIT_MESSAGE, "rate_limited", account_id=account_id,
+                            scope="account", confirmed=True) if limit_reached(line) else None
+    if not isinstance(event, dict) or event.get("type") != "error":
+        return None
+    error = event.get("error") or {}
+    low = json.dumps(error, ensure_ascii=False).lower()
+    def fields(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                yield key.lower(), child
+                yield from fields(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from fields(child)
+        elif isinstance(value, str) and value.startswith("{"):
+            try:
+                yield from fields(json.loads(value))
+            except ValueError:
+                pass
+    pairs = list(fields(error))
+    status = next((v for k, v in pairs if k in ("status", "statuscode") and isinstance(v, int)), 0)
+    reset_at = 0
+    for key, value in pairs:
+        if key in ("resets_at", "reset_at", "resetat", "resetsat", "reset_timestamp"):
+            try:
+                number = float(value)
+                if math.isfinite(number) and number > 0:
+                    reset_at = number / 1000 if number > 1e12 else number
+            except (ValueError, TypeError):
+                pass
+        elif key in ("retry-after", "retry_after", "retryafter", "resets_in_seconds", "reset_after") and not reset_at:
+            try:
+                number = float(value)
+                if math.isfinite(number) and number > 0:
+                    reset_at = time.time() + number
+            except (ValueError, TypeError):
+                pass
+    if _quota_evidence(low):
+        scope = "model" if any(k in ("scope", "limit_scope") and v == "model" for k, v in pairs) else "account"
+        return ServiceError(LIMIT_MESSAGE, "rate_limited", max(0, reset_at - time.time()),
+                            account_id=account_id, reset_at=reset_at, scope=scope, confirmed=True)
+    if any(s in low for s in ("subscription_sharing_unsupported_capability", "subscription_sharing_route_not_supported",
+                              "unsupported_country", "region_not_supported", "insufficient_permissions", "permission_denied")):
+        return ServiceError("رفض المزود مسار الطلب أو صلاحياته؛ يلزم مراجعة إعداد الطلب.", "blocked", account_id=account_id)
+    if any(s in low for s in ("model_not_found", "modelnotfound", "unsupported_model", "model is not available")):
+        return ServiceError("النموذج غير متاح لهذا الحساب.", "model_unavailable", account_id=account_id, scope="model")
+    if status == 401 or any(s in low for s in ("invalid_grant", "token_expired", "authentication", "unauthorized",
+                "subscription_sharing_invalid_user", "subscription_sharing_user_not_eligible", "chatpass_v2_scope_not_authorized")):
+        return ServiceError("يحتاج حساب ChatGPT إلى إعادة تسجيل الدخول أو مراجعة صلاحيات الاشتراك.",
+                            "account_auth", account_id=account_id, scope="account")
+    if status == 429 or "too many requests" in low:
+        return ServiceError("قيّد المزود الطلب مؤقتًا دون تأكيد نفاد حصة الاشتراك.", "throttled",
+                            max(0, reset_at - time.time()), account_id=account_id, reset_at=reset_at)
+    return ServiceError("أعاد OpenCode خطأ أثناء المعالجة.", account_id=account_id)
+
+
+def preferred_opencode_error(errors):
+    priority = {"execution_uncertain": 100, "blocked": 90, "account_auth": 80,
+                "rate_limited": 70, "model_unavailable": 60, "throttled": 50, "failed": 10}
+    return max(errors, key=lambda error: priority.get(error.kind, 20))
+
+
+def abort_managed_session(runtime, session_id, work):
+    try:
+        return runtime.abort_and_wait(session_id, work) is True
+    except Exception:
+        return False
 
 
 def validate_docx(path):
@@ -692,6 +772,9 @@ def opencode_run_command(executable, version, worker, model, work, prompt):
 
 
 class OpenCode:
+    def __init__(self, account_runtime=None):
+        self.account_runtime = account_runtime
+
     def prepare_context(self, work, cfg):
         """Copy only skill sources, never credentials, cookies or legacy user inputs."""
         sources = [Path.home() / ".agents" / "skills" / "arabic-lesson-formatter-sequential"]
@@ -708,6 +791,8 @@ class OpenCode:
         return module_paths
 
     def process(self, job, worker, cfg, secret, cancel, log):
+        if cfg.get("_chatgpt_account_id"):
+            return self._process_managed(job, worker, cfg, cancel, log)
         transcript = Path(job["transcript"])
         if not transcript.is_file() or not transcript.read_text(encoding="utf-8-sig").strip():
             raise ServiceError("ملف التفريغ فارغ أو غير موجود.", "blocked")
@@ -782,3 +867,128 @@ class OpenCode:
         report = validate_docx(output)
         atomic_json(verified, {**report, "input_sha256": original_hash, "output": str(output)})
         return output
+
+    def _process_managed(self, job, worker, cfg, cancel, log):
+        """One native account owner, isolated attempts, and one validated commit."""
+        account_id = cfg["_chatgpt_account_id"]
+        if self.account_runtime is None:
+            raise ServiceError("مدير حسابات ChatGPT غير متاح.", "blocked", account_id=account_id)
+        checkpoint(cancel)
+        transcript = Path(job["transcript"])
+        if not transcript.is_file() or not transcript.read_text(encoding="utf-8-sig").strip():
+            raise ServiceError("ملف التفريغ فارغ أو غير موجود.", "blocked", account_id=account_id)
+        original_hash = digest(transcript)
+        version = fingerprint({"input": original_hash, "worker": worker, "prompt": cfg["prompt"],
+                               "revision": cfg.get("revision_opencode", "")})
+        final_work = Path(job["folder"]) / ("word-" + version)
+        final_work.mkdir(parents=True, exist_ok=True)
+        name = f'{job["position"]:03d}-{safe_title(job["title"])}.docx'
+        output, verified = final_work / name, final_work / "validated.json"
+        if output.exists() and verified.exists():
+            try:
+                previous = json.loads(verified.read_text(encoding="utf-8"))
+                if previous.get("input_sha256") == original_hash and previous.get("sha256") == digest(output):
+                    validate_docx(output)
+                    return output
+            except (OSError, ValueError):
+                pass
+        work = final_work / "attempts" / uuid.uuid4().hex
+        work.mkdir(parents=True)
+        local_transcript = work / transcript.name
+        shutil.copyfile(transcript, local_transcript)
+        candidate = work / name
+        module_paths = self.prepare_context(work, cfg)
+        prompt = cfg["prompt"]
+        for key, value in {"transcript_path": str(local_transcript.resolve()), "output_path": str(candidate.resolve()),
+                           "title": job["title"], "position": str(job["position"])}.items():
+            prompt = prompt.replace("{" + key + "}", value)
+        prompt += f'\nالمخرج المطلوب مستند Word واحد بالمسار: "{candidate.resolve()}". لا تعدّل ملف التفريغ.'
+        # A managed account never accepts a worker API key, custom provider, or
+        # paid fallback model even when old worker settings survive migration.
+        model = str(worker["model"])
+        if not model.startswith("openai/"):
+            raise ServiceError("حساب ChatGPT يتطلب نموذج openai من الاشتراك.", "model_unavailable",
+                               account_id=account_id, scope="model")
+        runtime, session_id, attempt_session_id = None, None, None
+        errors = []
+        try:
+            runtime = self.account_runtime.ensure(account_id, cfg)
+            self.account_runtime.require_subscription(account_id)
+            environment = {"PWD": str(work.resolve())}
+            if module_paths:
+                environment["NODE_PATH"] = os.pathsep.join(module_paths)
+            session_id = runtime.create_session(work, environment)
+            attempt_session_id = session_id
+            callback = cfg.get("_chatgpt_session_started")
+            if callback:
+                callback(session_id, runtime.instance_id, str(work.resolve()))
+            checkpoint(cancel)
+            env = dict(runtime.env, **environment, OPENCODE_PASSWORD=runtime.password)
+            variant = str(worker.get("variant", "")).strip()
+            if variant:
+                model = model.split("#", 1)[0] + "#" + variant
+            command = [str(runtime.executable), "run", "--server", runtime.url, "--session", session_id,
+                       "--auto", "--model", model, "--agent", worker["agent"], "--format", "json", "--", prompt]
+            def track(line):
+                error = opencode_error(line, account_id)
+                if error:
+                    errors.append(error)
+                # Native errors can include HTTP request headers. Keep only the
+                # safe diagnosis for structured errors, never token-bearing JSON.
+                if error:
+                    log(str(error))
+                else:
+                    safe = line.replace(runtime.password, "[redacted]")
+                    safe = re.sub(r"(?i)(bearer\s+|basic\s+|sk-)[A-Za-z0-9+/=._-]+", r"\1[redacted]", safe)
+                    safe = re.sub(r'(?i)(["\x27]?(?:authorization|access_token|refresh_token|password)["\x27]?\s*[:=]\s*)["\x27]?[^,"\x27\s}]+', r'\1[redacted]', safe)
+                    log(safe)
+            try:
+                run_process(command, work, cancel, cfg["opencode_timeout"], track, env)
+            except (Cancelled, ServiceError):
+                if not abort_managed_session(runtime, session_id, work):
+                    raise ServiceError("تعذر إثبات توقف جلسة OpenCode؛ أوقفت إعادة التنفيذ لحماية النتيجة.",
+                                       "execution_uncertain", account_id=account_id) from None
+                session_id = None
+                if cancel.is_set():
+                    raise Cancelled()
+                if errors:
+                    raise preferred_opencode_error(errors) from None
+                raise
+            # CLI success does not establish server inactivity or model success.
+            if not runtime.inactive(session_id) and not abort_managed_session(runtime, session_id, work):
+                raise ServiceError("لم يتأكد توقف جلسة OpenCode.", "execution_uncertain", account_id=account_id)
+            runtime.release_session(session_id)
+            session_id = None
+            checkpoint(cancel)
+            if errors:
+                raise preferred_opencode_error(errors)
+            if digest(transcript) != original_hash or digest(local_transcript) != original_hash:
+                raise ServiceError("تغيّر TXT أثناء OpenCode؛ أوقفت اعتماد الناتج للمراجعة.", "blocked", account_id=account_id)
+            report = validate_docx(candidate)
+            checkpoint(cancel)
+            # Candidate is immutable after confirmed inactivity. os.replace is
+            # the sole adoption point; a failed attempt can never supply output.
+            temporary = final_work / (".commit-" + uuid.uuid4().hex + ".docx")
+            shutil.copyfile(candidate, temporary)
+            os.replace(temporary, output)
+            atomic_json(verified, {**report, "input_sha256": original_hash, "output": str(output),
+                                   "attempt": work.name, "session_id": attempt_session_id,
+                                   "instance_id": runtime.instance_id})
+            return output
+        except (ServiceError, Cancelled) as exc:
+            if runtime and session_id and exc.kind != "execution_uncertain":
+                if not abort_managed_session(runtime, session_id, work):
+                    raise ServiceError("تعذر إثبات توقف جلسة OpenCode؛ أوقفت إعادة التنفيذ لحماية النتيجة.",
+                                       "execution_uncertain", account_id=account_id) from None
+            raise
+        except Exception as exc:
+            if runtime and session_id and not abort_managed_session(runtime, session_id, work):
+                raise ServiceError("تعذر التحقق من توقف جلسة OpenCode؛ يلزم فحصها قبل إعادة التنفيذ.",
+                                   "execution_uncertain", account_id=account_id) from None
+            raise ServiceError("تعذر الاتصال بعملية حساب OpenCode المعزولة.", getattr(exc, "kind", "failed"),
+                               account_id=account_id) from None
+        finally:
+            active_error = sys.exc_info()[1]
+            if (getattr(active_error, "kind", "") != "execution_uncertain" and
+                    (not transcript.exists() or digest(transcript) != original_hash)):
+                raise ServiceError("تغيّر TXT الأصلي أثناء OpenCode؛ أوقفت اعتماد الناتج للمراجعة.", "blocked", account_id=account_id)

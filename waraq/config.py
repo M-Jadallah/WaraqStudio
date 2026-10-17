@@ -119,6 +119,7 @@ def defaults(home: Path):
         "auto_retry_attempts": 3, "opencode_limit_retries": 5,
         "opencode_data_root": str(home / "opencode-workers"),
         "opencode_providers": [],
+        "chatgpt_accounts_enabled": False, "chatgpt_account_concurrency": 5,
         "library_root": str(home / "library"),
         "library_auto": True, "library_copy_audio": False,
         "theme": "dark", "ui_scale": 1.0, "ui_rail_collapsed": False, "ui_compact": True,
@@ -267,7 +268,7 @@ class Config:
         for key, label in (("opencode_data_root", "بيانات عمال OpenCode"), ("library_root", "مكتبة الملفات")):
             if not Path(d[key]).is_absolute():
                 raise ValueError(f"اختر مسار {label} مسارًا مطلقًا.")
-        for k in ("library_auto", "library_copy_audio", "ui_rail_collapsed", "ui_compact"):
+        for k in ("library_auto", "library_copy_audio", "ui_rail_collapsed", "ui_compact", "chatgpt_accounts_enabled"):
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
         for k, low, high in [
@@ -279,6 +280,7 @@ class Config:
             ("max_retries", 1, 6), ("opencode_timeout", 60, 43200),
             ("youtube_cooldown", 60, 86400), ("youtube_retry_attempts", 0, 6),
             ("ui_scale", 0.8, 1.4),
+            ("chatgpt_account_concurrency", 1, 16),
             ("auto_retry_attempts", 0, 6), ("opencode_limit_retries", 0, 12),
         ]:
             if not isinstance(d[k], (int, float)) or isinstance(d[k], bool):
@@ -289,7 +291,7 @@ class Config:
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
         for k in ("project_concurrency", "max_pending_audio", "chunk_seconds", "audio_bitrate", "audio_rate", "audio_channels", "max_retries",
-                  "youtube_retry_attempts", "auto_retry_attempts", "opencode_limit_retries"):
+                  "youtube_retry_attempts", "auto_retry_attempts", "opencode_limit_retries", "chatgpt_account_concurrency"):
             if not isinstance(d[k], int) or isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون عددًا صحيحًا.")
         if int(d["youtube_sleep_max"]) < int(d["youtube_sleep_min"]):

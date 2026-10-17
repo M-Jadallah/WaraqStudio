@@ -39,6 +39,7 @@ ApplicationWindow {
     property string fileKind: "all"
     property var pendingFile: ({})
     property var pendingProvider: ({})
+    property var pendingAccount: ({})
     property var lastForce: ({provider: "", model: "", variant: ""})
     property bool skipForceQuestion: false
     property var pageNames: ["مركز العمليات", "إضافة مصدر", "العمال والخدمات", "مكتبة النتائج", "الملفات", "الإعدادات"]
@@ -143,6 +144,8 @@ ApplicationWindow {
         if (w.stage === "deepgram") return (w.role === "backup" ? "احتياطي · " : "أساسي · ") +
             (w.hasKey ? "المفتاح محفوظ في مخزن الاعتماد" : "لا مفتاح محفوظ لهذا العامل")
         var parts = [w.providerLabel, w.modelResolved]
+        if (w.accountName) parts.push("الحساب: " + w.accountName)
+        if (w.accountStatus) parts.push(({running: "قيد التنفيذ", waiting: "بانتظار حساب متاح", cooldown: "بانتظار تجدد الحد"})[w.accountStatus] || w.accountStatus)
         if ((w.variant || "").length > 0) parts.push("تفكير " + w.variant)
         parts.push(!w.keyEnv ? "تسجيل دخول OpenCode" : (w.hasKey ? "المفتاح محفوظ" : "لا مفتاح محفوظ"))
         return parts.join("  ·  ")
@@ -709,9 +712,109 @@ ApplicationWindow {
                 }
 
                 // Workers
-                ColumnLayout {
+                ScrollView {
+                    id: workersPageScroll
+                    objectName: "workersPageScroll"
+                    clip: true
+                    contentWidth: availableWidth
+                    ColumnLayout {
+                    width: workersPageScroll.availableWidth
                     spacing: 12
                     SubText { text: "كل عامل يعمل على مهمة واحدة. إيقاف الاستقبال يسمح للمهمة الحالية بالاكتمال."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                    Box {
+                        objectName: "chatgptAccountsPanel"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: accountPanelContent.implicitHeight + 2 * win.rs(12)
+                        ColumnLayout {
+                            id: accountPanelContent
+                            anchors.fill: parent; anchors.margins: win.rs(12); spacing: win.rs(7)
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: win.rs(8)
+                                CheckBox {
+                                    objectName: "managedAccountsEnabled"; text: "استخدام حسابات ChatGPT المُدارة"
+                                    checked: settings.chatgpt_accounts_enabled === true; palette.windowText: win.ink
+                                    onClicked: { settings.chatgpt_accounts_enabled = checked; win.save() }
+                                    Accessible.name: text
+                                }
+                                Item { Layout.fillWidth: true }
+                                LabelText { text: "التزامن لكل حساب" }
+                                SpinBox {
+                                    objectName: "accountConcurrency"; from: 1; to: 16; value: settings.chatgpt_account_concurrency || 5
+                                    onValueModified: { settings.chatgpt_account_concurrency = value; win.save() }
+                                    Accessible.name: "عدد المهام المتزامنة لكل حساب ChatGPT"
+                                }
+                            }
+                            SubText {
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                                text: "تُوزَّع مهام مزود تسجيل الدخول على الحسابات بحسب التفضيل والترتيب. الموافقة تتم في المتصفح؛ كل حساب معزول. تغييرات الحسابات تسري على المهام المنتظرة."
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: win.rs(8)
+                                LabelText { text: "اسم الحساب" }
+                                AppField {
+                                    id: accountAlias; objectName: "accountAliasField"; Layout.fillWidth: true; maximumLength: 80
+                                    placeholderText: "مثل: الحساب الأول"; Accessible.name: "اسم حساب ChatGPT الجديد"
+                                    onAccepted: { if (text.trim()) { backend.addAccount(text); clear() } }
+                                }
+                                AppButton {
+                                    objectName: "addAccountButton"; text: "إضافة حساب"; enabled: accountAlias.text.trim().length > 0
+                                    onClicked: { backend.addAccount(accountAlias.text); accountAlias.clear() }
+                                }
+                            }
+                            PinList {
+                                id: accountList; objectName: "accountList"
+                                Layout.fillWidth: true; Layout.preferredHeight: count ? Math.min(win.rh(210), contentHeight) : win.rh(28)
+                                spacing: win.rs(5); clip: true; model: backend.accountsModel
+                                ScrollBar.vertical: ScrollBar {}
+                                delegate: Box {
+                                    property var accountData: (typeof row !== "undefined" && row) ? row : ({id: "", alias: "", error: "", statusText: "", quotaText: ""})
+                                    objectName: "accountCard"; width: accountList.width
+                                    height: accountContent.implicitHeight + 2 * win.rs(9)
+                                    ColumnLayout {
+                                        id: accountContent; objectName: "accountContent"
+                                        anchors.fill: parent; anchors.margins: win.rs(9); spacing: win.rs(4)
+                                        RowLayout {
+                                            Layout.fillWidth: true; spacing: win.rs(8)
+                                            CheckBox {
+                                                text: "يستقبل مهامًا"; checked: accountData.enabled; enabled: !accountData.busy
+                                                palette.windowText: win.muted
+                                                onClicked: backend.setAccountEnabled(accountData.id, checked)
+                                                Accessible.name: "تفعيل الحساب " + accountData.alias
+                                            }
+                                            LabelText { objectName: "accountAliasLabel"; text: (accountData.preferred ? "المفضّل · " : "") + accountData.alias; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                            SubText { text: "#" + (index + 1) }
+                                        }
+                                        SubText {
+                                            objectName: "accountStatus"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                                            text: accountData.statusText + " · " + accountData.quotaText + (accountData.inFlight ? " · يعالج " + accountData.inFlight + " مهمة" : "")
+                                                  + (accountData.subscription ? " · " + accountData.subscription : "") + (accountData.email ? " · " + accountData.email : "")
+                                            Accessible.name: text
+                                        }
+                                        SubText { objectName: "accountError"; text: accountData.error; visible: !!accountData.error; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; color: win.dark ? "#f4b880" : "#9a4409" }
+                                        Flow {
+                                            Layout.fillWidth: true; spacing: win.rs(6)
+                                            AppButton { objectName: "accountLoginButton"; text: "تسجيل / إعادة الدخول"; enabled: !accountData.busy && !accountData.inFlight && !backend.accountBusy; onClicked: backend.loginAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { objectName: "accountCancelLoginButton"; text: "إلغاء الدخول"; visible: accountData.loggingIn; onClicked: backend.cancelAccountLogin(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { objectName: "accountRefreshButton"; text: "فحص الحساب"; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.refreshAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { text: "فحص الجلسة السابقة"; visible: accountData.uncertain; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.recheckAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { objectName: "accountPreferButton"; text: "تفضيل"; enabled: !accountData.preferred && !accountData.busy; onClicked: backend.preferAccount(accountData.id); Accessible.name: "تفضيل " + accountData.alias }
+                                            AppButton { objectName: "accountUpButton"; text: "للأعلى"; enabled: index > 0 && !accountData.busy; onClicked: backend.moveAccount(accountData.id, -1); Accessible.name: "رفع أولوية " + accountData.alias }
+                                            AppButton { objectName: "accountDownButton"; text: "للأسفل"; enabled: index < accountList.count - 1 && !accountData.busy; onClicked: backend.moveAccount(accountData.id, 1); Accessible.name: "خفض أولوية " + accountData.alias }
+                                            AppButton { objectName: "accountRenameButton"; text: "تسمية"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { win.pendingAccount = accountData; accountRename.text = accountData.alias; renameAccountDialog.open() } Accessible.name: "تغيير اسم " + accountData.alias }
+                                            AppButton { objectName: "accountRemoveButton"; text: "حذف"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { win.pendingAccount = accountData; removeAccountDialog.open() } Accessible.name: "حذف " + accountData.alias }
+                                        }
+                                        RowLayout {
+                                            visible: accountData.needsCode; Layout.fillWidth: true
+                                            LabelText { text: "رمز إكمال الدخول" }
+                                            AppField { id: accountCode; Layout.fillWidth: true; echoMode: TextInput.Password; Accessible.name: "رمز إكمال دخول " + accountData.alias; onAccepted: { backend.finishAccountLogin(accountData.id, text); clear() } }
+                                            AppButton { text: "إكمال الدخول"; enabled: accountCode.text.trim().length > 0; onClicked: { backend.finishAccountLogin(accountData.id, accountCode.text); accountCode.clear() } }
+                                        }
+                                    }
+                                }
+                                SubText { anchors.centerIn: parent; visible: accountList.count === 0; text: "أضف حسابًا ثم سجّل دخوله في المتصفح." }
+                            }
+                        }
+                    }
                     RowLayout {
                         Layout.fillWidth: true
                         AppButton { text: "إضافة عامل OpenCode"; onClicked: { var w = JSON.parse(JSON.stringify(settings.opencode_workers[0])); w.id = "oc" + Date.now(); w.name = "OpenCode " + (settings.opencode_workers.length + 1); w.provider = w.provider || "login"; settings.opencode_workers.push(w); save() } }
@@ -722,7 +825,8 @@ ApplicationWindow {
                     }
                     PinList {
                         id: workerList
-                        Layout.fillWidth: true; Layout.fillHeight: true; spacing: win.rs(8); clip: true
+                        objectName: "workerList"
+                        Layout.fillWidth: true; Layout.preferredHeight: win.rh(280); spacing: win.rs(8); clip: true
                         model: backend.workersModel
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Box {
@@ -769,6 +873,7 @@ ApplicationWindow {
                         Layout.fillWidth: true; Layout.preferredHeight: Math.round(78 * win.uiScale)
                         SubText { anchors.fill: parent; anchors.margins: 12; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; text: "مفاتيح Deepgram و OpenRouter محفوظة في Windows Credential Manager، مفتاح مستقل لكل عامل. عمال Deepgram ذوو معرّف المشروع نفسه يتقاسمون حد التزامن؛ اجعل المعرّف مطابقًا لمشروع المفتاح. عامل OpenCode بمزود غير «تسجيل الدخول» يعمل في مجلد بيانات مستقل فلا تتعارض العمليات المتوازية." }
                     }
+                }
                 }
 
                 // Library
@@ -1326,7 +1431,9 @@ ApplicationWindow {
     Dialog {
         id: retryWarning; anchors.centerIn: parent; width: 500; modal: true; title: "إعادة المحاولة"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "إعادة المحاولة"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        Label { width: parent.width; wrapMode: Text.WordWrap; text: selectedJob.status === "uncertain" ? "الطلب السابق لدى Deepgram قد يكون اكتمل. إعادة الإرسال قد تسبب تكلفة إضافية. هل تريد المحاولة؟"
+        Label { width: parent.width; wrapMode: Text.WordWrap; text: selectedJob.status === "uncertain" && selectedJob.current === "opencode"
+                ? "جلسة ChatGPT السابقة لم يُتحقق من توقفها. افتح صفحة العمال واضغط «فحص الجلسة السابقة» للحساب؛ بعد تأكيد توقفها يمكنك إعادة المحاولة."
+                : selectedJob.status === "uncertain" ? "الطلب السابق لدى Deepgram قد يكون اكتمل. إعادة الإرسال قد تسبب تكلفة إضافية. هل تريد المحاولة؟"
                 : (selectedJob.current === "download" && selectedJob.status === "blocked") ? "توقف التنزيل لأن YouTube رفض الوصول أو لنقص المساحة. أصلح السبب أولًا (الكوكيز أو المساحة) ثم أعد المحاولة؛ سيُرفع التوقف الآلي عن خدمة التنزيل ويُعاد العمل دون المساس بالإيقاف اليدوي."
                 : (selectedJob.status === "pending" && selectedJob.retryAt) ? "المهمة مجدولة تلقائيًا حتى المحاولة القادمة. الإعادة اليدوية تعيدها إلى الطابور لكنها لا تتجاوز تهدئة تقييد YouTube."
                 : "ستُستأنف المرحلة باستخدام الملفات المكتملة المحفوظة." }
@@ -1336,7 +1443,9 @@ ApplicationWindow {
         id: bulkRetry; anchors.centerIn: parent; width: 530; modal: true; title: "إعادة محاولة جماعية"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "إعادة " + (bulkGroup.ids || []).length + " مهمة"; standardButton(Dialog.Cancel).text = "إلغاء" }
         Label { width: parent.width; wrapMode: Text.WordWrap
-            text: bulkGroup.status === "uncertain"
+            text: bulkGroup.status === "uncertain" && bulkGroup.stage === "opencode"
+                ? "تحتاج جلسات ChatGPT غير المؤكدة إلى إثبات توقفها أولًا من «فحص الجلسة السابقة» في صفحة العمال. ستُعاد فقط المهام التي تأكد توقف جلساتها."
+                : bulkGroup.status === "uncertain"
                 ? "نتائج " + (bulkGroup.ids || []).length + " طلب تفريغ غير مؤكدة. قد تكون اكتملت لدى Deepgram، وإعادة إرسالها قد تسبب تكلفة إضافية لكل مهمة. هل تريد إعادة المحاولة للجميع؟"
                 : "ستُعاد " + (bulkGroup.ids || []).length + " مهمة من مجموعة «" + (bulkGroup.label || "") + "» إلى الطابور باستخدام الملفات المكتملة المحفوظة."
         }
@@ -1347,6 +1456,25 @@ ApplicationWindow {
         onOpened: { standardButton(Dialog.Ok).text = "تفريغ جديد"; standardButton(Dialog.Cancel).text = "إلغاء" }
         Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُرسل الصوت مجددًا إلى Deepgram وقد تنتج تكلفة جديدة. ستبقى النسخة السابقة محفوظة." }
         onAccepted: { backend.retry(selectedJob.id, "deepgram", true); jobDialog.close() }
+    }
+    Dialog {
+        id: renameAccountDialog; objectName: "renameAccountDialog"; anchors.centerIn: parent; width: 450 * win.uiScale; modal: true
+        title: "تغيير اسم الحساب"; standardButtons: Dialog.Save | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Save).objectName = "accountRenameSaveButton"; standardButton(Dialog.Cancel).text = "إلغاء"; accountRename.forceActiveFocus() }
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: ColumnLayout {
+            LabelText { text: "اسم الحساب"; Layout.alignment: Qt.AlignRight }
+            AppField { id: accountRename; objectName: "accountRenameField"; Layout.fillWidth: true; maximumLength: 80; Accessible.name: "اسم الحساب الجديد" }
+        }
+        onAccepted: backend.renameAccount(win.pendingAccount.id, accountRename.text)
+    }
+    Dialog {
+        id: removeAccountDialog; objectName: "removeAccountDialog"; anchors.centerIn: parent; width: 480 * win.uiScale; implicitHeight: 230 * win.uiScale; modal: true
+        title: "حذف حساب ChatGPT"; standardButtons: Dialog.Ok | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Ok).text = "حذف الحساب"; standardButton(Dialog.Ok).objectName = "accountRemoveConfirmButton"; standardButton(Dialog.Cancel).text = "إلغاء"; standardButton(Dialog.Cancel).objectName = "accountRemoveCancelButton" }
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: Label { wrapMode: Text.WordWrap; text: "سيُحذف تسجيل دخول «" + (win.pendingAccount.alias || "") + "» من ورق. يمكنك إضافته وتسجيل دخوله لاحقًا. هل تريد حذفه؟" }
+        onAccepted: backend.removeAccount(win.pendingAccount.id)
     }
     Dialog {
         id: workerDialog; objectName: "workerDialog"; anchors.centerIn: parent; width: 620; height: workerKind === "deepgram" ? 650 : 610; modal: true

@@ -524,11 +524,15 @@ function renderWorkers() {
         el(
           "p",
           "meta",
-          [worker.stageLabel, worker.providerLabel, worker.modelResolved]
+          [worker.stageLabel, worker.providerLabel, worker.modelResolved,
+            worker.accountName ? "الحساب: " + worker.accountName : ""]
             .filter(Boolean)
             .join(" · "),
         ),
       );
+      if (worker.accountWaitUntil > Date.now() / 1000)
+        content.append(el("p", "meta", "فحص توفر الحساب بعد: " +
+          new Date(worker.accountWaitUntil * 1000).toLocaleString("ar")));
       if (worker.cooldownSeconds > 0)
         content.append(
           el(

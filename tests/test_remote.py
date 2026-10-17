@@ -245,6 +245,30 @@ def test_cancel_and_uncertain_retry_require_explicit_confirmation(remote_env):
     assert request("/api/action/cancel", {"id": "missing"}).status_code == 404
 
 
+def test_phone_account_summary_excludes_identity_and_credentials(remote_env, monkeypatch):
+    bridge, _, _, _, _, request, pair, _, _ = remote_env
+    original_workers = bridge.scheduler.workers
+
+    def workers():
+        return [{**worker, "accountName": "حساب الدروس", "accountStatus": "cooldown",
+                 "accountWaitUntil": 2000000000, "account_id": "private-account-id",
+                 "password": "private-runtime-password", "refresh_token": "private-refresh-token",
+                 "profile": "C:/private-account-profile"} for worker in original_workers()]
+
+    monkeypatch.setattr(bridge.scheduler, "workers", workers)
+    pair()
+    response = request("/api/state")
+    assert response.status_code == 200
+    worker = response.json["workers"][0]
+    assert worker["accountName"] == "حساب الدروس"
+    assert worker["accountStatus"] == "cooldown"
+    assert worker["accountWaitUntil"] == 2000000000
+    payload = json.dumps(response.json)
+    for private in ("private-account-id", "private-runtime-password", "private-refresh-token",
+                    "private-account-profile", "refresh_token", "account_id"):
+        assert private not in payload
+
+
 def test_discovery_enqueue_and_template_snapshot(remote_env, monkeypatch):
     bridge, remote, store, config, _, request, pair, _, app = remote_env
     item = {"video_id": "one", "title": "درس من الهاتف", "position": 7,

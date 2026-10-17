@@ -45,6 +45,13 @@ class Store:
             CREATE TABLE IF NOT EXISTS runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
               created REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS chatgpt_accounts (
+              id TEXT PRIMARY KEY, metadata TEXT NOT NULL, updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS chatgpt_attempts (
+              id TEXT PRIMARY KEY, account_id TEXT NOT NULL, job_id TEXT NOT NULL,
+              worker_id TEXT NOT NULL, model TEXT NOT NULL, session_id TEXT DEFAULT '',
+              generation INTEGER NOT NULL, started REAL NOT NULL, finished REAL DEFAULT 0,
+              outcome TEXT DEFAULT 'running');
         ''')
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}
         if "queue_order" not in columns:
@@ -59,6 +66,10 @@ class Store:
         stage_columns = {r[1] for r in self.db.execute("PRAGMA table_info(stages)")}
         if "retries" not in stage_columns:
             self.db.execute("ALTER TABLE stages ADD COLUMN retries INTEGER DEFAULT 0")
+        attempt_columns = {r[1] for r in self.db.execute("PRAGMA table_info(chatgpt_attempts)")}
+        for name in ("instance_id", "workpath"):
+            if name not in attempt_columns:
+                self.db.execute(f"ALTER TABLE chatgpt_attempts ADD COLUMN {name} TEXT DEFAULT ''")
 
     def event(self, job_id, message, level="info"):
         with self.lock:
@@ -67,6 +78,22 @@ class Store:
 
     def recover(self):
         with self.lock:
+            # Native account sessions may outlive Waraq. Preserve a replay hold
+            # before changing their interrupted attempts or stage statuses.
+            holds = self.state_get("chatgpt_session_holds", {})
+            for attempt in self.db.execute("SELECT * FROM chatgpt_attempts WHERE outcome='running'").fetchall():
+                holds[attempt["job_id"]] = {key: attempt[key] for key in
+                                            ("account_id", "session_id", "instance_id", "workpath")}
+                account = self.db.execute("SELECT metadata FROM chatgpt_accounts WHERE id=?", (attempt["account_id"],)).fetchone()
+                if account:
+                    metadata = json.loads(account[0])
+                    metadata.update(health="execution_uncertain", error="توقف التشغيل السابق؛ يلزم التحقق من توقف الجلسة.",
+                                    generation=metadata.get("generation", 0) + 1)
+                    self.db.execute("UPDATE chatgpt_accounts SET metadata=?,updated=? WHERE id=?",
+                                    (json.dumps(metadata, ensure_ascii=False), time.time(), attempt["account_id"]))
+            if holds:
+                self.state_put("chatgpt_session_holds", holds)
+            self.db.execute("UPDATE chatgpt_attempts SET outcome='interrupted',finished=? WHERE outcome='running'", (time.time(),))
             # An interrupted paid request is not automatically submitted again.
             self.db.execute("UPDATE stages SET status=CASE WHEN name='deepgram' THEN 'uncertain' ELSE 'paused' END, "
                             "worker='', error='توقف التشغيل السابق؛ راجع النتيجة قبل الاستئناف' WHERE status='running'")
@@ -78,6 +105,8 @@ class Store:
             self.db.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)",
                             (keep_events,))
             self.db.execute("DELETE FROM cache WHERE created < ?", (time.time() - 86400,))
+            self.db.execute("DELETE FROM chatgpt_attempts WHERE outcome!='running' AND id NOT IN "
+                            "(SELECT id FROM chatgpt_attempts ORDER BY started DESC LIMIT ?)", (keep_events,))
 
     def folders(self):
         with self.lock:
@@ -201,6 +230,10 @@ class Store:
 
     def claim(self, ident, stage, worker):
         with self.lock:
+            if stage == "opencode" and ident in self.state_get("chatgpt_session_holds", {}):
+                # The durable replay guard also applies after changing provider
+                # or disabling managed mode, independently of account routing.
+                return False
             cur = self.db.execute("UPDATE stages SET status='running',worker=?,progress=-1,error='',attempts=attempts+1,updated=? "
                                   "WHERE job_id=? AND name=? AND status='pending' AND next_retry<=?",
                                   (worker, time.time(), ident, stage, time.time()))
@@ -272,6 +305,8 @@ class Store:
 
     def retry(self, ident, stage, rerun=False):
         with self.lock:
+            if (stage == "opencode" or rerun) and ident in self.state_get("chatgpt_session_holds", {}):
+                raise ValueError("تحقق من توقف جلسة ChatGPT السابقة من إدارة الحسابات قبل إعادة التنفيذ.")
             job = self.get(ident)
             if not job or any(s["status"] == "running" for s in job["stages"].values()):
                 raise ValueError("انتظر انتهاء المرحلة النشطة أو ألغِها أولًا.")
