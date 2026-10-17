@@ -11,7 +11,7 @@ import threading
 import time
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from qt_test_support import dispose_bridge
 
 from waraq.bridge import Bridge
 from waraq.config import Config
@@ -22,8 +22,8 @@ from waraq.store import Store
 
 
 @pytest.fixture
-def env(tmp_path):
-    app=QCoreApplication.instance() or QCoreApplication([])
+def env(tmp_path, qt_app):
+    app=qt_app
     config=Config(tmp_path)
     store=Store(tmp_path/'jobs.sqlite3')
     scheduler=Scheduler(store,config,None)
@@ -41,8 +41,7 @@ def env(tmp_path):
     bridge.remote.stop()
     bridge.internet.stop()
     scheduler.shutdown()
-    bridge.deleteLater()
-    app.processEvents()
+    dispose_bridge(bridge)
     store.db.close()
 
 

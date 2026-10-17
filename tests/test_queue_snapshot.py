@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from qt_test_support import dispose_bridge
 
 from waraq.bridge import Bridge
 from waraq.config import Config
@@ -12,8 +12,8 @@ from waraq.store import Store
 
 
 @pytest.fixture
-def snapshot_env(tmp_path, scheduler_harness):
-    app = QCoreApplication.instance() or QCoreApplication([])
+def snapshot_env(tmp_path, scheduler_harness, qt_app):
+    app = qt_app
     config, store = Config(tmp_path), Store(tmp_path / "queue.db")
     scheduler = Scheduler(store, config, None)
     bridge = Bridge(store, config, None, scheduler)
@@ -24,7 +24,9 @@ def snapshot_env(tmp_path, scheduler_harness):
     try:
         yield bridge, store, config, scheduler, jobs_changed, changed
     finally:
+        bridge.closeAccounts()
         scheduler_harness.shutdown_and_join()
+        dispose_bridge(bridge)
         with store.lock:
             store.db.close()
 

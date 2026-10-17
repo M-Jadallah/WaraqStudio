@@ -702,10 +702,9 @@ def test_deepgram_explicit_server_failure_is_backup_eligible(monkeypatch, env, t
     assert error.value.kind == "retryable"
 
 
-def test_bulk_retry_only_matching_attention_group(env):
-    from PySide6.QtCore import QCoreApplication
+def test_bulk_retry_only_matching_attention_group(env, qt_app):
+    from qt_test_support import dispose_bridge
     from waraq.bridge import Bridge
-    app = QCoreApplication.instance() or QCoreApplication([])
     store, cfg = env
     ids = store.add(items(3), cfg.snapshot())
     store.set_stage(ids[0], "download", "failed")
@@ -713,10 +712,12 @@ def test_bulk_retry_only_matching_attention_group(env):
     store.set_stage(ids[2], "download", "blocked")
     scheduler = Scheduler(store, cfg, None)
     bridge = Bridge(store, cfg, None, scheduler)
-    bridge.retryMany(ids + [ids[0], "missing"], "download", "failed")
-    assert [store.get(ident)["stages"]["download"]["status"] for ident in ids] == ["pending", "pending", "blocked"]
-    assert len([event for event in store.events() if event["message"] == "إعادة محاولة جماعية بطلب المستخدم."]) == 2
-    bridge.timer.stop()
+    try:
+        bridge.retryMany(ids + [ids[0], "missing"], "download", "failed")
+        assert [store.get(ident)["stages"]["download"]["status"] for ident in ids] == ["pending", "pending", "blocked"]
+        assert len([event for event in store.events() if event["message"] == "إعادة محاولة جماعية بطلب المستخدم."]) == 2
+    finally:
+        dispose_bridge(bridge)
 
 
 @pytest.mark.parametrize("kind", ["uncertain", "blocked", "cancelled"])

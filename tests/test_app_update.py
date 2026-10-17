@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import requests
-from PySide6.QtCore import QCoreApplication
+from qt_test_support import dispose_bridge
 
 from waraq import app_update
 from waraq.bridge import Bridge
@@ -184,8 +184,8 @@ class Secrets:
 
 
 @pytest.fixture
-def bridge_env(tmp_path, scheduler_harness):
-    app = QCoreApplication.instance() or QCoreApplication([])
+def bridge_env(tmp_path, scheduler_harness, qt_app):
+    app = qt_app
     cfg, store, secrets = Config(tmp_path), Store(tmp_path / "tasks.db"), Secrets()
     scheduler = Scheduler(store, cfg, secrets)
     bridge = Bridge(store, cfg, secrets, scheduler)
@@ -193,7 +193,9 @@ def bridge_env(tmp_path, scheduler_harness):
     try:
         yield app, bridge, store, cfg, scheduler, secrets
     finally:
+        bridge.closeAccounts()
         scheduler_harness.shutdown_and_join()
+        dispose_bridge(bridge)
         with store.lock:
             store.db.close()
 

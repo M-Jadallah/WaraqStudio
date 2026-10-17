@@ -13,7 +13,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QObject, QThread
+from PySide6.QtCore import QObject, QThread
 
 from waraq.config import atomic_json
 from waraq.internet import InternetAccess, gateway_url
@@ -35,8 +35,8 @@ class Vault:
 
 
 @pytest.fixture
-def app():
-    return QCoreApplication.instance() or QCoreApplication([])
+def app(qt_app):
+    return qt_app
 
 
 def wait_for(app, predicate, timeout=5):

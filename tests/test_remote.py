@@ -9,7 +9,8 @@ import threading
 import time
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QThread
+from PySide6.QtCore import QThread
+from qt_test_support import dispose_bridge
 import requests
 
 from waraq.bridge import Bridge
@@ -21,8 +22,8 @@ from waraq.mobile_assets import ASSET_TYPES, PWA_PAGES
 
 
 @pytest.fixture
-def remote_env(tmp_path, scheduler_harness, monkeypatch):
-    app = QCoreApplication.instance() or QCoreApplication([])
+def remote_env(tmp_path, scheduler_harness, monkeypatch, qt_app):
+    app = qt_app
     config, store = Config(tmp_path), Store(tmp_path / "tasks.db")
     scheduler = Scheduler(store, config, None)
     bridge = Bridge(store, config, None, scheduler)
@@ -59,12 +60,12 @@ def remote_env(tmp_path, scheduler_harness, monkeypatch):
     try:
         yield bridge, remote, store, config, client, request, pair, base, app
     finally:
+        bridge.closeAccounts()
         remote.stop()
         bridge.closeRemoteLibrary()
         pool.shutdown(wait=True)
         scheduler_harness.shutdown_and_join()
-        bridge.deleteLater()
-        app.processEvents()
+        dispose_bridge(bridge)
         store.db.close()
 
 

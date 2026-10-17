@@ -7,7 +7,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QUrl
+from PySide6.QtCore import QUrl
+from qt_test_support import dispose_bridge
 
 from waraq.bridge import Bridge
 from waraq.config import Config
@@ -16,8 +17,8 @@ from waraq.store import Store
 
 
 @pytest.fixture
-def imports(tmp_path, scheduler_harness):
-    app = QCoreApplication.instance() or QCoreApplication([])
+def imports(tmp_path, scheduler_harness, qt_app):
+    app = qt_app
     config = Config(tmp_path)
     store = Store(tmp_path / "tasks.db")
     scheduler = Scheduler(store, config, None)
@@ -28,7 +29,9 @@ def imports(tmp_path, scheduler_harness):
         yield bridge, store, config, scheduler, notices
     finally:
         bridge.timer.stop()
+        bridge.closeAccounts()
         scheduler_harness.shutdown_and_join()
+        dispose_bridge(bridge)
         with store.lock:
             store.db.close()
 

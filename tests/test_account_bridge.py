@@ -8,7 +8,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from qt_test_support import dispose_bridge
 
 from waraq.bridge import Bridge
 from waraq.config import Config
@@ -216,8 +216,8 @@ def pump(app, predicate, timeout=3):
 
 
 @pytest.fixture
-def account_ui(tmp_path, monkeypatch):
-    app = QCoreApplication.instance() or QCoreApplication([])
+def account_ui(tmp_path, monkeypatch, qt_app):
+    app = qt_app
     config, store = Config(tmp_path), Store(tmp_path / "test.db")
     accounts, runtime = Accounts(), Runtime()
     scheduler = SimpleNamespace(accounts=accounts, account_runtime=runtime, running=False,
@@ -235,6 +235,7 @@ def account_ui(tmp_path, monkeypatch):
         if runtime.gate:
             runtime.gate.set()
         pump(app, lambda: not bridge._account_pending)
+        dispose_bridge(bridge)
         store.db.close()
 
 
