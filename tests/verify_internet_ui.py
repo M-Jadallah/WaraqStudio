@@ -61,6 +61,7 @@ def main():
         scheduler = Scheduler(store, config, vault)
         bridge = Bridge(store, config, vault, scheduler)
         bridge.timer.stop()
+        bridge._account_usage_timer.stop()
         connector = bridge.internet
         calls = []
         for method in ("register", "start", "createPair", "refreshPhones", "approvePair",

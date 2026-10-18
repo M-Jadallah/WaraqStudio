@@ -355,6 +355,7 @@ def run_acceptance():
                     scheduler.start=lambda scheduler=scheduler:setattr(scheduler,"running",True)
                     bridge=Bridge(store,config,vault,scheduler)
                     bridge.timer.stop()
+                    bridge._account_usage_timer.stop()
                     bridges.append(bridge)
                     bridge.internet.register(base,database.issue_enrollment(),name)
                 until=time.monotonic()+20

@@ -46,7 +46,9 @@ def main():
             "openai/gpt-6-astra", "openai/gpt-6-sol", "opencode/big-pickle"
         ]
         scheduler = Scheduler(store, config, keys)
+        scheduler.accounts.request_refresh = lambda *args, **kwargs: False
         bridge = Bridge(store, config, keys, scheduler)
+        bridge._account_usage_timer.stop()
         engine = QQmlApplicationEngine()
         engine.rootContext().setContextProperty("backend", bridge)
         engine.load(QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1] / "waraq/qml/Main.qml")))

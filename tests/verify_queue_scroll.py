@@ -6,6 +6,7 @@ Run directly; the regular pytest suite never creates GUI applications here.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import subprocess
@@ -19,6 +20,8 @@ sys.path.insert(0, str(ROOT))
 
 
 def probe(count):
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(20, repeat=True)
     from PySide6.QtCore import QPoint, QPointF, QTimer, Qt, QUrl, qInstallMessageHandler
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
@@ -36,7 +39,6 @@ def probe(count):
     messages = []
     qInstallMessageHandler(lambda kind, context, text: messages.append(text))
     bridge_module.deepgram_models = lambda: []
-    bridge_module.opencode_models = lambda *args: []
 
     def find(item, name):
         if item.objectName() == name:
@@ -59,8 +61,12 @@ def probe(count):
         ], config.snapshot())
         keys = type("Keys", (), {"get": lambda self, name: "", "set": lambda *args: None})()
         scheduler = Scheduler(store, config, keys)
+        scheduler.accounts.models = lambda: []
         bridge = Bridge(store, config, keys, scheduler)
         bridge.timer.stop()
+        # This measures rendering only. The separate account acceptance owns
+        # real engine startup; do not start it from a background Qt timer here.
+        bridge._account_usage_timer.stop()
         engine = QQmlApplicationEngine()
         engine.rootContext().setContextProperty("backend", bridge)
         started = time.perf_counter()
@@ -137,6 +143,7 @@ def probe(count):
         app.processEvents()
         with store.lock:
             store.db.close()
+    faulthandler.cancel_dump_traceback_later()
 
 
 def main():
@@ -147,9 +154,13 @@ def main():
         probe(args.case)
         return
     for count in (100, 500, 2000):
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--case", str(count)],
-                                cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
-                                env={**os.environ, "PYTHONIOENCODING": "utf-8"}, timeout=45)
+        try:
+            result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--case", str(count)],
+                                    cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                                    env={**os.environ, "PYTHONIOENCODING": "utf-8"}, timeout=45)
+        except subprocess.TimeoutExpired as error:
+            print("Queue watchdog stdout:", error.stdout, "stderr:", error.stderr, flush=True)
+            raise
         print(result.stdout, end="", flush=True)
         assert result.returncode == 0, result.stderr
     print("Native stopped-queue scrolling stress passed; no services or user data used.")
