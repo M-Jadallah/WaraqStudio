@@ -103,7 +103,9 @@ def main():
                     assert result.returncode==0,result.stdout[-1500:]+result.stderr[-500:]
                     assert runtime.inactive(session)
                     child=runtime.request('POST','/api/session',{'parentID':session})['data']
-                    assert child['location']['directory']==str(work)
+                    # Windows may return the long/canonical spelling of a temp
+                    # path supplied through an 8.3 alias on hosted runners.
+                    assert Path(child['location']['directory']).samefile(work), (child['location'], str(work))
                     child_command=list(command);child_command[child_command.index('--session')+1]=child['id']
                     child_result=subprocess.run(child_command,cwd=work,env=dict(runtime.env,OPENCODE_PASSWORD=runtime.password,PWD=str(work)),stdin=subprocess.DEVNULL,capture_output=True,text=True,encoding='utf-8',timeout=30)
                     assert child_result.returncode==0,child_result.stdout[-1200:]+child_result.stderr[-500:]
