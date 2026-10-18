@@ -6,10 +6,8 @@ import time
 from pathlib import Path
 
 from .config import compose_model, credential_name, key_env_for, provider_info, provider_of
-from .account_usage import AccountUsageMonitor
+from .embedded_accounts import EmbeddedAccountService
 from .library import Library
-from .opencode_accounts import OpenCodeAccounts, _finite_number
-from .opencode_runtime import AccountRuntimeManager
 from .services import Cancelled, Deepgram, OpenCode, ServiceError, Youtube
 from .store import STAGES
 
@@ -17,13 +15,12 @@ from .store import STAGES
 class Scheduler:
     def __init__(self, store, config, secrets, youtube=None, deepgram=None, opencode=None, library=None,
                  retry_delays=(300, 900, 2700), limit_retry_delay=3600,
-                 deepgram_backup_delays=(30, 90), account_runtime=None):
+                 deepgram_backup_delays=(30, 90), accounts=None):
         self.store, self.config, self.secrets = store, config, secrets
         self.youtube = youtube or Youtube(store)
         self.deepgram = deepgram or Deepgram()
-        self.accounts = OpenCodeAccounts(store, config)
-        self.account_runtime = account_runtime or AccountRuntimeManager(config)
-        self.opencode = opencode or OpenCode(account_runtime=self.account_runtime)
+        self.accounts = accounts or EmbeddedAccountService(config)
+        self.opencode = opencode or OpenCode(accounts=self.accounts)
         self.library = library or Library()
         self.retry_delays = tuple(retry_delays)
         self.limit_retry_delay = limit_retry_delay
@@ -43,7 +40,6 @@ class Scheduler:
         self.provider_override_variant = ""
         self._keys = {}
         self.thread = None
-        self.account_usage = AccountUsageMonitor(self)
 
     def set_provider_override(self, provider, model="", variant=""):
         """Session-only: force one provider, model and reasoning level on every OpenCode worker."""
@@ -135,7 +131,7 @@ class Scheduler:
         # claim or sees the worker as busy through its publication/finally.
         with self.lock:
             busy_ids = {active["job_id"] for active in self.active.values()}
-            busy_ids.update(self.store.state_get("chatgpt_session_holds", {}))
+            busy_ids.update(self.store.state_get("execution_holds", {}))
             return self.store.delete_jobs(idents, busy_ids=busy_ids)
 
     def retry_job(self, ident, stage, rerun=False):
@@ -143,76 +139,30 @@ class Scheduler:
         with self.lock:
             if any(active["job_id"] == ident for active in self.active.values()):
                 raise ValueError("انتظر انتهاء العامل ونشر نتائجه قبل إعادة المحاولة.")
-            if (stage == "opencode" or rerun) and ident in self.store.state_get("chatgpt_session_holds", {}):
+            if (stage == "opencode" or rerun) and ident in self.store.state_get("execution_holds", {}):
                 raise ValueError("أعد فحص الحساب من إدارة حسابات ChatGPT للتحقق من توقف الجلسة السابقة قبل إعادة التنفيذ.")
             self.store.retry(ident, stage, rerun)
 
     def recheck_account(self, ident):
         with self.lock:
-            held_jobs = {job_id: held for job_id, held in self.store.state_get("chatgpt_session_holds", {}).items()
-                         if held["account_id"] == ident}
-        # Native proof runs without the scheduler lock, with the entire account
-        # still excluded until every captured hold has been verified.
-        confirm = getattr(self.account_runtime, "confirm_stopped", None)
-        for held in held_jobs.values():
-            if not confirm or not confirm(**held):
+            held_jobs = self.store.state_get("execution_holds", {})
+        # Include migrated holds whose old account references no longer exist.
+        # Reconciliation is read-only and never kills a process of unknown ownership.
+        for job_id, held in held_jobs.items():
+            if not self.accounts.supervisor.confirm_stopped(**held):
                 raise ValueError("لا يمكن إعادة التنفيذ قبل التحقق من توقف جلسة ChatGPT السابقة. أعد فحص الحساب لاحقًا.")
-        with self.lock:
-            current = {job_id: held for job_id, held in self.store.state_get("chatgpt_session_holds", {}).items()
-                       if held["account_id"] == ident}
-            if current != held_jobs:
-                raise ValueError("تغيّرت جلسة الحساب أثناء الفحص؛ أعد الفحص.")
-            self.accounts.clear_holds(held_jobs)
-            return next(account for account in self.accounts.list() if account["id"] == ident)
-
-    def refresh_account_usage(self, ident, binding, cancel, allow_idle_refresh=True):
-        """Read telemetry; native renewal is guarded separately from job leases."""
-        def deferred(reason="usage_refresh_deferred"):
-            return {"status": "cancelled" if cancel.is_set() or self.stop_event.is_set() else "deferred",
-                    "reason_code": reason, "observed_at": time.time()}
-
-        with self.lock:
-            with self.store.lock:
-                if cancel.is_set() or self.stop_event.is_set():
-                    return deferred("usage_cancelled")
-                if (not self.accounts._matches_usage_binding(ident, binding)
-                        or not self.accounts.usage_eligible(ident)):
-                    return deferred("account_not_ready")
-        # Neither registry nor scheduler locks may span HTTP/native process work.
-        read = getattr(self.account_runtime, "read_usage", None)
-        if read is None:
-            return {"status": "unsupported", "reason_code": "usage_runtime_unsupported"}
-        result = read(ident, binding, cancel)
-        if (not allow_idle_refresh or not isinstance(result, dict)
-                or result.get("status") != "deferred"
-                or result.get("reason_code") not in ("expired_pending_idle", "runtime_pending_idle")):
-            return result
-        with self.lock:
-            if cancel.is_set() or self.stop_event.is_set():
-                return deferred("usage_cancelled")
-            reservation = self.accounts.reserve_usage_maintenance(ident, binding)
-        if reservation is None:
-            return result
-        # This callable is deliberately lock-free: runtime lifecycle guards can
-        # invoke it without acquiring scheduler/store locks in reverse order.
-        reservation["is_valid"] = lambda: not (reservation["cancel"].is_set()
-                                                 or cancel.is_set() or self.stop_event.is_set())
-        try:
-            restart = getattr(self.account_runtime, "restart_idle_for_usage", None)
-            if restart is None or not reservation["is_valid"]():
-                return result
-            refreshed = restart(ident, reservation, cancel)
-            if not reservation["is_valid"]():
-                return deferred("usage_cancelled")
-            if isinstance(refreshed, dict) and refreshed.get("reason_code") == "native_refreshed":
-                return read(ident, binding, cancel)
-            return refreshed
-        finally:
-            with self.lock:
-                self.accounts.release_usage_maintenance(reservation)
+            if held.get("attempt_id") and not held.get("legacy"):
+                try:
+                    self.accounts.close_attempt(held["attempt_id"], outcome="cancelled")
+                except Exception as exc:
+                    # Bindings are in the old process's memory. Absence is safe
+                    # only here, after this exact execution owner was proved stopped.
+                    if getattr(exc, "reason", "") != "ATTEMPT_NOT_FOUND":
+                        raise
+            self.store.clear_execution_hold(job_id, held)
+        return self.accounts.recheck(ident) if ident else self.accounts.refresh()
 
     def shutdown(self):
-        self.account_usage.stop()
         with self.lock:
             self.running = False
             self.stop_event.set()
@@ -224,7 +174,7 @@ class Scheduler:
 
     def _close_account_runtime(self):
         try:
-            self.account_runtime.close()
+            self.accounts.close()
         except Exception:
             # Runtime shutdown may be unable to prove native termination. Keep
             # replay holds and ownership markers intact; no native body is logged.
@@ -290,7 +240,7 @@ class Scheduler:
         return self.effective_worker(result) if stage == "opencode" else result
 
     def uses_accounts(self, worker, cfg):
-        return bool(cfg.get("chatgpt_accounts_enabled") and provider_of(worker, cfg) == "login"
+        return bool(provider_of(worker, cfg) == "login"
                     and str(worker.get("model", "")).lower().startswith("openai/"))
 
     def ready(self, job, stage, jobs):
@@ -396,7 +346,6 @@ class Scheduler:
                             continue
                         if stage == "deepgram" and sum(a["stage"] == stage and a.get("project") == worker["project"] for a in self.active.values()) >= cfg["project_concurrency"]:
                             continue
-                        lease = None
                         dispatch_worker = self.run_worker(job, stage, worker) if stage != "download" else worker.copy()
                         if stage == "opencode":
                             provider = provider_of(dispatch_worker, cfg)
@@ -407,28 +356,21 @@ class Scheduler:
                                     self.disabled_workers[wid] = f"أضف مفتاح {provider_info(provider, cfg)['name']} لهذا العامل"
                                     break
                         if stage == "opencode" and self.uses_accounts(dispatch_worker, cfg):
-                            # Lock order is scheduler -> store. Registry selection,
-                            # lease publication and claim are one dispatch decision.
-                            with self.store.lock:
-                                model = dispatch_worker.get("model", "")
-                                lease, wakeup = self.accounts.acquire(job["id"], wid, model)
-                                if not lease:
+                            # Readiness is a cached hint. The plugin alone makes
+                            # the atomic account selection once an attempt directory exists.
+                            if isinstance(self.opencode, OpenCode):
+                                self.accounts.request_refresh()
+                                ready = self.accounts.readiness()
+                                disabled = not cfg.get("accounts_enabled", True)
+                                full = sum(a.get("managed", False) for a in self.active.values()) >= cfg.get("accounts_max_concurrency", 5)
+                                if disabled or full or not ready.get("ready"):
+                                    wakeup = max(time.time() + 5, float(ready.get("next_retry_at") or time.time() + 30))
                                     self.account_waits[wid] = {"status": "waiting", "until": wakeup}
                                     self.store.set_stage(job["id"], stage, "pending",
-                                                         "حسابات ChatGPT: انتظار حساب متاح أو موعد إعادة الفحص.",
-                                                         next_retry=wakeup)
+                                                         "حسابات ChatGPT: فعّل المحرك وسجّل الدخول، أو انتظر توفر حساب.", next_retry=wakeup)
                                     job["stages"][stage]["next_retry"] = wakeup
                                     continue
-                                try:
-                                    claimed = self.store.claim(job["id"], stage, wid)
-                                except Exception:
-                                    self.accounts.release(lease, "claim_failed")
-                                    raise
-                                if not claimed:
-                                    self.accounts.release(lease, "not_claimed")
-                                    continue
-                        else:
-                            claimed = self.store.claim(job["id"], stage, wid)
+                        claimed = self.store.claim(job["id"], stage, wid)
                         if not claimed:
                             continue
                         job["stages"][stage]["status"] = "running"
@@ -436,8 +378,8 @@ class Scheduler:
                         cancel = threading.Event()
                         self.active[wid] = {"job_id": job["id"], "stage": stage, "cancel": cancel,
                                             "project": worker.get("project"), "started": time.time(),
-                                            "lease": lease, "account_id": lease["account_id"] if lease else "",
-                                            "account_name": lease["alias"] if lease else ""}
+                                            "managed": stage == "opencode" and self.uses_accounts(dispatch_worker, cfg),
+                                            "account_id": "", "account_name": ""}
                     try:
                         thread = threading.Thread(target=self.execute, args=(job, stage, {**worker, "_resolved_worker": dispatch_worker}, secret, cancel), daemon=True, name=wid)
                         thread.start()
@@ -445,17 +387,13 @@ class Scheduler:
                         message = str(exc).replace(secret, "[محجوب]") if secret else str(exc)
                         with self.lock:
                             self.active.pop(wid, None)
-                            if lease:
-                                self.accounts.release(lease, "start_failed")
                             self.store.set_stage(job["id"], stage, "failed", "تعذر بدء العامل: " + message)
                             self.store.event(job["id"], "تعذر بدء العامل: " + message, "error")
                     break
 
     def execute(self, job, stage, worker, secret, cancel):
         wid, ident = worker["id"], job["id"]
-        with self.lock:
-            lease = self.active.get(wid, {}).get("lease")
-        outcome = "failed"
+        managed = False
         try:
             cfg = job["config"].copy()
             if stage != "download":
@@ -464,9 +402,21 @@ class Scheduler:
             live = self.config.snapshot()
             for k in ("cookies_file", "opencode_executable", "opencode_context", "opencode_data_root"):
                 cfg[k] = live[k]
-            if lease:
-                cfg["_chatgpt_account_id"] = lease["account_id"]
-                cfg["_chatgpt_session_started"] = lambda session_id, instance_id="", workpath="": self.accounts.session_started(lease, session_id, instance_id, workpath)
+            managed = stage == "opencode" and self.uses_accounts(worker, live)
+            if managed:
+                cfg["_embedded_accounts"] = True
+                cfg["accounts_max_concurrency"] = live.get("accounts_max_concurrency", 5)
+                def execution_started(attempt):
+                    self.store.begin_execution(attempt, ident, wid, worker["model"], attempt["workpath"])
+                    with self.lock:
+                        active = self.active.get(wid)
+                        if active is not None:
+                            active.update(attempt_id=attempt["attempt_id"], account_id=attempt.get("account_id", ""),
+                                          account_name=attempt.get("alias", ""))
+                cfg["_execution_started"] = execution_started
+                cfg["_execution_session"] = self.store.execution_session
+                cfg["_execution_finished"] = lambda attempt_id, outcome: (self.store.hold_execution(attempt_id)
+                    if outcome == "execution_uncertain" else self.store.finish_execution(attempt_id, outcome))
             self.store.event(ident, f"بدء {stage} — {wid}")
             progress = lambda value: self.store.progress(ident, stage, value)
             if stage == "download":
@@ -480,17 +430,13 @@ class Scheduler:
                 kind = "document"
             self.store.artifact(ident, kind, output)
             self.store.set_stage(ident, stage, "completed", progress=100)
-            outcome = "completed"
-            if lease:
-                self.accounts.success(lease)
             self.store.event(ident, f"اكتملت {stage}")
             self.publish_library(ident)
         except ServiceError as exc:
             kind = exc.kind
-            outcome = kind
             # Managed subscription quotas belong to an account, not a job retry
             # budget. Only confirmed, safely stopped requests may change route.
-            if lease and self.handle_account_error(ident, lease, exc, cancel):
+            if managed and self.handle_account_error(ident, worker, exc, cancel):
                 return
             used = int(job["stages"][stage].get("retries", 0))
             # One central retry decision per (stage, kind); jobs snapshotted
@@ -542,15 +488,12 @@ class Scheduler:
         finally:
             with self.lock:
                 self.active.pop(wid, None)
-                if lease:
-                    self.accounts.release(lease, outcome)
                 close_runtime = self.stop_event.is_set() and not self.active
             if close_runtime:
                 self._close_account_runtime()
 
-    def handle_account_error(self, ident, lease, exc, cancel):
+    def handle_account_error(self, ident, worker, exc, cancel):
         if exc.kind in ("uncertain", "execution_uncertain"):
-            self.accounts.hold(lease, ident)
             self.store.set_stage(ident, "opencode", "uncertain", str(exc))
             self.store.event(ident, str(exc), "error")
             return True
@@ -563,12 +506,8 @@ class Scheduler:
             if used >= budget:
                 self.store.set_stage(ident, "opencode", "failed", "تعذر إكمال الطلب بعد التقييد المؤقت: " + str(exc))
             else:
-                with self.lock:
-                    self.accounts.failure(lease, exc)
-                    retry_after = getattr(exc, "retry_after", 0)
-                    delay = _finite_number(retry_after, 30)
-                    delay = max(5, min(300, delay or 30))
-                    self.store.defer_retry(ident, "opencode", str(exc), delay)
+                delay = max(5, min(300, float(exc.retry_after or 30)))
+                self.store.defer_retry(ident, "opencode", str(exc), delay)
             return True
         # Unconfirmed rate-limit text follows a bounded transient retry; it must
         # not exhaust subscription quota or claim knowledge of weekly resets.
@@ -580,14 +519,17 @@ class Scheduler:
             else:
                 self.store.set_stage(ident, "opencode", "failed", "تعذر إكمال الطلب بعد المحاولات المتاحة: " + str(exc))
             return True
-        with self.lock:
-            if not self.accounts.failure(lease, exc):
-                return False
-            wakeup = self.accounts.next_retry(lease["model"])
-            message = "حسابات ChatGPT: " + str(exc)
-            self.store.set_stage(ident, "opencode", "pending", message, next_retry=wakeup)
-            self.store.event(ident, f"{lease['alias']}: {str(exc)[:300]}")
-        return True
+        if exc.kind in ("quota_exhausted", "cooldown", "accounts_busy", "no_accounts", "no_available_account",
+                        "login_required", "reauth_required", "account_auth", "account_workspace", "runtime_unavailable") or (exc.kind == "rate_limited" and exc.confirmed):
+            # Account state and reset timestamps are maintained by the plugin.
+            # A new attempt always starts from the saved transcript, never from
+            # another account's encrypted conversation history.
+            self.accounts.request_refresh(force=True)
+            wakeup = max(time.time() + 5, self.accounts.next_available_at(worker.get("model", "")) or time.time() + 30)
+            self.store.set_stage(ident, "opencode", "pending", "حسابات ChatGPT: " + str(exc), next_retry=wakeup)
+            self.store.event(ident, str(exc), "error")
+            return True
+        return False
 
     def publish_library(self, ident):
         """Mirror finished artifacts into the readable library; never fails the stage."""

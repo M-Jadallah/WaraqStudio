@@ -242,7 +242,7 @@ def test_thread_failure_does_not_leave_undeletable_active_job(queue, tmp_path, m
     import waraq.scheduler as scheduler_module
     store, config = queue
     ident, _ = add_transcript(store, config, tmp_path)
-    scheduler = Scheduler(store, config, None)
+    scheduler = Scheduler(store, config, None, opencode=object())
     if failure == "construct":
         def broken_thread(*args, **kwargs):
             raise RuntimeError("thread construction failed")

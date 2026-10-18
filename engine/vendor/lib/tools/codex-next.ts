@@ -1,0 +1,72 @@
+/**
+ * `codex-next` tool — single best next action.
+ * Extracted from `index.ts` per RC-1 Phase 2.
+ */
+
+import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
+import { loadAccounts } from "../storage.js";
+import {
+	recommendBeginnerNextAction,
+} from "../ui/beginner.js";
+import { formatUiHeader, formatUiItem } from "../ui/format.js";
+import { normalizeToolOutputFormat, renderJsonOutput } from "../runtime.js";
+import {
+	TOOL_OUTPUT_FORMAT_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_VALUES,
+} from "./args.js";
+import { withToolErrorEnvelope } from "./output.js";
+import type { ToolContext } from "./index.js";
+
+export function createCodexNextTool(ctx: ToolContext): ToolDefinition {
+	const {
+		resolveUiRuntime,
+		resolveActiveIndex,
+		toBeginnerAccountSnapshots,
+		getBeginnerRuntimeSnapshot,
+	} = ctx;
+	const definition = tool({
+		description:
+			"Show the single most recommended next action for beginners.",
+		args: {
+			format: tool.schema
+				.enum(TOOL_OUTPUT_FORMAT_VALUES)
+				.optional()
+				.describe(TOOL_OUTPUT_FORMAT_DESCRIPTION),
+		},
+		async execute({ format }: { format?: string } = {}) {
+			const ui = resolveUiRuntime();
+			const outputFormat = normalizeToolOutputFormat(format);
+			const storage = await loadAccounts();
+			const now = Date.now();
+			const activeIndex =
+				storage && storage.accounts.length > 0
+					? resolveActiveIndex(storage, "codex")
+					: 0;
+			const snapshots = storage
+				? toBeginnerAccountSnapshots(storage, activeIndex, now)
+				: [];
+			const action = recommendBeginnerNextAction({
+				accounts: snapshots,
+				now,
+				runtime: getBeginnerRuntimeSnapshot(),
+			});
+			if (outputFormat === "json") {
+				return renderJsonOutput({
+					recommendedNextAction: action,
+					totalAccounts: snapshots.length,
+					activeIndex:
+						storage && storage.accounts.length > 0 ? activeIndex + 1 : null,
+				});
+			}
+			if (ui.v2Enabled) {
+				return [
+					...formatUiHeader(ui, "Recommended next action"),
+					"",
+					formatUiItem(ui, action, "accent"),
+				].join("\n");
+			}
+			return `Recommended next action:\n${action}`;
+		},
+	});
+	return withToolErrorEnvelope("codex-next", definition);
+}

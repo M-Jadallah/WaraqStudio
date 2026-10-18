@@ -30,7 +30,7 @@ RELATIONSHIPS = '<Relationships xmlns="http://schemas.openxmlformats.org/package
 
 
 def main():
-    executable = resolve_opencode("opencode")
+    executable = resolve_opencode(os.environ.get("OPENCODE_TEST_EXECUTABLE", "opencode"))
     version = opencode_version(executable)
     assert version.startswith("2."), f"Expected OpenCode 2, got {version}"
     calls = []

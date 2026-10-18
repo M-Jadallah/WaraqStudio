@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from waraq import __version__
+from scripts.prepare_embedded_engine import prepare, validate_payload
 
 root = Path(__file__).resolve().parent
 work = root.parents[1] / "work" / "pyinstaller"
@@ -14,12 +15,17 @@ work.mkdir(parents=True, exist_ok=True)
 version = os.environ.get("VERSION", __version__)
 if not re.fullmatch(r"\d+(?:\.\d+){2,3}", version):
     raise ValueError("VERSION must be a numeric application release version")
+runtime_payload = root / "build" / "embedded-runtime"
+if not runtime_payload.exists():
+    prepare(runtime_payload, root / "build" / "runtime-downloads")
+validate_payload(runtime_payload)
 version_file = work / "_build_version.txt"
 version_file.write_text(version, encoding="utf-8")
 command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--name", "WaraqStudio",
            "--distpath", str(root / "Windows"), "--workpath", str(work / "build"),
            "--specpath", str(work), "--add-data", str(root / "waraq/qml") + ";waraq/qml",
            "--add-data", str(root / "waraq/mobile") + ";waraq/mobile",
+           "--add-data", str(runtime_payload) + ";embedded-runtime",
            "--add-data", str(version_file) + ";waraq",
            "--add-data", str(root / "waraq/icon.svg") + ";waraq", "--icon", str(root / "waraq/icon.ico"),
            "--collect-all", "yt_dlp_ejs", "--collect-all", "imageio_ffmpeg",

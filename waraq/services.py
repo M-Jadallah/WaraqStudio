@@ -772,8 +772,8 @@ def opencode_run_command(executable, version, worker, model, work, prompt):
 
 
 class OpenCode:
-    def __init__(self, account_runtime=None):
-        self.account_runtime = account_runtime
+    def __init__(self, accounts=None):
+        self.accounts = accounts
 
     def prepare_context(self, work, cfg):
         """Copy only skill sources, never credentials, cookies or legacy user inputs."""
@@ -791,7 +791,7 @@ class OpenCode:
         return module_paths
 
     def process(self, job, worker, cfg, secret, cancel, log):
-        if cfg.get("_chatgpt_account_id"):
+        if cfg.get("_embedded_accounts"):
             return self._process_managed(job, worker, cfg, cancel, log)
         transcript = Path(job["transcript"])
         if not transcript.is_file() or not transcript.read_text(encoding="utf-8-sig").strip():
@@ -869,9 +869,9 @@ class OpenCode:
         return output
 
     def _process_managed(self, job, worker, cfg, cancel, log):
-        """One native account owner, isolated attempts, and one validated commit."""
-        account_id = cfg["_chatgpt_account_id"]
-        if self.account_runtime is None:
+        """A plugin-bound account, an isolated attempt, and one validated commit."""
+        account_id = ""
+        if self.accounts is None:
             raise ServiceError("مدير حسابات ChatGPT غير متاح.", "blocked", account_id=account_id)
         checkpoint(cancel)
         transcript = Path(job["transcript"])
@@ -909,19 +909,46 @@ class OpenCode:
         if not model.startswith("openai/"):
             raise ServiceError("حساب ChatGPT يتطلب نموذج openai من الاشتراك.", "model_unavailable",
                                account_id=account_id, scope="model")
-        runtime, session_id, attempt_session_id = None, None, None
+        runtime, session_id, attempt_session_id, attempt = None, None, None, None
+        audited, outcome = False, "failed"
         errors = []
+        def binding_error():
+            # The plugin sees provider errors before the CLI wraps them. Consult
+            # its safe classification after stopping, so routing never depends
+            # on a model's prose or an arbitrary error string.
+            resolved = self.accounts.resolve_attempt(attempt["attempt_id"])
+            failure = resolved.get("failure") if isinstance(resolved, dict) else None
+            if not isinstance(failure, dict):
+                return None
+            kind = failure.get("kind")
+            mapped = {"quota": "rate_limited", "rate_limited": "throttled", "reauth": "account_auth",
+                      "workspace_blocked": "account_workspace", "provider_error": "failed"}.get(kind, "failed")
+            reset = float(failure.get("retry_at") or 0)
+            return ServiceError(LIMIT_MESSAGE if kind == "quota" else "أوقف محرك الحسابات الطلب؛ راجع حالة الحساب.",
+                                mapped, max(0, reset - time.time()), account_id=account_id, reset_at=reset,
+                                scope="account", confirmed=bool(failure.get("confirmed")))
         try:
-            runtime = self.account_runtime.ensure(account_id, cfg)
-            self.account_runtime.require_subscription(account_id)
-            environment = {"PWD": str(work.resolve())}
+            attempt = self.accounts.begin_attempt(job["id"], worker["id"], model, directory=work,
+                                                 max_concurrency=cfg.get("accounts_max_concurrency", 5))
+            account_id = attempt.get("account_id", "")
+            runtime = self.accounts.supervisor.ensure(cfg)
+            attempt.update(workpath=str(work.resolve()), runtime_instance_id=runtime.instance_id)
+            callback = cfg.get("_execution_started")
+            if callback:
+                callback(attempt)
+                audited = True
+            # Keep the engine on its pinned executables, while Word skills may
+            # still use the user's installed Python/document tools. Packaged
+            # Node stays first; no inherited credentials enter this environment.
+            tool_path = os.pathsep.join(part for part in (runtime.env.get("PATH", ""), os.environ.get("PATH", "")) if part)
+            environment = {"PWD": str(work.resolve()), "PATH": tool_path}
             if module_paths:
                 environment["NODE_PATH"] = os.pathsep.join(module_paths)
             session_id = runtime.create_session(work, environment)
             attempt_session_id = session_id
-            callback = cfg.get("_chatgpt_session_started")
+            callback = cfg.get("_execution_session")
             if callback:
-                callback(session_id, runtime.instance_id, str(work.resolve()))
+                callback(attempt["attempt_id"], session_id, runtime.instance_id)
             checkpoint(cancel)
             env = dict(runtime.env, **environment, OPENCODE_PASSWORD=runtime.password)
             variant = str(worker.get("variant", "")).strip()
@@ -951,6 +978,9 @@ class OpenCode:
                 session_id = None
                 if cancel.is_set():
                     raise Cancelled()
+                classified = binding_error()
+                if classified:
+                    raise classified
                 if errors:
                     raise preferred_opencode_error(errors) from None
                 raise
@@ -960,6 +990,9 @@ class OpenCode:
             runtime.release_session(session_id)
             session_id = None
             checkpoint(cancel)
+            classified = binding_error()
+            if classified:
+                raise classified
             if errors:
                 raise preferred_opencode_error(errors)
             if digest(transcript) != original_hash or digest(local_transcript) != original_hash:
@@ -974,21 +1007,42 @@ class OpenCode:
             atomic_json(verified, {**report, "input_sha256": original_hash, "output": str(output),
                                    "attempt": work.name, "session_id": attempt_session_id,
                                    "instance_id": runtime.instance_id})
+            outcome = "completed"
             return output
         except (ServiceError, Cancelled) as exc:
+            outcome = exc.kind
             if runtime and session_id and exc.kind != "execution_uncertain":
                 if not abort_managed_session(runtime, session_id, work):
+                    outcome = "execution_uncertain"
                     raise ServiceError("تعذر إثبات توقف جلسة OpenCode؛ أوقفت إعادة التنفيذ لحماية النتيجة.",
                                        "execution_uncertain", account_id=account_id) from None
             raise
         except Exception as exc:
             if runtime and session_id and not abort_managed_session(runtime, session_id, work):
+                outcome = "execution_uncertain"
                 raise ServiceError("تعذر التحقق من توقف جلسة OpenCode؛ يلزم فحصها قبل إعادة التنفيذ.",
                                    "execution_uncertain", account_id=account_id) from None
-            raise ServiceError("تعذر الاتصال بعملية حساب OpenCode المعزولة.", getattr(exc, "kind", "failed"),
+            outcome = getattr(exc, "kind", "failed")
+            raise ServiceError("تعذر الاتصال بمحرك حسابات ورق المضمّن.", outcome,
                                account_id=account_id) from None
         finally:
             active_error = sys.exc_info()[1]
-            if (getattr(active_error, "kind", "") != "execution_uncertain" and
-                    (not transcript.exists() or digest(transcript) != original_hash)):
+            if getattr(active_error, "kind", "") == "execution_uncertain":
+                outcome = "execution_uncertain"
+            if attempt:
+                # Release the binding only after native inactivity has been proved.
+                # An uncertain session retains both its binding and durable replay hold.
+                if outcome != "execution_uncertain":
+                    try:
+                        engine_outcome = ("limit" if outcome in ("rate_limited", "quota_exhausted", "throttled") else
+                                          outcome if outcome in ("completed", "cancelled") else "failed")
+                        self.accounts.close_attempt(attempt["attempt_id"], outcome=engine_outcome)
+                    except Exception:
+                        outcome = "execution_uncertain"
+                if audited and cfg.get("_execution_finished"):
+                    cfg["_execution_finished"](attempt["attempt_id"], outcome)
+                if outcome == "execution_uncertain" and getattr(active_error, "kind", "") != "execution_uncertain":
+                    raise ServiceError("تعذر إغلاق سجل المحاولة بأمان؛ افحص المحرك قبل إعادة التنفيذ.",
+                                       "execution_uncertain", account_id=account_id)
+            if (outcome != "execution_uncertain" and (not transcript.exists() or digest(transcript) != original_hash)):
                 raise ServiceError("تغيّر TXT الأصلي أثناء OpenCode؛ أوقفت اعتماد الناتج للمراجعة.", "blocked", account_id=account_id)

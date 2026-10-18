@@ -1,0 +1,397 @@
+/**
+ * Refresh Queue Module
+ *
+ * Prevents race conditions when multiple concurrent requests try to refresh
+ * the same account's token simultaneously. Instead of firing parallel refresh
+ * requests, subsequent callers await the existing in-flight refresh.
+ *
+ * Ported from antigravity-auth refresh-queue.ts pattern.
+ */
+
+import { refreshAccessToken } from "./auth/auth.js";
+import type { TokenResult } from "./types.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("refresh-queue");
+
+/**
+ * Entry representing an in-flight token refresh operation.
+ */
+interface RefreshEntry {
+  promise: Promise<TokenResult>;
+  startedAt: number;
+}
+
+export interface RefreshQueueMetrics {
+	started: number;
+	deduplicated: number;
+	rotationReused: number;
+	succeeded: number;
+	failed: number;
+	exceptions: number;
+	rotated: number;
+	staleEvictions: number;
+	lastDurationMs: number;
+	lastFailureReason: string | null;
+	pending: number;
+}
+
+function createInitialMetrics(): RefreshQueueMetrics {
+	return {
+		started: 0,
+		deduplicated: 0,
+		rotationReused: 0,
+		succeeded: 0,
+		failed: 0,
+		exceptions: 0,
+		rotated: 0,
+		staleEvictions: 0,
+		lastDurationMs: 0,
+		lastFailureReason: null,
+		pending: 0,
+	};
+}
+
+/**
+ * Manages queued token refresh operations to prevent race conditions.
+ *
+ * When multiple concurrent requests need to refresh the same account's token,
+ * only the first request triggers the actual refresh. Subsequent requests
+ * await the same promise, ensuring:
+ * - No duplicate refresh API calls for the same refresh token
+ * - Consistent token state across all waiting callers
+ * - Reduced load on OpenAI's token endpoint
+ *
+ * Token Rotation Handling:
+ * When OpenAI rotates the refresh token during a refresh operation, we maintain
+ * a mapping from old token → new token. This ensures that requests arriving with
+ * either the old or new token will find the in-flight refresh and not trigger
+ * duplicate refreshes.
+ *
+ * @example
+ * ```typescript
+ * const queue = new RefreshQueue();
+ *
+ * // These three concurrent calls will only trigger ONE actual refresh
+ * const [result1, result2, result3] = await Promise.all([
+ *   queue.refresh(refreshToken),
+ *   queue.refresh(refreshToken),
+ *   queue.refresh(refreshToken),
+ * ]);
+ *
+ * // All three get the same result
+ * console.log(result1 === result2); // true (same object reference)
+ * ```
+ */
+export class RefreshQueue {
+  private pending: Map<string, RefreshEntry> = new Map();
+  private metrics: RefreshQueueMetrics = createInitialMetrics();
+
+  /**
+   * Maps old refresh tokens to new tokens after rotation.
+   * This allows lookups with either old or new token to find the same entry.
+   * Format: oldToken → newToken
+   */
+  private tokenRotationMap: Map<string, string> = new Map();
+
+  /**
+   * Successful results of recently-SETTLED rotations, keyed by the consumed
+   * (pre-rotation) token. The in-flight dedup above only protects callers
+   * that arrive while the refresh is pending; a sibling that captured the
+   * old token just before rotation and calls refresh() after the first
+   * refresh settles would otherwise burn the single-use token and take a
+   * spurious 401. Entries live for `maxEntryAgeMs`, same as pending entries.
+   */
+  private recentRotations: Map<string, { result: TokenResult; settledAt: number }> =
+    new Map();
+
+  /**
+   * Maximum time to keep a refresh entry in the queue (prevents memory leaks
+   * from stuck requests). After this timeout, the entry is removed and new
+   * callers will trigger a fresh refresh.
+   */
+  private readonly maxEntryAgeMs: number;
+
+  /**
+   * Create a new RefreshQueue instance.
+   * @param maxEntryAgeMs - Maximum age for pending entries before cleanup (default: 30s)
+   */
+  constructor(maxEntryAgeMs: number = 30_000) {
+    this.maxEntryAgeMs = maxEntryAgeMs;
+  }
+
+  /**
+   * Refresh a token, deduplicating concurrent requests for the same refresh token.
+   *
+   * If a refresh is already in-flight for this token, returns the existing promise.
+   * Otherwise, initiates a new refresh and caches the promise for other callers.
+   *
+   * @param refreshToken - The refresh token to use
+   * @returns Token result (success with new tokens, or failure)
+   */
+  async refresh(refreshToken: string): Promise<TokenResult> {
+    this.cleanup();
+
+    // Check for existing in-flight refresh (direct match)
+    const existing = this.pending.get(refreshToken);
+    if (existing) {
+      this.metrics.deduplicated += 1;
+      this.metrics.pending = this.pending.size;
+      log.info("Reusing in-flight refresh for token", {
+        tokenSuffix: refreshToken.slice(-6),
+        waitingMs: Date.now() - existing.startedAt,
+      });
+      return existing.promise;
+    }
+
+    // A refresh with this exact token already rotated and settled moments
+    // ago: hand back that result instead of re-consuming a single-use token.
+    const recentRotation = this.recentRotations.get(refreshToken);
+    if (recentRotation) {
+      this.metrics.rotationReused += 1;
+      log.info("Reusing settled rotation result for consumed token", {
+        ageMs: Date.now() - recentRotation.settledAt,
+      });
+      return recentRotation.result;
+    }
+
+    // Check if this token was rotated FROM another token that's still refreshing
+    // This handles: Request A starts with oldToken, gets newToken, Request B arrives with newToken
+    const rotatedFrom = this.findOriginalToken(refreshToken);
+    if (rotatedFrom) {
+      const originalEntry = this.pending.get(rotatedFrom);
+      if (originalEntry) {
+        this.metrics.rotationReused += 1;
+        this.metrics.pending = this.pending.size;
+        log.info("Reusing in-flight refresh via rotation mapping", {
+          newTokenSuffix: refreshToken.slice(-6),
+          originalTokenSuffix: rotatedFrom.slice(-6),
+          waitingMs: Date.now() - originalEntry.startedAt,
+        });
+        return originalEntry.promise;
+      }
+    }
+
+    // Start a new refresh
+    const startedAt = Date.now();
+    this.metrics.started += 1;
+    const promise = this.executeRefreshWithRotationTracking(refreshToken);
+
+    // The entry is captured so the finally block can delete by identity: this
+    // entry may be evicted as stale (cleanup()) and replaced by a NEWER refresh
+    // for the same token while the original exchange is still in flight. A
+    // blind keyed delete would then remove the replacement and let a third
+    // caller start a third concurrent exchange of the same single-use token.
+    const entry: RefreshEntry = { promise, startedAt };
+    this.pending.set(refreshToken, entry);
+    this.metrics.pending = this.pending.size;
+
+    try {
+      return await promise;
+    } finally {
+      if (this.pending.get(refreshToken) === entry) {
+        this.pending.delete(refreshToken);
+        // The now-outbound refresh token is the one credential we know is dead;
+        // its rotation mapping is already encoded in recentRotations, so
+        // keeping the forward map entry too is only a leak. Ownership is
+        // checked first so a replacement's mapping is never cleared.
+        this.cleanupRotationMapping(refreshToken);
+      }
+      this.metrics.pending = this.pending.size;
+    }
+  }
+
+  private findOriginalToken(newToken: string): string | undefined {
+    for (const [oldToken, mappedNewToken] of this.tokenRotationMap.entries()) {
+      if (mappedNewToken === newToken) {
+        return oldToken;
+      }
+    }
+    return undefined;
+  }
+
+  private cleanupRotationMapping(token: string): void {
+    this.tokenRotationMap.delete(token);
+    for (const [oldToken, newToken] of this.tokenRotationMap.entries()) {
+      if (newToken === token) {
+        this.tokenRotationMap.delete(oldToken);
+      }
+    }
+  }
+
+  private async executeRefreshWithRotationTracking(refreshToken: string): Promise<TokenResult> {
+    const result = await this.executeRefresh(refreshToken);
+
+    if (result.type === "success" && result.refresh !== refreshToken) {
+      this.tokenRotationMap.set(refreshToken, result.refresh);
+      this.recentRotations.set(refreshToken, {
+        result,
+        settledAt: Date.now(),
+      });
+      this.metrics.rotated += 1;
+      log.info("Token rotated during refresh", {
+        oldTokenSuffix: refreshToken.slice(-6),
+        newTokenSuffix: result.refresh.slice(-6),
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Execute the actual refresh and log results.
+   */
+  private async executeRefresh(refreshToken: string): Promise<TokenResult> {
+    const startTime = Date.now();
+    log.info("Starting token refresh", { tokenSuffix: refreshToken.slice(-6) });
+
+    try {
+      const result = await refreshAccessToken(refreshToken);
+      const duration = Date.now() - startTime;
+      this.metrics.lastDurationMs = duration;
+
+      if (result.type === "success") {
+        this.metrics.succeeded += 1;
+        this.metrics.lastFailureReason = null;
+        log.info("Token refresh succeeded", {
+          tokenSuffix: refreshToken.slice(-6),
+          durationMs: duration,
+        });
+      } else {
+        this.metrics.failed += 1;
+        this.metrics.lastFailureReason = result.reason ?? "unknown";
+        log.warn("Token refresh failed", {
+          tokenSuffix: refreshToken.slice(-6),
+          reason: result.reason,
+          durationMs: duration,
+        });
+      }
+
+      return result;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      this.metrics.failed += 1;
+      this.metrics.exceptions += 1;
+      this.metrics.lastDurationMs = duration;
+      this.metrics.lastFailureReason =
+        error instanceof Error ? error.message : "unknown_exception";
+      log.error("Token refresh threw exception", {
+        tokenSuffix: refreshToken.slice(-6),
+        error: (error as Error)?.message ?? String(error),
+        durationMs: duration,
+      });
+
+      return {
+        type: "failed",
+        reason: "network_error",
+        message: (error as Error)?.message ?? "Unknown error during refresh",
+      };
+    }
+  }
+
+  /**
+   * Remove stale entries that have been pending too long.
+   * This prevents memory leaks from stuck or abandoned refresh operations.
+   */
+  private cleanup(): void {
+    const now = Date.now();
+    const staleTokens: string[] = [];
+
+    for (const [token, entry] of this.pending.entries()) {
+      if (now - entry.startedAt > this.maxEntryAgeMs) {
+        staleTokens.push(token);
+      }
+    }
+
+    for (const token of staleTokens) {
+      // istanbul ignore next -- defensive: token always exists in pending at this point (not yet deleted)
+      const ageMs = now - (this.pending.get(token)?.startedAt ?? now);
+      this.metrics.staleEvictions += 1;
+      log.warn("Removing stale refresh entry", {
+        tokenSuffix: token.slice(-6),
+        ageMs,
+      });
+      this.pending.delete(token);
+    }
+    this.metrics.pending = this.pending.size;
+
+    for (const [token, entry] of this.recentRotations.entries()) {
+      if (now - entry.settledAt > this.maxEntryAgeMs) {
+        this.recentRotations.delete(token);
+      }
+    }
+  }
+
+  /**
+   * Check if there's an in-flight refresh for a given token.
+   * @param refreshToken - The refresh token to check
+   * @returns True if refresh is in progress
+   */
+  isRefreshing(refreshToken: string): boolean {
+    return this.pending.has(refreshToken);
+  }
+
+  /**
+   * Get the number of pending refresh operations.
+   * Useful for debugging and monitoring.
+   */
+  get pendingCount(): number {
+    return this.pending.size;
+  }
+
+  /**
+   * Clear all pending entries (primarily for testing).
+   */
+  clear(): void {
+    this.pending.clear();
+    this.tokenRotationMap.clear();
+    this.recentRotations.clear();
+    this.metrics = createInitialMetrics();
+  }
+
+  getMetricsSnapshot(): RefreshQueueMetrics {
+    return {
+      ...this.metrics,
+      pending: this.pending.size,
+    };
+  }
+}
+
+// ============================================================================
+// Singleton Instance
+// ============================================================================
+
+let refreshQueueInstance: RefreshQueue | null = null;
+
+/**
+ * Get the singleton RefreshQueue instance.
+ * @param maxEntryAgeMs - Maximum age for pending entries (only used on first call)
+ * @returns The global RefreshQueue instance
+ */
+export function getRefreshQueue(maxEntryAgeMs?: number): RefreshQueue {
+  if (!refreshQueueInstance) {
+    refreshQueueInstance = new RefreshQueue(maxEntryAgeMs);
+  }
+  return refreshQueueInstance;
+}
+
+/**
+ * Reset the singleton instance (primarily for testing).
+ */
+export function resetRefreshQueue(): void {
+  refreshQueueInstance?.clear();
+  refreshQueueInstance = null;
+}
+
+/**
+ * Convenience function to refresh a token using the singleton queue.
+ * @param refreshToken - The refresh token to use
+ * @returns Token result
+ */
+export async function queuedRefresh(refreshToken: string): Promise<TokenResult> {
+  return getRefreshQueue().refresh(refreshToken);
+}
+
+export function getRefreshQueueMetrics(): RefreshQueueMetrics {
+  return getRefreshQueue().getMetricsSnapshot();
+}

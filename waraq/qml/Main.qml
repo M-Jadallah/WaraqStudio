@@ -213,7 +213,7 @@ ApplicationWindow {
         if (w.accountName) parts.push("الحساب: " + w.accountName)
         if (w.accountStatus) parts.push(({running: "قيد التنفيذ", waiting: "بانتظار حساب متاح", cooldown: "بانتظار تجدد الحد"})[w.accountStatus] || w.accountStatus)
         if ((w.variant || "").length > 0) parts.push("تفكير " + w.variant)
-        parts.push(!w.keyEnv ? "تسجيل دخول OpenCode" : (w.hasKey ? "المفتاح محفوظ" : "لا مفتاح محفوظ"))
+        parts.push(!w.keyEnv ? "حسابات ChatGPT في ورق" : (w.hasKey ? "المفتاح محفوظ" : "لا مفتاح محفوظ"))
         return parts.join("  ·  ")
     }
     function providerName(id) {
@@ -798,36 +798,54 @@ ApplicationWindow {
                                 Layout.fillWidth: true; spacing: win.rs(8)
                                 CheckBox {
                                     objectName: "managedAccountsEnabled"; text: "استخدام حسابات ChatGPT المُدارة"
-                                    checked: settings.chatgpt_accounts_enabled === true; palette.windowText: win.ink
-                                    onClicked: { settings.chatgpt_accounts_enabled = checked; win.save() }
+                                    checked: settings.accounts_enabled === true; palette.windowText: win.ink
+                                    onClicked: { settings.accounts_enabled = checked; win.save() }
                                     Accessible.name: text
                                 }
                                 Item { Layout.fillWidth: true }
-                                LabelText { text: "التزامن لكل حساب" }
+                                LabelText { text: "إجمالي التزامن" }
                                 SpinBox {
-                                    objectName: "accountConcurrency"; from: 1; to: 16; value: settings.chatgpt_account_concurrency || 5
-                                    onValueModified: { settings.chatgpt_account_concurrency = value; win.save() }
-                                    Accessible.name: "عدد المهام المتزامنة لكل حساب ChatGPT"
+                                    objectName: "accountConcurrency"; from: 1; to: 16; value: settings.accounts_max_concurrency || 5
+                                    onValueModified: { settings.accounts_max_concurrency = value; win.save() }
+                                    Accessible.name: "إجمالي مهام حسابات ChatGPT المتزامنة"
                                 }
                             }
                             SubText {
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
-                                text: "تُوزَّع مهام مزود تسجيل الدخول على الحسابات بحسب التفضيل والترتيب. الموافقة تتم في المتصفح؛ كل حساب معزول. تغييرات الحسابات تسري على المهام المنتظرة."
+                                text: "تُوزَّع المهام بحسب التفضيل والترتيب. تعرض الحصص حدود Codex المتاحة للاشتراك. الموافقة تتم في المتصفح، وتبقى كل محاولة مرتبطة بحساب واحد."
+                            }
+                            SubText {
+                                objectName: "accountEngineHealth"; text: backend.accountEngine.message || ""
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            }
+                            AppButton {
+                                objectName: "accountEngineRecoverButton"; text: "فحص المحرك والجلسات السابقة"
+                                enabled: !backend.accountBusy
+                                onClicked: backend.recoverAccountEngine()
+                            }
+                            SubText {
+                                objectName: "accountMigrationNotice"; visible: backend.accountEngine.migrationRequired === true
+                                text: "أصبح تسجيل الحسابات داخل محرك ورق المدمج. أضف حساباتك وسجّل الدخول مجددًا؛ بيانات الدخول القديمة لا تُنسخ تلقائيًا."
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            }
+                            AppButton {
+                                objectName: "accountMigrationDismissButton"; text: "فهمت"; visible: backend.accountEngine.migrationRequired === true
+                                enabled: !backend.accountBusy; onClicked: backend.acknowledgeAccountMigration()
                             }
                             Flow {
                                 Layout.fillWidth: true; spacing: win.rs(8)
                                 AppButton { objectName: "accountUsageRefreshAllButton"; text: "تحديث الحصص"; onClicked: backend.refreshAllAccountUsage(); Accessible.name: "تحديث حصص جميع حسابات ChatGPT" }
                                 CheckBox {
                                     objectName: "accountUsageAutoRefresh"; text: "تحديث الحصص تلقائيًا"; palette.windowText: win.ink
-                                    checked: settings.chatgpt_usage_auto_refresh !== false
-                                    onClicked: { settings.chatgpt_usage_auto_refresh = checked; win.save() }
+                                    checked: settings.accounts_auto_refresh !== false
+                                    onClicked: { settings.accounts_auto_refresh = checked; win.save() }
                                     Accessible.name: text
                                 }
                                 LabelText { text: "الفاصل بالثواني"; height: usageInterval.height; verticalAlignment: Text.AlignVCenter }
                                 SpinBox {
                                     id: usageInterval; objectName: "accountUsageRefreshInterval"; from: 60; to: 1800; stepSize: 30
-                                    value: settings.chatgpt_usage_refresh_seconds || 300
-                                    onValueModified: { settings.chatgpt_usage_refresh_seconds = value; win.save() }
+                                    value: settings.accounts_refresh_seconds || 300
+                                    onValueModified: { settings.accounts_refresh_seconds = value; win.save() }
                                     Accessible.name: "الفاصل بين تحديثات حصص ChatGPT بالثواني"
                                 }
                             }
@@ -899,11 +917,10 @@ ApplicationWindow {
                                             AppButton { objectName: "accountRenameButton"; text: "تسمية"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { win.pendingAccount = accountData; accountRename.text = accountData.alias; renameAccountDialog.open() } Accessible.name: "تغيير اسم " + accountData.alias }
                                             AppButton { objectName: "accountRemoveButton"; text: "حذف"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { win.pendingAccount = accountData; removeAccountDialog.open() } Accessible.name: "حذف " + accountData.alias }
                                         }
-                                        RowLayout {
-                                            visible: accountData.needsCode; Layout.fillWidth: true
-                                            LabelText { text: "رمز إكمال الدخول" }
-                                            AppField { id: accountCode; Layout.fillWidth: true; echoMode: TextInput.Password; Accessible.name: "رمز إكمال دخول " + accountData.alias; onAccepted: { backend.finishAccountLogin(accountData.id, text); clear() } }
-                                            AppButton { text: "إكمال الدخول"; enabled: accountCode.text.trim().length > 0; onClicked: { backend.finishAccountLogin(accountData.id, accountCode.text); accountCode.clear() } }
+                                        SubText {
+                                            objectName: "accountDeviceCode"; textFormat: Text.PlainText
+                                            visible: !!accountData.userCode; text: "رمز الجهاز: " + (accountData.userCode || "")
+                                            Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
                                         }
                                     }
                                 }
@@ -1577,9 +1594,7 @@ ApplicationWindow {
                         AppButton { objectName: "accountLoginMethodButton"; text: modelData.label; Layout.fillWidth: true; onClicked: backend.chooseAccountLoginMethod(win.accountLoginChoice.accountId, modelData.id); Accessible.name: "تسجيل " + (win.accountLoginChoice.alias || "") + " بواسطة " + text }
                         SubText {
                             objectName: "accountLoginMethodExplanation"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
-                            text: modelData.kind === "siwc" ? "Sign in with ChatGPT: لتسجيل الدخول؛ قراءة الحصة آليًا غير مدعومة حاليًا. استخدم إدارة الاستخدام في المتصفح."
-                                : "Codex legacy: يعيد تفويض الحساب لواجهة Codex القديمة. القراءة تخص حصة Codex، وليست ضمانًا لإتاحة بيانات الحصة."
-                                  + (modelData.usage.status === "unsupported" ? " لم يُتحقق من دعم قراءة الحصة في إصدار OpenCode المثبّت." : "")
+                            text: "أكمل تفويض الحساب في المتصفح. يعرض ورق الحصص التي يعيدها محرك الحسابات المدمج فقط."
                         }
                     }
                 }
@@ -1637,7 +1652,7 @@ ApplicationWindow {
                 text: backend.catalogBusy ? "جارٍ تحميل النماذج المتاحة…"
                       : (backend.catalogErrors[workerKind] || (workerKind === "deepgram"
                           ? "نماذج التفريغ ولغاتها من Deepgram. يمكن كتابة معرّف نموذج مخصص."
-                          : "النماذج من OpenCode المثبّت محليًا. يمكن كتابة معرّف نموذج مخصص."))
+                          : "النماذج من محرك ورق المضمّن. يمكن كتابة معرّف نموذج مخصص."))
             }
             RowLayout {
                 visible: workerKind !== "deepgram"
@@ -1648,7 +1663,7 @@ ApplicationWindow {
                 visible: workerKind !== "deepgram"
                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                 text: workerProvider.currentValue === "login"
-                      ? "يستخدم تسجيل الدخول المحفوظ داخل OpenCode (اشتراك ChatGPT وغيره) دون مفتاح، وفي مجلد بيانات OpenCode المشترك."
+                      ? "يستخدم حسابات الاشتراك المحفوظة داخل محرك ورق المدمج دون مفتاح API. سجّل الدخول من لوحة الحسابات."
                       : "يُشغَّل بمفتاح هذا العامل، وفي مجلد بيانات مستقل حتى لا تتعارض العمليات المتوازية. المعرّف المرسل: " + win.resolvedModel(workerProvider.currentValue, workerModel.editText)
             }
             RowLayout {

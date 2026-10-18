@@ -738,6 +738,9 @@ def test_terminal_kinds_never_rescheduled(env, tmp_path, kind):
 
 def test_opencode_quota_retries_hourly_then_terminal(env, tmp_path):
     store, cfg = env
+    # External non-subscription workers retain their bounded retry policy.
+    for worker in cfg.data["opencode_workers"]:
+        worker["model"] = "local/mock"
     ident = local_txt_job(store, cfg, tmp_path, {"opencode_limit_retries": 2})
     calls = []
     class FakeOC:

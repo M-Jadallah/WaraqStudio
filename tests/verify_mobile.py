@@ -20,7 +20,7 @@ from waraq.bridge import Bridge
 from waraq.config import Config
 from waraq.scheduler import Scheduler
 from waraq.store import Store, STAGES
-from test_account_bridge import UsageMonitorDouble, phone_usage_fixtures
+from test_account_bridge import EmbeddedAccountsDouble, phone_usage_fixtures
 
 
 def browser_checks(base, code, output):
@@ -163,12 +163,11 @@ def main():
         home = Path(directory)
         config, store = Config(home), Store(home / "tasks.sqlite3")
         scheduler = Scheduler(store, config, None)
-        scheduler.account_usage.stop()
-        usage = UsageMonitorDouble()
-        scheduler.account_usage = usage
+        scheduler.accounts.close()
+        scheduler.accounts = EmbeddedAccountsDouble()
         for fixture in phone_usage_fixtures():
             account = scheduler.accounts.create(fixture["alias"][:80])
-            usage.snapshots[account["id"]] = fixture["usage"]
+            scheduler.accounts.row(account["id"])["usage"] = fixture["usage"]
         scheduler.start = lambda: setattr(scheduler, "running", True)
         bridge = Bridge(store, config, None, scheduler)
         bridge.timer.stop()

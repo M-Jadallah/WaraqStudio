@@ -11,7 +11,7 @@ permissions:
 
 env:
   OPENCODE_TEST_VERSION: "2.0.32"
-  OPENCODE_COMPAT_TEST_VERSION: "2.0.27"
+  OPENCODE_TEST_EXECUTABLE: "build/embedded-runtime/opencode/opencode.exe"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -49,22 +49,14 @@ jobs:
       - name: Engine and service tests
         run: python -m pytest tests -v --tb=short
 
-      - name: Install OpenCode 2 for native acceptance
-        run: npm install -g "@opencode/cli@$OPENCODE_TEST_VERSION"
+      - name: Prepare pinned embedded runtime (Windows x64)
+        run: python scripts/prepare_embedded_engine.py
 
       - name: Native OpenCode 2 acceptance (local model, no paid requests)
         run: python tests/verify_opencode_v2.py
 
-      - name: Native managed account isolation and failover (local model)
-        run: python tests/verify_opencode_accounts.py
-
-      - name: Native quota reader contract (synthetic credentials, no model calls)
-        run: python tests/verify_opencode_accounts.py --usage-only
-
-      - name: Prior OpenCode quota reader compatibility (isolated tools)
-        run: |
-          npm install --prefix "$RUNNER_TEMP/waraq-opencode-compat" --no-audit --no-fund "@opencode/cli@$OPENCODE_COMPAT_TEST_VERSION"
-          python tests/verify_opencode_accounts.py --usage-only --executable "$RUNNER_TEMP/waraq-opencode-compat/node_modules/@opencode/cli/bin/opencode.exe"
+      - name: Embedded account engine native fixture (no OAuth or paid model)
+        run: python tests/verify_embedded_engine.py
 
       - name: Native UI interaction checks
         run: python tests/verify_ui.py

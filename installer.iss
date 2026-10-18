@@ -1,6 +1,6 @@
 ; Inno Setup script for WaraqStudio.
 ; The PyInstaller bundle under Windows\WaraqStudio already contains Python,
-; Qt, FFmpeg and yt-dlp, so installing it makes the app fully self-contained.
+; Qt, FFmpeg, yt-dlp and the pinned embedded account runtime, so installing it makes the app fully self-contained.
 ; Version is injected by CI: ISCC /DAppVersion=1.0.0 installer.iss
 
 #ifndef AppVersion
@@ -26,6 +26,13 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#AppExeName}
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=yes
+RestartApplications=no
+; Restart Manager asks the app to close normally so it can stop its owned children.
+; Account data is in LOCALAPPDATA and is never installed, overwritten or removed.
+CloseApplicationsFilter=WaraqStudio.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

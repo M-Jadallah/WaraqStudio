@@ -5,6 +5,8 @@ import time
 import sqlite3
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QUrl
@@ -272,6 +274,15 @@ def test_deleted_original_still_produces_word_through_scheduler(imports, tmp_pat
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
     monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
+    runtime = Mock(executable="opencode.exe", url="http://127.0.0.1:1234", password="synthetic", env={}, instance_id="instance")
+    runtime.create_session.return_value = "ses_test"
+    runtime.inactive.return_value = True
+    accounts = Mock(supervisor=SimpleNamespace(ensure=lambda *a: runtime))
+    accounts.readiness.return_value = {"ready": True}
+    accounts.resolve_attempt.return_value = {"failure": None}
+    accounts.begin_attempt.return_value = {"attempt_id": "attempt", "account_id": "opaque", "alias": "Account"}
+    scheduler.accounts = accounts
+    scheduler.opencode = services.OpenCode(accounts=accounts)
     calls = []
     def run(command, work, *args):
         calls.append(command)
@@ -297,3 +308,4 @@ def test_deleted_original_still_produces_word_through_scheduler(imports, tmp_pat
     assert not upstream
     assert Path(current["document"]).is_file()
     assert Path(current["transcript"]).read_bytes() == original
+    assert store.db.execute("SELECT outcome FROM execution_attempts").fetchone()[0] == "completed"

@@ -75,7 +75,10 @@ def add_job(store, config):
 
 def test_phone_usage_projection_is_cached_private_and_has_session_display_keys(remote_env, monkeypatch):
     bridge, remote, store, config, client, request, pair, base, app = remote_env
-    accounts = bridge.scheduler.accounts
+    from test_account_bridge import EmbeddedAccountsDouble
+    bridge.scheduler.accounts.close()
+    accounts = EmbeddedAccountsDouble()
+    bridge.scheduler.accounts = accounts
     first = accounts.create("اسم مشترك")
     second = accounts.create("اسم مشترك")
     # Native identity/auth fields must not be projected even if the cache fixture contains them.
@@ -85,11 +88,12 @@ def test_phone_usage_projection_is_cached_private_and_has_session_display_keys(r
                              "token": "PRIVATE_TOKEN"},
                 "weekly": {"status": "unavailable", "remainingPercent": None, "resetsAt": None, "windowMinutes": None},
                 "email": "PRIVATE_EMAIL", "identity": "PRIVATE_IDENTITY", "error": "PRIVATE_ERROR"}
-    monkeypatch.setattr(bridge.scheduler.account_usage, "public_snapshot", lambda ident: snapshot)
+    accounts.row(first["id"])["usage"] = snapshot
+    accounts.row(second["id"])["usage"] = snapshot
     def forbidden(*args, **kwargs):
         raise AssertionError("Phone polling cannot fetch account usage")
-    monkeypatch.setattr(bridge.scheduler.account_usage, "request", forbidden)
-    monkeypatch.setattr(bridge.scheduler.account_usage, "schedule_due", forbidden)
+    monkeypatch.setattr(accounts, "refresh_usage", forbidden)
+    monkeypatch.setattr(accounts, "refresh", forbidden)
     bridge._account_usage_timer.stop()
     pair()
     state = request("/api/state").json

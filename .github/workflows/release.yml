@@ -16,7 +16,7 @@ permissions:
 
 env:
   OPENCODE_TEST_VERSION: "2.0.32"
-  OPENCODE_COMPAT_TEST_VERSION: "2.0.27"
+  OPENCODE_TEST_EXECUTABLE: "build/embedded-runtime/opencode/opencode.exe"
 
 defaults:
   run:
@@ -56,22 +56,14 @@ jobs:
       - name: Engine and service tests
         run: python -m pytest tests -v --tb=short
 
-      - name: Install OpenCode 2 for native acceptance
-        run: npm install -g "@opencode/cli@$OPENCODE_TEST_VERSION"
+      - name: Prepare pinned embedded runtime (Windows x64)
+        run: python scripts/prepare_embedded_engine.py
 
       - name: Native OpenCode 2 acceptance (local model, no paid requests)
         run: python tests/verify_opencode_v2.py
 
-      - name: Native managed account isolation and failover (local model)
-        run: python tests/verify_opencode_accounts.py
-
-      - name: Native quota reader contract (synthetic credentials, no model calls)
-        run: python tests/verify_opencode_accounts.py --usage-only
-
-      - name: Prior OpenCode quota reader compatibility (isolated tools)
-        run: |
-          npm install --prefix "$RUNNER_TEMP/waraq-opencode-compat" --no-audit --no-fund "@opencode/cli@$OPENCODE_COMPAT_TEST_VERSION"
-          python tests/verify_opencode_accounts.py --usage-only --executable "$RUNNER_TEMP/waraq-opencode-compat/node_modules/@opencode/cli/bin/opencode.exe"
+      - name: Embedded account engine native fixture (no OAuth or paid model)
+        run: python tests/verify_embedded_engine.py
 
       - name: Native UI interaction checks
         run: python tests/verify_ui.py
@@ -149,8 +141,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
-      - name: Install OpenCode 2 for packaged app checks
-        run: npm install -g "@opencode/cli@$OPENCODE_TEST_VERSION"
+      - name: Prepare pinned embedded runtime (Windows x64)
+        run: python scripts/prepare_embedded_engine.py
 
       - name: Build Windows bundle (PyInstaller)
         run: python build_windows.py
@@ -160,14 +152,8 @@ jobs:
           test -f Windows/WaraqStudio/WaraqStudio.exe
           ls Windows/WaraqStudio | head -20
 
-      - name: Smoke test bundled exe (environment check)
-        run: |
-          ./Windows/WaraqStudio/WaraqStudio.exe --check-environment env-report.json
-          cat env-report.json
-          python -c "import json, os; d=json.load(open('env-report.json', encoding='utf-8')); assert d['version']==os.environ['VERSION'], (d['version'], os.environ['VERSION']); assert d['ffmpeg_exists'], d; assert d['mobile']['pwa_assets'], d; assert d.get('opencode_version')==os.environ['OPENCODE_TEST_VERSION'], d.get('opencode_error', d)"
-
-      - name: Smoke test bundled exe (UI launch)
-        run: ./Windows/WaraqStudio/WaraqStudio.exe --smoke
+      - name: Clean environment bundled engine and UI startup
+        run: python scripts/verify_clean_package.py
 
       - name: Package portable bundle
         shell: pwsh
@@ -252,9 +238,9 @@ jobs:
           - اجتازت بوابة الخادم اختبار Docker Compose وPostgreSQL على Ubuntu قبل إتاحة بناء الإصدار.
 
           ## ملاحظات
-          - يدعم هذا الإصدار OpenCode 2 مع اكتشاف ملفه التنفيذي تلقائيًا، وصيغة مستوى التفكير الجديدة، وخوادم مستقلة للعمال. اترك مسار OpenCode في الإعدادات بقيمة \`opencode\` للاكتشاف التلقائي.
+          - تستخدم حسابات ChatGPT محركًا خاصًا مضمّنًا، مع خادم مشترك وجلسة مستقلة لكل محاولة. لا يلزم تثبيت مدير حسابات أو OpenCode أو Node.js خارجيًا لهذا المسار.
           - اجتاز المُثبّت اختبار التثبيت والتشغيل والإزالة على Windows داخل GitHub Actions قبل النشر، واختُبر OpenCode 2 بمزود محلي دون طلبات مدفوعة.
-          - إنتاج Word يحتاج OpenCode وإعداد مزوّد النموذج ومهارة التنسيق المستخدمة؛ تنزيل YouTube يحتاج Node.js أو Deno مناسبًا. هذه الأدوات وحساباتها خارج الحزمة.
+          - تتضمن حزمة Windows x64 محرك الحسابات وOpenCode 2.0.32 وNode.js 24.22.0. تبقى موافقة دخول الحساب وإعداد مزود API ومهارات Word على صاحب الجهاز.
           - يمكنك تحديد عناصر الطابور وحذف سجلاتها مع الاحتفاظ بالملفات. التفريغات TXT المستوردة تعرض مرحلة Word وحدها.
           - تظهر خيارات قالب البرومبت والمادة ومسار النتائج أعلى صفحة إضافة المصدر، قبل استيراد ملفات TXT أو مجلد التفريغات.
           - خُفّضت كلفة تحديث مركز العمليات للطوابير الكبيرة، مع فحص تمرير أصلي بالعجلة وشريط التمرير حتى 2000 عنصر.

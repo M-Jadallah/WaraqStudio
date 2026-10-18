@@ -54,18 +54,31 @@ def main():
         lock.unlock()
         return 3
     if args.check_environment:
+        progress_path = Path(args.check_environment + ".progress")
+        progress_path.write_text("imports", encoding="utf-8")
         import json
-        import shutil
+        progress_path.write_text("import-imageio", encoding="utf-8")
         import imageio_ffmpeg
+        progress_path.write_text("import-ytdlp", encoding="utf-8")
         import yt_dlp
+        progress_path.write_text("import-ejs", encoding="utf-8")
         import yt_dlp_ejs
+        progress_path.write_text("import-keyring", encoding="utf-8")
         import keyring
+        progress_path.write_text("import-openpyxl", encoding="utf-8")
         import openpyxl
+        progress_path.write_text("import-requests", encoding="utf-8")
         import requests
-        from waraq.services import opencode_version, resolve_opencode
-        report = {"version": __version__, "ffmpeg": str(imageio_ffmpeg.get_ffmpeg_exe()), "yt_dlp": yt_dlp.version.__version__,
-                  "keyring": type(keyring.get_keyring()).__name__, "node": shutil.which("node"),
+        from waraq.embedded_runtime import PackagedPayload, EmbeddedRuntimeSupervisor
+        from waraq.services import opencode_version
+        progress_path.write_text("ffmpeg", encoding="utf-8")
+        ffmpeg_path = str(imageio_ffmpeg.get_ffmpeg_exe())
+        progress_path.write_text("keyring", encoding="utf-8")
+        keyring_backend = type(keyring.get_keyring()).__name__
+        report = {"version": __version__, "ffmpeg": ffmpeg_path, "yt_dlp": yt_dlp.version.__version__,
+                  "keyring": keyring_backend,
                   "requests": requests.__version__, "openpyxl": openpyxl.__version__, "ejs": True}
+        progress_path.write_text("mobile", encoding="utf-8")
         from flask import Flask
         from waitress import create_server
         import qrcode
@@ -81,12 +94,31 @@ def main():
         report["internet_connector"] = callable(internet_connect)
         report["ffmpeg_exists"] = Path(report["ffmpeg"]).is_file()
         try:
-            executable = resolve_opencode(config.data["opencode_executable"])
-            report["opencode"] = str(executable)
-            report["opencode_version"] = opencode_version(executable)
-        except Exception as exc:
-            report["opencode_error"] = str(exc)
+            progress_path.write_text("embedded-integrity", encoding="utf-8")
+            payload = PackagedPayload()
+            report["embedded_integrity"] = True
+            report["node"] = str(payload.node)
+            report["node_version"] = payload.manifest["node_version"]
+            report["opencode"] = str(payload.opencode)
+            progress_path.write_text("embedded-version", encoding="utf-8")
+            report["opencode_version"] = opencode_version(payload.opencode)
+            package = json.loads((payload.root / "plugin" / "package.json").read_text(encoding="utf-8"))
+            report["plugin_version"] = package["version"]
+            report["embedded_platform"] = payload.manifest["platform"]
+            progress_path.write_text("embedded-engine-start", encoding="utf-8")
+            supervisor = EmbeddedRuntimeSupervisor(config, payload_root=payload.root)
+            try:
+                runtime = supervisor.ensure()
+                health = runtime.rpc("health").get("data", {})
+                report["embedded_engine_ready"] = health.get("apiVersion") == 1 and health.get("storage") == "dpapi"
+                report["plugin_version"] = health.get("pluginVersion", report["plugin_version"])
+            finally:
+                supervisor.close()
+        except Exception:
+            report["embedded_integrity"] = False
+            report["opencode_error"] = "Embedded runtime is missing or failed integrity validation"
         Path(args.check_environment).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        progress_path.unlink(missing_ok=True)
         lock.unlock()
         return 0
     try:

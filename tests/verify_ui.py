@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from waraq.embedded_accounts import EmbeddedAccountService
 from PySide6.QtCore import QObject, QPoint, QPointF, QUrl, QMimeData, qInstallMessageHandler, QMetaObject, Q_ARG
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtQml import QQmlApplicationEngine
@@ -40,7 +41,7 @@ def main():
             {"id": "nova-3-general", "languages": ["ar", "ar-JO", "en"]},
             {"id": "whisper-large", "languages": ["ar", "en"]},
         ]
-        bridge_module.opencode_models = lambda executable, context="": [
+        EmbeddedAccountService.models = lambda self: [
             "openai/gpt-6-astra", "openai/gpt-6-sol", "opencode/big-pickle"
         ]
         scheduler = Scheduler(store, config, keys)
