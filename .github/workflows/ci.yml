@@ -59,7 +59,8 @@ jobs:
         run: python tests/verify_embedded_engine.py
 
       - name: Native UI interaction checks
-        run: python tests/verify_ui.py
+        timeout-minutes: 5
+        run: python -u tests/verify_ui.py
 
       - name: Native account management and quota UI checks
         run: python tests/verify_accounts_ui.py

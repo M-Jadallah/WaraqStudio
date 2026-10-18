@@ -1,4 +1,5 @@
 """Native Qt interaction checks; synthetic entries exist only in a temp test database."""
+import faulthandler
 import json
 import os
 import socket
@@ -77,6 +78,8 @@ def main():
                         bottom = content.property("y") + label.property("y") + label.property("height")
                         assert bottom <= card.property("height") + 1, (name, bottom, card.property("height"))
         def click(name):
+            if os.environ.get("CI"):
+                print("Native UI action:", name, flush=True)
             item = find(root.contentItem(), name)
             assert item is not None, name
             p = item.mapToScene(item.boundingRect().center())
@@ -710,4 +713,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(90, repeat=True)
+    try:
+        main()
+    finally:
+        faulthandler.cancel_dump_traceback_later()
