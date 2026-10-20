@@ -9,7 +9,8 @@ TextField {
     property color fieldText: theme.ink
     property real uiScale: 1.0
     implicitHeight: Math.round(36 * uiScale)
-    font.family: "Segoe UI"
+    font.family: control.theme.fontFamily
+    font.weight: control.theme.fontWeight
     font.pixelSize: Math.max(12, Math.round(14 * uiScale))
     color: fieldText
     placeholderTextColor: theme.muted

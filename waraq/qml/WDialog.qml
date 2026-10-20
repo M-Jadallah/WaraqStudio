@@ -10,7 +10,8 @@ Dialog {
     topPadding: 12
     modal: true
     focus: true
-    font.family: "Segoe UI"
+    font.family: control.theme.fontFamily
+    font.weight: control.theme.fontWeight
     font.pixelSize: theme.fs(14)
     palette.window: theme.panel
     palette.windowText: theme.ink
@@ -23,7 +24,7 @@ Dialog {
     background: Rectangle { color: control.theme.panel; border.color: control.theme.line; radius: 10 }
     header: Label {
         text: control.title; visible: control.title.length > 0
-        color: control.theme.ink; font.family: "Segoe UI"; font.pixelSize: control.theme.fs(19); font.bold: true
+        color: control.theme.ink; font.family: control.theme.fontFamily; font.weight: control.theme.fontWeight; font.pixelSize: control.theme.fs(19);
         horizontalAlignment: Text.AlignRight; wrapMode: Text.WordWrap
         padding: 18
         background: Rectangle { color: control.theme.inset; radius: 10 }

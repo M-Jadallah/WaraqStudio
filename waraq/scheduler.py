@@ -160,7 +160,7 @@ class Scheduler:
                     if getattr(exc, "reason", "") != "ATTEMPT_NOT_FOUND":
                         raise
             self.store.clear_execution_hold(job_id, held)
-        return self.accounts.recheck(ident) if ident else self.accounts.refresh()
+        return self.accounts.recheck(ident)
 
     def shutdown(self):
         with self.lock:

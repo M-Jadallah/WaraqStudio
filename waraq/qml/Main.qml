@@ -27,6 +27,7 @@ ApplicationWindow {
     readonly property color accent: visualTheme.accent
     Theme { id: visualTheme; dark: win.dark; scale: win.uiScale }
     readonly property real contentUnits: (width - navRail.width - 32) / uiScale
+    readonly property bool shortOperations: page === 0 && height / uiScale < 600
     readonly property int serviceColumns: contentUnits >= 1100 ? 3 : contentUnits >= 850 ? 2 : 1
     property int sourceTab: 0
     property int settingsTab: 0
@@ -157,7 +158,8 @@ ApplicationWindow {
     palette.highlight: accent
     palette.highlightedText: visualTheme.accentInk
     onClosing: function(close) { close.accepted = backend.prepareClose() }
-    font.family: "Segoe UI"
+    font.family: visualTheme.fontFamily
+    font.weight: visualTheme.fontWeight
     font.pixelSize: win.fs(14)
 
     function matches(job) {
@@ -386,7 +388,8 @@ ApplicationWindow {
 
     component LabelText: Text {
         color: win.ink
-        font.family: "Segoe UI"
+        font.family: visualTheme.fontFamily
+        font.weight: visualTheme.fontWeight
         font.pixelSize: win.fs(14)
         horizontalAlignment: Text.AlignRight
         elide: Text.ElideRight
@@ -421,7 +424,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 SubText { text: backend.workers.filter(function(w) { return w.stage === group.stage }).length + " عامل" }
                 Item { Layout.fillWidth: true }
-                LabelText { text: group.heading; font.weight: Font.DemiBold; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                LabelText { text: group.heading; font.weight: visualTheme.fontWeight; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                 Image { source: "icons/" + group.symbol + (win.dark ? "" : "-active") + ".svg"; Layout.preferredWidth: 24; Layout.preferredHeight: 24 }
             }
             Rule {}
@@ -442,7 +445,7 @@ ApplicationWindow {
                         objectName: "workerContent"
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                         anchors.margins: win.rs(10); spacing: win.rs(6)
-                        LabelText { text: row.name; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                        LabelText { text: row.name; font.weight: visualTheme.fontWeight; Layout.fillWidth: true }
                         SubText {
                             objectName: "workerStatus"
                             Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
@@ -484,19 +487,19 @@ ApplicationWindow {
             spacing: 0
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: headerContent.implicitHeight + 28
+                Layout.preferredHeight: headerContent.implicitHeight + (win.shortOperations ? 8 : 28)
                 color: win.bg
                 ColumnLayout {
                     id: headerContent
                     anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                    anchors.margins: 16; spacing: 8
+                    anchors.margins: 16; anchors.topMargin: win.shortOperations ? 4 : 16; spacing: win.shortOperations ? 2 : 8
                     RowLayout {
                         Layout.fillWidth: true
                         SubText { text: backend.running ? "● المحرك يعمل" : "○ المحرك متوقف"; color: backend.running ? visualTheme.success : win.muted }
                         Item { Layout.fillWidth: true }
                         ColumnLayout {
                             Layout.fillWidth: true; spacing: 2
-                            LabelText { text: win.pageNames[win.page]; font.pixelSize: win.fs(22); font.weight: Font.DemiBold; Layout.fillWidth: true }
+                            LabelText { text: win.pageNames[win.page]; font.pixelSize: win.fs(22); font.weight: visualTheme.fontWeight; Layout.fillWidth: true }
                             SubText { text: win.pageDescriptions[win.page]; Layout.fillWidth: true }
                         }
                     }
@@ -537,11 +540,13 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 Layout.minimumWidth: 0
                 Layout.margins: 16
+                Layout.topMargin: win.shortOperations ? 6 : 16
+                Layout.bottomMargin: win.shortOperations ? 6 : 16
                 currentIndex: win.page
 
                 // Operations
                 ColumnLayout {
-                    spacing: 12
+                    spacing: win.shortOperations ? 4 : 12
                     GridLayout {
                         Layout.fillWidth: true
                         columns: 4
@@ -556,10 +561,14 @@ ApplicationWindow {
                             delegate: Box {
                                 required property var modelData
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: Math.round(72 * win.uiScale)
-                                ColumnLayout {
-                                    anchors.fill: parent; anchors.margins: 12; spacing: 3
-                                    SubText { text: modelData.label; Layout.alignment: Qt.AlignRight }
+                                Layout.preferredHeight: win.shortOperations ? statContent.implicitHeight + 12 : Math.round(72 * win.uiScale)
+                                GridLayout {
+                                    id: statContent
+                                    anchors.fill: parent; anchors.margins: win.shortOperations ? 6 : 12
+                                    columns: win.shortOperations ? 2 : 1
+                                    layoutDirection: Qt.RightToLeft
+                                    columnSpacing: 8; rowSpacing: 3
+                                    SubText { text: modelData.label; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
                                     LabelText { text: modelData.value; font.pixelSize: win.fs(24); color: win.dark ? modelData.color : win.ink; Layout.alignment: Qt.AlignRight }
                                 }
                             }
@@ -571,7 +580,7 @@ ApplicationWindow {
                         AppButton { text: "تقرير Excel"; onClicked: backend.exportReport() }
                         Item { Layout.fillWidth: true }
                         AppField { objectName: "queueSearch"; Layout.preferredWidth: Math.min(240, win.width * 0.2); Layout.minimumWidth: 0; placeholderText: "بحث في المهام"; horizontalAlignment: Text.AlignRight; onTextChanged: win.search = text; Accessible.name: "بحث في المهام" }
-                        LabelText { text: "طابور المعالجة"; font.pixelSize: win.fs(18); font.weight: Font.DemiBold }
+                        LabelText { text: "طابور المعالجة"; font.pixelSize: win.fs(18); font.weight: visualTheme.fontWeight }
                     }
                     RowLayout {
                         Layout.alignment: Qt.AlignRight
@@ -632,7 +641,7 @@ ApplicationWindow {
                                 SubText { text: "التفاصيل"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignLeft }
                                 SubText { text: "الحالة"; Layout.preferredWidth: 140 * win.uiScale }
                                 SubText { text: "التقدم"; Layout.preferredWidth: 90 * win.uiScale }
-                                SubText { text: "مراحل المعالجة"; Layout.preferredWidth: 170 * win.uiScale; visible: win.contentUnits >= 850 }
+                                SubText { text: "مراحل المعالجة"; Layout.preferredWidth: 408 * win.uiScale; visible: win.contentUnits >= 1100 }
                                 SubText { text: "الفيديو / الملف"; Layout.fillWidth: true; Layout.minimumWidth: 0 }
                                 SubText { text: "تحديد"; Layout.preferredWidth: 40; font.pixelSize: win.fs(11) }
                             }
@@ -647,11 +656,12 @@ ApplicationWindow {
                                 delegate: Rectangle {
                                     objectName: "queueRow-" + row.id
                                     width: jobsList.width
-                                    height: win.matches(row) ? Math.max(win.rh(settings.ui_compact ? 56 : 64), jobTitle.implicitHeight + win.fs(12) + 22) : 0
+                                    height: win.matches(row) ? Math.max(win.rh(settings.ui_compact ? 56 : 64), queueContent.implicitHeight + 2 * win.rs(8)) : 0
                                     visible: height > 0
                                     color: row && win.selectedQueueIds.indexOf(row.id) >= 0 ? visualTheme.hover : rowMouse.containsMouse ? visualTheme.hover : (index % 2 === 0 ? win.panel : visualTheme.inset)
                                     MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.openJob(row.id); cursorShape: Qt.PointingHandCursor }
                                     RowLayout {
+                                        id: queueContent
                                         anchors.fill: parent; anchors.leftMargin: win.rs(12); anchors.rightMargin: win.rs(12); spacing: win.rs(10)
                                         AppButton { text: "عرض"; implicitWidth: 64; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: win.openJob(row.id) }
                                         ColumnLayout {
@@ -664,26 +674,42 @@ ApplicationWindow {
                                             AppProgress { Layout.fillWidth: true; from: 0; to: 100; value: Math.max(0, row.progress); indeterminate: row.status === "running" && row.progress < 0 }
                                             SubText { text: row.progress >= 0 ? Math.round(row.progress) + "٪" : row.status === "running" ? "جارٍ التنفيذ" : "—"; Layout.fillWidth: true }
                                         }
-                                        RowLayout {
-                                            visible: win.contentUnits >= 850
-                                            Layout.preferredWidth: 170 * win.uiScale; spacing: 6
-                                            Repeater {
-                                                model: row.steps.slice().reverse()
-                                                delegate: Rectangle {
-                                                    required property var modelData
-                                                    objectName: "queueStage-" + row.id + "-" + modelData.name
-                                                    Layout.fillWidth: true; height: Math.max(18, win.rh(26)); radius: 5
-                                                    color: modelData.status === "completed" ? (visualTheme.inset) : (visualTheme.inset)
-                                                    border.color: modelData.status === "running" ? visualTheme.accent : "transparent"
-                                                    LabelText { anchors.centerIn: parent; text: modelData.label; font.pixelSize: win.fs(11); color: win.stateColor(modelData.status) }
-                                                }
-                                            }
+                                        Item {
+                                            id: stageColumn
+                                            objectName: "queueStageColumn-" + row.id
+                                            visible: win.contentUnits >= 1100
+                                            Layout.preferredWidth: 408 * win.uiScale
+                                            Layout.preferredHeight: stageFlow.implicitHeight
                                         }
                                         ColumnLayout {
+                                            id: taskHeading
+                                            objectName: "queueTaskHeading-" + row.id
                                             Layout.fillWidth: true
                                             Layout.minimumWidth: 0
-                                            LabelText { id: jobTitle; text: row.title; Layout.fillWidth: true; font.weight: Font.DemiBold; wrapMode: Text.WrapAnywhere; maximumLineCount: 2 }
-                                            SubText { text: win.contentUnits < 850 ? row.steps.map(function(step) { return step.label }).join(" · ") : "#" + String(row.position).padStart(3,"0") + "   ·   " + row.video_id; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
+                                            spacing: win.rs(4)
+                                            LabelText { id: jobTitle; text: row.title; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; maximumLineCount: 2 }
+                                            SubText { text: "#" + String(row.position).padStart(3,"0") + "   ·   " + row.video_id; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
+                                        }
+                                        Flow {
+                                            id: stageFlow
+                                            objectName: "queueStages-" + row.id
+                                            // The same badge instances move with the responsive layout.
+                                            parent: win.contentUnits >= 1100 ? stageColumn : taskHeading
+                                            onParentChanged: { x = 0; y = 0 }
+                                            width: parent.width
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: implicitHeight
+                                            layoutDirection: Qt.RightToLeft
+                                            spacing: win.rs(6)
+                                            Repeater {
+                                                model: row.steps
+                                                delegate: StageBadge {
+                                                    required property var modelData
+                                                    objectName: "queueStage-" + row.id + "-" + modelData.name
+                                                    theme: visualTheme
+                                                    step: modelData
+                                                }
+                                            }
                                         }
                                         AppCheck {
                                             objectName: "selectJob-" + row.id
@@ -764,7 +790,7 @@ ApplicationWindow {
                                     AppButton { objectName: "sourceYoutubeTab"; text: "YouTube"; primary: win.sourceTab === 0; Layout.fillWidth: true; onClicked: win.sourceTab = 0 }
                                     AppButton { objectName: "sourceLocalTab"; text: "TXT / صوت"; primary: win.sourceTab === 1; Layout.fillWidth: true; onClicked: win.sourceTab = 1 }
                                 }
-                                LabelText { visible: win.sourceTab === 1; text: "تفريغات جاهزة إلى Word"; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                                LabelText { visible: win.sourceTab === 1; text: "تفريغات جاهزة إلى Word"; font.weight: visualTheme.fontWeight; Layout.fillWidth: true }
                                 ActionRow {
                                     visible: win.sourceTab === 1
                                     AppButton { objectName: "importTranscriptsButton"; text: "إضافة ملفات TXT"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscripts(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
@@ -773,7 +799,7 @@ ApplicationWindow {
                                 }
                                 SubText { visible: win.sourceTab === 1; text: "يمكنك أيضًا إفلات ملفات TXT في التطبيق. تُنتج Word بالقالب والمجلد المحددين أعلاه، دون تنزيل أو تفريغ صوتي. مسار النتائج هو الافتراضي للمهام الجديدة؛ مجلد المادة ينظّم نسخ المكتبة."; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight }
                                 Rectangle { Layout.fillWidth: true; height: 1; color: win.line }
-                                LabelText { visible: win.sourceTab === 0; text: "رابط YouTube"; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                                LabelText { visible: win.sourceTab === 0; text: "رابط YouTube"; font.weight: visualTheme.fontWeight; Layout.fillWidth: true }
                                 ColumnLayout {
                                     visible: win.sourceTab === 0; Layout.fillWidth: true; spacing: 10
                                     AppButton { objectName: "discoverButton"; text: backend.busy ? "جارٍ القراءة…" : "قراءة المصدر"; primary: true; enabled: !backend.busy && urlField.text.length > 0; onClicked: backend.discover(urlField.text, forceRefresh.checked) }
@@ -1098,7 +1124,7 @@ ApplicationWindow {
                             visible: win.contentUnits >= 850
                             ColumnLayout {
                                 anchors.fill: parent; anchors.margins: 10
-                                LabelText { text: "مجلدات المواد"; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                                LabelText { text: "مجلدات المواد"; font.weight: visualTheme.fontWeight; Layout.fillWidth: true }
                                 AppButton { text: "كل المجلدات"; Layout.fillWidth: true; onClicked: backend.setFilesFolder("all") }
                                 PinList {
                                     Layout.fillWidth: true; Layout.fillHeight: true; model: backend.folders
@@ -1241,7 +1267,7 @@ ApplicationWindow {
                                         ColumnLayout {
                                             Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: 6
                                             LabelText { text: "امسح QR أو اكتب أحد الروابط في متصفح الهاتف، ثم أدخل رمز الدخول:"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
-                                            LabelText { objectName: "remotePairCode"; text: win.remoteState.code; font.pixelSize: win.fs(28); font.letterSpacing: 4; font.bold: true; Layout.fillWidth: true; Accessible.name: "رمز الدخول " + text }
+                                            LabelText { objectName: "remotePairCode"; text: win.remoteState.code; font.pixelSize: win.fs(28); font.letterSpacing: 4; font.weight: visualTheme.fontWeight; Layout.fillWidth: true; Accessible.name: "رمز الدخول " + text }
                                             SubText { text: "صالح حتى " + (win.remoteState.codeExpires || "") + " · الأجهزة المتصلة: " + win.remoteState.clients; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                                             Repeater {
                                                 model: win.remoteState.urls
@@ -1434,7 +1460,7 @@ ApplicationWindow {
                                     SubText { text: "المتغيرات: {transcript_path}   {output_path}   {title}   {position}"; Layout.fillWidth: true }
                                     ScrollView {
                                         Layout.fillWidth: true; Layout.fillHeight: true
-                                        TextArea { id: promptField; objectName: "promptField"; text: settings.prompt; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: win.fs(14); horizontalAlignment: Text.AlignRight; background: Rectangle { color: visualTheme.inset; radius: 8; border.color: win.line } }
+                                        TextArea { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; id: promptField; objectName: "promptField"; text: settings.prompt; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: win.fs(14); horizontalAlignment: Text.AlignRight; background: Rectangle { color: visualTheme.inset; radius: 8; border.color: win.line } }
                                     }
                                 }
                             }
@@ -1474,14 +1500,16 @@ ApplicationWindow {
                     Item { Layout.fillWidth: true }
                     ColumnLayout {
                         visible: railOpen; spacing: 0
-                        Text { text: "وَرَق"; color: visualTheme.railInk; font.family: "Segoe UI"; font.pixelSize: win.fs(28); font.weight: Font.Bold; Layout.alignment: Qt.AlignRight }
-                        Text { font.family: "Segoe UI"; text: "WARAQ STUDIO"; color: visualTheme.railActive; font.pixelSize: win.fs(10); font.letterSpacing: 2; Layout.alignment: Qt.AlignRight }
+                        Text { text: "وَرَق"; color: visualTheme.railInk; font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; font.pixelSize: win.fs(28);  Layout.alignment: Qt.AlignRight }
+                        Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; text: "WARAQ STUDIO"; color: visualTheme.railActive; font.pixelSize: win.fs(10); font.letterSpacing: 2; Layout.alignment: Qt.AlignRight }
                     }
-                    Text { font.family: "Segoe UI"; visible: !railOpen; text: "و"; color: visualTheme.railActive; font.pixelSize: win.fs(24); font.weight: Font.Bold }
+                    Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: !railOpen; text: "و"; color: visualTheme.railActive; font.pixelSize: win.fs(24);  }
                 }
                 Repeater {
                     model: win.pageNames
                     delegate: Button {
+                        font.family: visualTheme.fontFamily
+                        font.weight: visualTheme.fontWeight
                         required property string modelData
                         required property int index
                         objectName: "nav" + index
@@ -1496,9 +1524,10 @@ ApplicationWindow {
                         contentItem: RowLayout {
                             spacing: 10
                             Text {
-                                font.family: "Segoe UI"
+                                font.family: visualTheme.fontFamily
+                                font.weight: visualTheme.fontWeight
                                 Layout.fillWidth: true; visible: railOpen
-                                text: modelData; font.pixelSize: win.fs(14); font.weight: win.page === index ? Font.DemiBold : Font.Normal
+                                text: modelData; font.pixelSize: win.fs(14);
                                 color: win.page === index ? visualTheme.railSelectedInk : visualTheme.railInk
                                 horizontalAlignment: Text.AlignRight; elide: Text.ElideRight
                             }
@@ -1508,8 +1537,8 @@ ApplicationWindow {
                 }
                 Item { Layout.fillHeight: true }
                 Rectangle { Layout.fillWidth: true; height: 1; color: visualTheme.line; visible: railOpen }
-                Text { font.family: "Segoe UI"; visible: railOpen; text: "سير عملك، تحت سيطرتك"; color: visualTheme.railMuted; font.pixelSize: win.fs(12); Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight; Layout.topMargin: 10 }
-                Text { font.family: "Segoe UI"; visible: railOpen; text: "نسخة محلية  ·  " + backend.version; color: visualTheme.railMuted; font.pixelSize: win.fs(11); Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 4 }
+                Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: railOpen; text: "سير عملك، تحت سيطرتك"; color: visualTheme.railMuted; font.pixelSize: win.fs(12); Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight; Layout.topMargin: 10 }
+                Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: railOpen; text: "نسخة محلية  ·  " + backend.version; color: visualTheme.railMuted; font.pixelSize: win.fs(11); Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 4 }
             }
         }
     }
@@ -1550,7 +1579,7 @@ ApplicationWindow {
         anchors.bottom: parent.bottom; anchors.bottomMargin: 20; anchors.horizontalCenter: parent.horizontalCenter
         width: Math.min(850, win.width - 100); height: toastLabel.implicitHeight + 36
         radius: 10; color: visualTheme.panel; border.color: win.toastError ? visualTheme.warning : visualTheme.success
-        Text { font.family: "Segoe UI"; id: toastLabel; anchors.fill: parent; anchors.margins: 18; color: win.ink; text: win.toastText; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight; font.pixelSize: win.fs(14) }
+        Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; id: toastLabel; anchors.fill: parent; anchors.margins: 18; color: win.ink; text: win.toastText; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight; font.pixelSize: win.fs(14) }
         TapHandler { onTapped: win.toastText = "" }
     }
 
@@ -1610,7 +1639,7 @@ ApplicationWindow {
             ScrollView {
                 id: logScroll
                 Layout.fillWidth: true; Layout.fillHeight: true
-                TextArea {
+                TextArea { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight;
                     id: jobLog
                     readOnly: true; selectByMouse: true; color: win.muted; wrapMode: TextEdit.Wrap; font.pixelSize: win.fs(12)
                     background: Rectangle { color: win.bg; radius: 8 }
@@ -1621,7 +1650,7 @@ ApplicationWindow {
     AppDialog {
         id: retryWarning; objectName: "retryWarning"; anchors.centerIn: parent; width: Math.min(500, win.width - 48); modal: true; title: "إعادة المحاولة"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "إعادة المحاولة"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        Label { width: parent.width; wrapMode: Text.WordWrap; text: selectedJob.status === "uncertain" && selectedJob.current === "opencode"
+        Label { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; width: parent.width; wrapMode: Text.WordWrap; text: selectedJob.status === "uncertain" && selectedJob.current === "opencode"
                 ? "جلسة ChatGPT السابقة لم يُتحقق من توقفها. افتح صفحة العمال واضغط «فحص الجلسة السابقة» للحساب؛ بعد تأكيد توقفها يمكنك إعادة المحاولة."
                 : selectedJob.status === "uncertain" ? "الطلب السابق لدى Deepgram قد يكون اكتمل. إعادة الإرسال قد تسبب تكلفة إضافية. هل تريد المحاولة؟"
                 : (selectedJob.current === "download" && selectedJob.status === "blocked") ? "توقف التنزيل لأن YouTube رفض الوصول أو لنقص المساحة. أصلح السبب أولًا (الكوكيز أو المساحة) ثم أعد المحاولة؛ سيُرفع التوقف الآلي عن خدمة التنزيل ويُعاد العمل دون المساس بالإيقاف اليدوي."
@@ -1632,7 +1661,7 @@ ApplicationWindow {
     AppDialog {
         id: bulkRetry; objectName: "bulkRetry"; anchors.centerIn: parent; width: Math.min(530, win.width - 48); modal: true; title: "إعادة محاولة جماعية"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "إعادة " + (bulkGroup.ids || []).length + " مهمة"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        Label { width: parent.width; wrapMode: Text.WordWrap
+        Label { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; width: parent.width; wrapMode: Text.WordWrap
             text: bulkGroup.status === "uncertain" && bulkGroup.stage === "opencode"
                 ? "تحتاج جلسات ChatGPT غير المؤكدة إلى إثبات توقفها أولًا من «فحص الجلسة السابقة» في صفحة العمال. ستُعاد فقط المهام التي تأكد توقف جلساتها."
                 : bulkGroup.status === "uncertain"
@@ -1644,7 +1673,7 @@ ApplicationWindow {
     AppDialog {
         id: paidRerun; objectName: "paidRerun"; anchors.centerIn: parent; width: Math.min(500, win.width - 48); modal: true; title: "تفريغ جديد"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "تفريغ جديد"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُرسل الصوت مجددًا إلى Deepgram وقد تنتج تكلفة جديدة. ستبقى النسخة السابقة محفوظة." }
+        Label { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; width: parent.width; wrapMode: Text.WordWrap; text: "سيُرسل الصوت مجددًا إلى Deepgram وقد تنتج تكلفة جديدة. ستبقى النسخة السابقة محفوظة." }
         onAccepted: { backend.retry(selectedJob.id, "deepgram", true); jobDialog.close() }
     }
     AppDialog {
@@ -1695,7 +1724,7 @@ ApplicationWindow {
         title: "حذف حساب ChatGPT"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "حذف الحساب"; standardButton(Dialog.Ok).objectName = "accountRemoveConfirmButton"; standardButton(Dialog.Cancel).text = "إلغاء"; standardButton(Dialog.Cancel).objectName = "accountRemoveCancelButton" }
         background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
-        contentItem: Label { wrapMode: Text.WordWrap; text: "سيُحذف تسجيل دخول «" + (win.pendingAccount.alias || "") + "» من ورق. يمكنك إضافته وتسجيل دخوله لاحقًا. هل تريد حذفه؟" }
+        contentItem: Label { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; wrapMode: Text.WordWrap; text: "سيُحذف تسجيل دخول «" + (win.pendingAccount.alias || "") + "» من ورق. يمكنك إضافته وتسجيل دخوله لاحقًا. هل تريد حذفه؟" }
         onAccepted: backend.removeAccount(win.pendingAccount.id)
     }
     AppDialog {
@@ -1944,21 +1973,21 @@ ApplicationWindow {
         id: deleteProviderDialog; objectName: "deleteProviderDialog"; anchors.centerIn: parent; width: Math.min(500, win.width - 48); modal: true; title: "حذف مزود"
         standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "حذف"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُحذف المزود «" + win.pendingProvider.name + "» من القائمة. يمكنك إضافته مجددًا في أي وقت، ولا يُحذف أي عامل يستخدمه." }
+        Label { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; width: parent.width; wrapMode: Text.WordWrap; text: "سيُحذف المزود «" + win.pendingProvider.name + "» من القائمة. يمكنك إضافته مجددًا في أي وقت، ولا يُحذف أي عامل يستخدمه." }
         onAccepted: backend.deleteProvider(win.pendingProvider.id)
     }
     AppDialog {
         id: deleteFileDialog; objectName: "deleteFileDialog"; anchors.centerIn: parent; width: Math.min(520, win.width - 48); modal: true; title: "حذف من المكتبة"
         standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "حذف"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُحذف «" + win.pendingFile.name + "» من مجلد المكتبة. النسخة الأصلية داخل مجلد المهمة تبقى محفوظة، ويمكن إعادة التنظيم لاحقًا." }
+        Label { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; width: parent.width; wrapMode: Text.WordWrap; text: "سيُحذف «" + win.pendingFile.name + "» من مجلد المكتبة. النسخة الأصلية داخل مجلد المهمة تبقى محفوظة، ويمكن إعادة التنظيم لاحقًا." }
         onAccepted: backend.deleteLibraryFile(win.pendingFile.path)
     }
     AppDialog {
         id: advancedDialog; objectName: "advancedDialog"; anchors.centerIn: parent; width: Math.min(850, win.width - 100); height: win.height - 120; modal: true
         title: "الإعدادات المتقدمة — دون مفاتيح API"; standardButtons: Dialog.Save | Dialog.Cancel
         onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        contentItem: ScrollView { TextArea { color: win.ink; selectionColor: win.accent; selectedTextColor: visualTheme.accentInk; background: Rectangle { color: visualTheme.inset } id: rawSettings; objectName: "rawSettings"; text: backend.settingsJson; selectByMouse: true; wrapMode: TextEdit.Wrap; font.family: "Consolas"; font.pixelSize: win.fs(13) } }
+        contentItem: ScrollView { TextArea { color: win.ink; selectionColor: win.accent; selectedTextColor: visualTheme.accentInk; background: Rectangle { color: visualTheme.inset } id: rawSettings; objectName: "rawSettings"; text: backend.settingsJson; selectByMouse: true; wrapMode: TextEdit.Wrap; font.family: visualTheme.monoFontFamily; font.weight: visualTheme.fontWeight; font.pixelSize: win.fs(13) } }
         onAccepted: backend.saveSettings(rawSettings.text)
     }
     AppDialog {
@@ -1997,7 +2026,7 @@ ApplicationWindow {
             SubText { text: "يجب أن يحتوي كل قالب {transcript_path} و{output_path}، ويمكن استخدام {title} و{position}."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
             ScrollView {
                 Layout.fillWidth: true; Layout.fillHeight: true
-                TextArea { id: tplText; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: win.fs(14); horizontalAlignment: Text.AlignRight; background: Rectangle { color: visualTheme.inset; radius: 8; border.color: win.line } }
+                TextArea { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; id: tplText; color: win.ink; wrapMode: TextEdit.Wrap; selectByMouse: true; font.pixelSize: win.fs(14); horizontalAlignment: Text.AlignRight; background: Rectangle { color: visualTheme.inset; radius: 8; border.color: win.line } }
             }
         }
         onAccepted: {

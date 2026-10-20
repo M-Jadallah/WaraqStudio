@@ -54,6 +54,11 @@ class Bridge(QObject):
         self.store, self.config, self.secrets, self.scheduler = store, config, secrets, scheduler
         self._jobs, self._workers, self._logs, self._source = [], [], [], []
         self._jobs_json = "[]"
+        self._jobs_revision = None
+        self._jobs_retry_deadlines = {}
+        self._jobs_projection_day = None
+        self._jobs_projection_time = 0
+        self._jobs_next_retry = 0
         self._running = False
         self._source_title = ""
         self._busy = False
@@ -66,9 +71,8 @@ class Bridge(QObject):
         self._account_errors = {}
         self._account_login_choice = {}
         self._account_engine_status = {}
-        self._account_last_refresh = 0.0
-        self._account_last_usage = 0.0
         self._accounts_closing = False
+        self._account_refresh_busy = False
         self._accountTaskReady.connect(self._apply_account_task, Qt.ConnectionType.QueuedConnection)
         self._auto_stop = False
         self._auto_stop_seen = False
@@ -219,7 +223,9 @@ class Bridge(QObject):
         return self._account_operation_busy() or bool(self._account_login_choice)
 
     def _account_operation_busy(self):
-        return bool(self._account_ops or self._account_pending or self._account_logins)
+        registry = getattr(self.scheduler, "accounts", None)
+        return bool(self._account_ops or self._account_pending or self._account_logins
+                    or getattr(registry, "refresh_in_flight", False))
 
     @Property("QVariantMap", notify=accountsChanged)
     def accountLoginChoice(self):
@@ -261,25 +267,62 @@ class Bridge(QObject):
     def _schedule_account_usage(self):
         if self._accounts_closing or self._account_operation_busy():
             return
-        now = time.monotonic()
-        cfg = self.config.snapshot()
-        if now - self._account_last_refresh >= 5:
-            self._account_last_refresh = now
-            self._start_account_action("", "sync", self.scheduler.accounts.refresh)
-        elif (cfg.get("accounts_enabled") and cfg.get("accounts_auto_refresh", True)
-              and now - self._account_last_usage >= max(60, int(cfg.get("accounts_refresh_seconds", 300)))):
-            self._account_last_usage = now
-            self._start_account_action("", "usage", lambda: self.scheduler.accounts.refresh_usage(manual=False))
+        # Scheduler wakeups and this timer share the service's enable/backoff/
+        # single-flight gate. Neither GUI snapshots nor force wakeups bypass it.
+        if self.config.snapshot().get("accounts_enabled", True):
+            self.scheduler.accounts.request_refresh()
+            self._publish_accounts()
 
     def _publish_accounts(self):
         registry = getattr(self.scheduler, "accounts", None)
         raw_status = getattr(registry, "status", {}) if registry else {}
         state = raw_status.get("state", "unavailable")
+        reasons = {
+            "private_path_is_link": "تعذّر تأمين مجلد المحرك لوجود رابط غير آمن. أصلح المجلد ثم أعد الفحص.",
+            "private_permissions_failed": "تعذّر تأمين صلاحيات مجلد المحرك. أصلح الصلاحيات ثم أعد الفحص.",
+            "private_owner_unknown": "تعذّر التحقق من ملكية مجلد المحرك. تحقق من حساب Windows ثم أعد الفحص.",
+            "engine_payload_missing": "ملفات المحرك غير مكتملة. أصلح تثبيت ورق ثم أعد الفحص.",
+            "engine_integrity_failed": "تعذّر التحقق من سلامة ملفات المحرك. أصلح تثبيت ورق ثم أعد الفحص.",
+            "engine_manifest_invalid": "بيانات حزمة المحرك غير صالحة. أصلح تثبيت ورق ثم أعد الفحص.",
+            "engine_version_mismatch": "إصدار حزمة المحرك غير متوافق. حدّث ورق ثم أعد الفحص.",
+            "engine_protocol_mismatch": "استجابة المحرك غير متوافقة. أعد فحص المحرك أو أصلح تثبيت ورق.",
+            "engine_api_invalid": "واجهة المحرك غير متوافقة. أصلح تثبيت ورق ثم أعد الفحص.",
+            "engine_response_too_large": "تعذّرت قراءة استجابة المحرك بأمان. أعد فحص المحرك.",
+            "engine_session_invalid": "تعذّر التحقق من جلسة المحرك. أعد الفحص قبل متابعة التنفيذ.",
+            "engine_already_owned": "المحرك مستخدم من نسخة أخرى من ورق. أغلق النسخة الأخرى ثم أعد الفحص.",
+            "engine_owner_invalid": "تعذّر التحقق من مالك المحرك. أعد تشغيل ورق ثم أعد الفحص.",
+            "engine_owner_unverified": "تعذّر التحقق من ملكية عملية المحرك. أعد الفحص قبل متابعة التنفيذ.",
+            "engine_shutdown_unverified": "لم يُتحقق من توقف المحرك السابق. أعد الفحص قبل متابعة التنفيذ.",
+            "UNAUTHORIZED": "تعذّر التحقق من صلاحية الاتصال بالمحرك. أعد الفحص.",
+            "engine_connection_failed": "تعذّر الاتصال بالمحرك. ستُعاد المحاولة تلقائيًا بعد الانتظار.",
+            "engine_start_timeout": "لم يكتمل تشغيل المحرك في المهلة. ستُعاد المحاولة بعد الانتظار.",
+            "engine_unavailable": "المحرك غير متاح مؤقتًا. ستُعاد المحاولة بعد الانتظار.",
+            "engine_http_error": "تعذّر طلب المحرك. ستُعاد المحاولة تلقائيًا بعد الانتظار.",
+            "engine_request_failed": "تعذّر طلب المحرك. ستُعاد المحاولة تلقائيًا بعد الانتظار.",
+            "ENGINE_UNAVAILABLE": "المحرك غير متاح مؤقتًا. ستُعاد المحاولة بعد الانتظار.",
+            "STORAGE_UNAVAILABLE": "تخزين المحرك غير متاح مؤقتًا. ستُعاد المحاولة بعد الانتظار.",
+            "STORAGE_FAILED": "تعذّرت قراءة تخزين المحرك. ستُعاد المحاولة بعد الانتظار.",
+            "engine_closed": "محرك الحسابات متوقف", "engine_starting": "جارٍ تشغيل محرك الحسابات المدمج…",
+        }
+        reason = raw_status.get("reason", "")
+        reason = reason if isinstance(reason, str) and reason in reasons else "engine_unavailable" if reason else ""
+        retry = raw_status.get("next_retry_at", 0)
+        retry = retry if isinstance(retry, (int, float)) and not isinstance(retry, bool) and 0 < retry < 100_000_000_000 else 0
         status = {"state": state if state in ("starting", "ready", "unavailable", "closed") else "unavailable",
                   "migrationRequired": bool(raw_status.get("migration_required")),
+                  "reasonCode": reason, "nextRetryAt": retry,
+                  "requiresManualRecovery": bool(raw_status.get("requires_manual_recovery")),
                   "message": {"starting": "جارٍ تشغيل محرك الحسابات المدمج…", "ready": "محرك الحسابات المدمج جاهز",
                               "closed": "محرك الحسابات متوقف"}.get(state, "محرك الحسابات غير متاح. أعد الفحص أو أعد تشغيل ورق.")}
+        if state == "unavailable" and reason:
+            status["message"] = reasons[reason]
+        if state == "starting" and not self.config.snapshot().get("accounts_enabled", True):
+            status.update(reasonCode="accounts_disabled",
+                          message="المزامنة التلقائية للحسابات معطّلة. يمكنك إعادة فحص المحرك يدويًا.")
         engine_changed = status != self._account_engine_status
+        refresh_busy = bool(getattr(registry, "refresh_in_flight", False))
+        busy_changed = refresh_busy != self._account_refresh_busy
+        self._account_refresh_busy = refresh_busy
         self._account_engine_status = status
         rows = []
         held_accounts = {held.get("account_id") for held in self.store.state_get("execution_holds", {}).values()}
@@ -335,7 +378,7 @@ class Bridge(QObject):
                          if cooldown else "الحصة المتبقية غير معروفة"})
         account_changed = self._accounts_model._items != rows
         self._accounts_model.update_items(rows)
-        if account_changed or engine_changed:
+        if account_changed or engine_changed or busy_changed:
             self.accountsChanged.emit()
 
     def _account(self, ident):
@@ -348,6 +391,9 @@ class Bridge(QObject):
                     and ident not in self._account_pending_owners.values() and not self._accounts_closing)
 
     def _start_account_action(self, ident, action, work):
+        # The service serializes accepted user work behind automatic refreshes.
+        # Do not discard a click/cancellation when that refresh starts in the
+        # interval between QML's enabled check and this queued intent.
         if self._accounts_closing or ident in self._account_ops:
             return
         generation = self._account_generations.get(ident, 0) + 1
@@ -860,24 +906,26 @@ class Bridge(QObject):
     @Slot()
     def refresh(self):
         self._publish_accounts()
-        result = []
-        for j in self.store.jobs():
-            stages = j["stages"]
-            if all(s["status"] in ("completed", "skipped") for s in stages.values()):
-                state, current = "completed", "opencode"
-            else:
-                current = next(s for s in STAGES if stages[s]["status"] not in ("completed", "skipped"))
-                state = stages[current]["status"]
-            result.append({k: v for k, v in j.items() if k not in ("config", "stages") } | {
-                "status": state, "statusLabel": LABELS.get(state, state), "current": current,
-                "stageLabel": STAGE_LABELS[current], "error": stages[current]["error"],
-                "worker": stages[current]["worker"], "progress": stages[current]["progress"],
-                "retryAt": self.retry_at(stages[current]["next_retry"])
-                           if state == "pending" and stages[current]["next_retry"] > time.time() else "",
-                "template": j["config"].get("template_name", ""),
-                "steps": [{"name": name, "label": STAGE_LABELS[name], "status": stages[name]["status"]}
-                          for name in (("opencode",) if str(j.get("input_path", "")).lower().endswith(".txt") else STAGES)],
-            })
+        now = time.time()
+        day = time.localtime(now)[:3]
+        # Keep only the public projection, not another queue/config snapshot.
+        # The revision must precede the read so an external commit during that
+        # read is picked up on the next heartbeat.
+        with self.store.lock:
+            revision = self.store.revision()
+            jobs = self.store.jobs() if revision != self._jobs_revision else None
+        result = self._jobs
+        if jobs is not None:
+            result = self._project_jobs(jobs, now)
+            self._jobs_revision = revision
+        elif (day != self._jobs_projection_day or now < self._jobs_projection_time
+              or (self._jobs_next_retry and now >= self._jobs_next_retry)):
+            # Deadline expiry and midnight change labels even without SQL writes.
+            result = [{**row, "retryAt": self.retry_at(self._jobs_retry_deadlines[row["id"]])
+                       if self._jobs_retry_deadlines.get(row["id"], 0) > now else ""} for row in self._jobs]
+        self._jobs_projection_day = day
+        self._jobs_projection_time = now
+        self._jobs_next_retry = min((value for value in self._jobs_retry_deadlines.values() if value > now), default=0)
         workers = self.scheduler.workers()
         for w in workers:
             w["stageLabel"] = STAGE_LABELS[w["stage"]]
@@ -907,6 +955,30 @@ class Bridge(QObject):
         if jobs_changed:
             self.jobsChanged.emit()
         self.changed.emit()
+
+    def _project_jobs(self, jobs, now):
+        result = []
+        self._jobs_retry_deadlines = {}
+        for j in jobs:
+            stages = j["stages"]
+            if all(s["status"] in ("completed", "skipped") for s in stages.values()):
+                state, current = "completed", "opencode"
+            else:
+                current = next(s for s in STAGES if stages[s]["status"] not in ("completed", "skipped"))
+                state = stages[current]["status"]
+            retry = stages[current]["next_retry"] if state == "pending" else 0
+            if retry:
+                self._jobs_retry_deadlines[j["id"]] = retry
+            result.append({k: v for k, v in j.items() if k not in ("config", "stages") } | {
+                "status": state, "statusLabel": LABELS.get(state, state), "current": current,
+                "stageLabel": STAGE_LABELS[current], "error": stages[current]["error"],
+                "worker": stages[current]["worker"], "progress": stages[current]["progress"],
+                "retryAt": self.retry_at(retry) if retry > now else "",
+                "template": j["config"].get("template_name", ""),
+                "steps": [{"name": name, "label": STAGE_LABELS[name], "status": stages[name]["status"]}
+                          for name in (("opencode",) if str(j.get("input_path", "")).lower().endswith(".txt") else STAGES)],
+            })
+        return result
 
     @staticmethod
     def retry_at(timestamp):

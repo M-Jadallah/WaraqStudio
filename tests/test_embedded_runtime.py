@@ -1,5 +1,6 @@
 """Pinned payload, transport and OS process ownership without remote auth."""
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -223,3 +225,426 @@ def test_windows_job_assigns_suspended_child_and_verifies_tree_exit():
             process.kill()
             process.wait(timeout=5)
         job.close()
+
+
+def junction(alias, target):
+    """Create only temporary junction fixtures, without requiring symlink privilege."""
+    import _winapi
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    _winapi.CreateJunction(str(target), str(alias))
+
+
+def windows_acl_bytes(path):
+    """Read the object's own DACL through an OPEN_REPARSE_POINT handle."""
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                   ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    advapi.GetKernelObjectSecurity.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p,
+                                              wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
+    handle = kernel.CreateFileW(str(path), 0x20080, 3, None, 3, 0x02200000, None)
+    assert handle != ctypes.c_void_p(-1).value
+    try:
+        count = wintypes.DWORD()
+        advapi.GetKernelObjectSecurity(handle, 4, None, 0, ctypes.byref(count))
+        data = ctypes.create_string_buffer(count.value)
+        assert advapi.GetKernelObjectSecurity(handle, 4, data, len(data), ctypes.byref(count))
+        return data.raw
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def test_profile_preparation_cancellation_is_terminal_and_releases_lease(tmp_path, monkeypatch):
+    manager = native.EmbeddedRuntimeSupervisor(SimpleNamespace(home=tmp_path))
+    entered = threading.Event()
+    errors = []
+    original = native.prepare_private_profile
+    def preparing(root, cancelled=None, **kwargs):
+        entered.set()
+        while not cancelled():
+            time.sleep(0.005)
+        return original(root, cancelled, **kwargs)
+    monkeypatch.setattr(native, "prepare_private_profile", preparing)
+    manifest = Mock()
+    monkeypatch.setattr(native, "PackagedPayload", manifest)
+    def ensure():
+        try:
+            manager.ensure()
+        except native.EmbeddedRuntimeError as exc:
+            errors.append(exc.reason)
+    worker = threading.Thread(target=ensure)
+    worker.start()
+    assert entered.wait(2)
+    manager.close()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert errors == ["engine_closed"]
+    manifest.assert_not_called()
+    native._lock_profile(manager.root).close()
+
+
+def test_repeated_stop_does_not_query_closed_job_or_release_lease_twice(tmp_path):
+    current = runtime()
+    current.process = None
+    current.profile = tmp_path
+    current.instance_id = "synthetic_instance"
+    current._lock = threading.RLock()
+    job = current._job = Mock()
+    job.empty.return_value = True
+    lease = current._lease = Mock()
+    current.stop()
+    current.stop()
+    job.close.assert_called_once()
+    lease.close.assert_called_once()
+    assert current._job is None and current._lease is None
+
+
+def test_payload_hash_checks_cancellation_between_chunks(tmp_path, monkeypatch):
+    packaged = payload(tmp_path)
+    cancelled = threading.Event()
+    original = Path.open
+    class Reader:
+        def __init__(self, stream):
+            self.stream = stream
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def read(self, size):
+            assert size <= 1024 * 1024
+            cancelled.set()
+            return self.stream.read(size)
+    def opening(path, *args, **kwargs):
+        stream = original(path, *args, **kwargs)
+        return Reader(stream) if path == packaged.node and args == ("rb",) else stream
+    monkeypatch.setattr(Path, "open", opening)
+    with pytest.raises(native.EmbeddedRuntimeError, match="engine_closed"):
+        native.PackagedPayload(tmp_path, cancelled=cancelled.is_set)
+    assert cancelled.is_set()
+    assert not any(t.name.startswith("ThreadPoolExecutor") for t in threading.enumerate())
+
+
+def test_preparation_and_lock_precede_hashing_with_single_lease(tmp_path, monkeypatch):
+    packaged = payload(tmp_path / "payload")
+    manager = native.EmbeddedRuntimeSupervisor(SimpleNamespace(home=tmp_path), packaged.root)
+    original = native.PackagedPayload
+    seen = []
+    def checked(*args, **kwargs):
+        for name in ("home", "config/opencode", "tmp"):
+            assert (manager.root / name).is_dir()
+        with pytest.raises(native.ExecutionOwnershipError):
+            native._lock_profile(manager.root)
+        seen.append("hashed")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(native, "PackagedPayload", checked)
+    monkeypatch.setattr(native.EmbeddedRuntime, "_start", lambda current, timeout: None)
+    current = manager.ensure()
+    try:
+        assert seen == ["hashed"]
+        with pytest.raises(native.ExecutionOwnershipError):
+            native._lock_profile(manager.root)
+    finally:
+        manager.close()
+    native._lock_profile(manager.root).close()
+
+
+def test_close_interrupts_real_payload_validation_without_live_hash_workers(tmp_path, monkeypatch):
+    packaged = payload(tmp_path / "payload")
+    manager = native.EmbeddedRuntimeSupervisor(SimpleNamespace(home=tmp_path), packaged.root)
+    original = Path.open
+    entered, errors = threading.Event(), []
+    class Reader:
+        def __init__(self, stream):
+            self.stream = stream
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def read(self, size):
+            entered.set()
+            while not manager._closed:
+                time.sleep(0.005)
+            return self.stream.read(size)
+    def opening(path, *args, **kwargs):
+        stream = original(path, *args, **kwargs)
+        return Reader(stream) if path == packaged.node and args == ("rb",) else stream
+    monkeypatch.setattr(Path, "open", opening)
+    start = Mock()
+    monkeypatch.setattr(native.EmbeddedRuntime, "_start", start)
+    def ensure():
+        try:
+            manager.ensure()
+        except native.EmbeddedRuntimeError as exc:
+            errors.append(exc.reason)
+    worker = threading.Thread(target=ensure)
+    worker.start()
+    assert entered.wait(2)
+    begin = time.monotonic()
+    manager.close()
+    worker.join(2)
+    assert time.monotonic() - begin < 2
+    assert not worker.is_alive() and errors == ["engine_closed"]
+    assert not any(t.name.startswith("ThreadPoolExecutor") for t in threading.enumerate())
+    start.assert_not_called()
+    native._lock_profile(manager.root).close()
+
+
+@pytest.mark.parametrize("member", ["", "home", "data", "config/opencode"])
+def test_non_directory_profile_components_fail_before_hashing(tmp_path, monkeypatch, member):
+    manager = native.EmbeddedRuntimeSupervisor(SimpleNamespace(home=tmp_path))
+    file = manager.root / member if member else manager.root
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text("user data is preserved")
+    manifest = Mock()
+    monkeypatch.setattr(native, "PackagedPayload", manifest)
+    with pytest.raises(native.EmbeddedRuntimeError, match="private_permissions_failed"):
+        manager.ensure()
+    manifest.assert_not_called()
+    assert file.read_text() == "user data is preserved"
+
+
+def test_directory_symlink_is_rejected_even_at_exact_cache_alias(tmp_path):
+    root = tmp_path / "profile"
+    alias = root / native._CACHE_ALIAS
+    target = alias.parent / "IE"
+    target.mkdir(parents=True)
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege unavailable; real junctions are covered separately")
+        raise
+    try:
+        with pytest.raises(native.EmbeddedRuntimeError, match="private_path_is_link"):
+            native.prepare_private_profile(root)
+    finally:
+        alias.unlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_exact_windows_cache_junction_is_preserved_without_alias_acl_or_walk(tmp_path, monkeypatch):
+    root = tmp_path / "profile"
+    alias = root / native._CACHE_ALIAS
+    target = alias.parent / "IE"
+    target.mkdir(parents=True)
+    (target / "cache.txt").write_text("preserved")
+    junction(alias, target)
+    seen = []
+    original = native._windows_acl_handle
+    original_open = native._PrivateTree.open
+    handles = {}
+    def opening(tree, path, *args, **kwargs):
+        node = original_open(tree, path, *args, **kwargs)
+        handles[node.handle] = path
+        return node
+    def secure(handle, sid):
+        seen.append(handles[handle])
+        return original(handle, sid)
+    monkeypatch.setattr(native._PrivateTree, "open", opening)
+    monkeypatch.setattr(native, "_windows_acl_handle", secure)
+    try:
+        assert native.prepare_private_profile(root) == root
+        assert alias.is_junction()
+        assert alias not in seen
+        assert target in seen and target / "cache.txt" in seen
+        assert not any(path.is_relative_to(alias) for path in seen)
+        assert (target / "cache.txt").read_text() == "preserved"
+        with pytest.raises(native.EmbeddedRuntimeError, match="private_path_is_link"):
+            native.private_directory(root, recursive=True)
+    finally:
+        alias.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows compatibility-junction deny-list ACL")
+def test_windows_cache_alias_deny_list_directory_is_supported_and_acl_preserved(tmp_path):
+    from ctypes import wintypes
+    root = tmp_path / "profile"
+    alias = root / native._CACHE_ALIAS
+    target = alias.parent / "IE"
+    target.mkdir(parents=True)
+    junction(alias, target)
+    sid = native._owner_sid()
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p)
+    advapi.SetKernelObjectSecurity.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    descriptor = ctypes.c_void_p()
+    node = native._WindowsPath(alias, writable=True)
+    try:
+        assert advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            "D:P(D;;0x1;;;WD)(A;;FA;;;SY)(A;;FA;;;" + sid + ")", 1, ctypes.byref(descriptor), None)
+        assert advapi.SetKernelObjectSecurity(node.handle, 0x80000004, descriptor)
+    finally:
+        if descriptor:
+            kernel.LocalFree(descriptor)
+        node.close()
+    try:
+        before = windows_acl_bytes(alias)
+        with pytest.raises(native.EmbeddedRuntimeError, match="private_permissions_failed"):
+            native._WindowsPath(alias, writable=True)
+        native.prepare_private_profile(root)
+        assert windows_acl_bytes(alias) == before
+        assert alias.is_junction()
+    finally:
+        alias.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows cache-candidate handle contract")
+def test_ordinary_directory_at_cache_alias_is_secured_and_walked(tmp_path):
+    root = tmp_path / "profile"
+    candidate = root / native._CACHE_ALIAS
+    candidate.mkdir(parents=True)
+    child = candidate / "ordinary-cache.txt"
+    child.write_text("preserved")
+    native.prepare_private_profile(root)
+    assert not candidate.is_junction() and child.read_text() == "preserved"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows canonical DOS path contract")
+def test_cache_target_canonical_comparison_accepts_profile_short_path(tmp_path):
+    from ctypes import wintypes
+    root = tmp_path / "profile-with-a-long-directory-name"
+    alias = root / native._CACHE_ALIAS
+    target = alias.parent / "IE"
+    target.mkdir(parents=True)
+    junction(alias, target)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetShortPathNameW.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    kernel.GetShortPathNameW.restype = wintypes.DWORD
+    data = ctypes.create_unicode_buffer(32768)
+    try:
+        assert kernel.GetShortPathNameW(str(root), data, len(data))
+        if data.value == str(root):
+            pytest.skip("8.3 names disabled on the temporary filesystem")
+        native.prepare_private_profile(Path(data.value))
+        assert alias.is_junction()
+    finally:
+        alias.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+@pytest.mark.parametrize("kind", ["outside", "different", "dangling", "other_alias", "linked_target", "linked_ancestor"])
+def test_unapproved_profile_junctions_fail_before_payload_hash(tmp_path, monkeypatch, kind):
+    manager = native.EmbeddedRuntimeSupervisor(SimpleNamespace(home=tmp_path))
+    alias = manager.root / native._CACHE_ALIAS
+    expected = alias.parent / "IE"
+    expected.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel.txt").write_text("untouched")
+    outside_acl = windows_acl_bytes(outside)
+    sentinel_acl = windows_acl_bytes(outside / "sentinel.txt")
+    links = []
+    if kind == "outside":
+        target = outside
+    elif kind == "different":
+        target = alias.parent / "other"
+        target.mkdir()
+    elif kind == "dangling":
+        target = expected
+    elif kind == "other_alias":
+        alias = alias.parent / "another-cache-link"
+        target = expected
+    elif kind == "linked_target":
+        expected.rmdir()
+        junction(expected, outside)
+        links.append(expected)
+        target = expected
+    else:
+        home = manager.root / "home"
+        home.rename(manager.root / "old-home")
+        junction(home, outside)
+        links.append(home)
+        alias = None
+        target = None
+    if alias is not None:
+        junction(alias, target)
+        links.insert(0, alias)
+        if kind == "dangling":
+            expected.rmdir()
+    manifest = Mock()
+    monkeypatch.setattr(native, "PackagedPayload", manifest)
+    try:
+        with pytest.raises(native.EmbeddedRuntimeError, match="private_path_is_link"):
+            manager.ensure()
+        manifest.assert_not_called()
+        assert (outside / "sentinel.txt").read_text() == "untouched"
+        assert windows_acl_bytes(outside) == outside_acl
+        assert windows_acl_bytes(outside / "sentinel.txt") == sentinel_acl
+        native._lock_profile(manager.root).close()
+    finally:
+        for link in links:
+            link.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle replacement contract")
+def test_profile_handles_prevent_replacement_during_acl_and_alias_validation(tmp_path, monkeypatch):
+    root = tmp_path / "profile"
+    alias = root / native._CACHE_ALIAS
+    target = alias.parent / "IE"
+    target.mkdir(parents=True)
+    junction(alias, target)
+    original = native._WindowsPath.junction_target
+    checks = []
+    def target_read(node):
+        # Both the alias and its real target's parent remain pinned until validation ends.
+        for path in (alias, alias.parent, root):
+            with pytest.raises(PermissionError):
+                path.rename(path.with_name(path.name + "-replaced"))
+            checks.append(path)
+        return original(node)
+    monkeypatch.setattr(native._WindowsPath, "junction_target", target_read)
+    try:
+        native.prepare_private_profile(root)
+        assert checks == [alias, alias.parent, root]
+    finally:
+        alias.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle replacement contract")
+def test_link_inserted_before_open_is_rejected_without_securing_target(tmp_path, monkeypatch):
+    root, outside = tmp_path / "profile", tmp_path / "outside"
+    (root / "home").mkdir(parents=True)
+    outside.mkdir()
+    original_open = native._PrivateTree.open
+    secured = []
+    handles = {}
+    def opening(tree, path, *args, **kwargs):
+        if path == root:
+            (root / "home").rename(root / "original-home")
+            junction(root / "home", outside)
+        node = original_open(tree, path, *args, **kwargs)
+        handles[node.handle] = path
+        return node
+    monkeypatch.setattr(native._PrivateTree, "open", opening)
+    monkeypatch.setattr(native, "_windows_acl_handle", lambda handle, sid: secured.append(handles[handle]))
+    try:
+        with pytest.raises(native.EmbeddedRuntimeError, match="private_path_is_link"):
+            native.prepare_private_profile(root)
+        assert outside not in secured and root / "home" not in secured
+    finally:
+        (root / "home").rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows lock-file junction contract")
+def test_linked_lock_file_never_acquires_ownership_or_hashes(tmp_path, monkeypatch):
+    manager = native.EmbeddedRuntimeSupervisor(SimpleNamespace(home=tmp_path))
+    manager.root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    lock = manager.root / "runtime.lock"
+    junction(lock, outside)
+    manifest = Mock()
+    monkeypatch.setattr(native, "PackagedPayload", manifest)
+    try:
+        with pytest.raises(native.EmbeddedRuntimeError, match="private_path_is_link"):
+            manager.ensure()
+        manifest.assert_not_called()
+        assert not list(outside.iterdir())
+    finally:
+        lock.rmdir()

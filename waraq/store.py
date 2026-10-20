@@ -280,6 +280,15 @@ class Store:
                 raise
         return added
 
+    def revision(self):
+        """Cheap invalidation token for writes on this or another connection.
+
+        data_version alone excludes this connection's writes; total_changes
+        alone excludes external commits. Read both under the Store lock.
+        """
+        with self.lock:
+            return self.db.total_changes, self.db.execute("PRAGMA data_version").fetchone()[0]
+
     def jobs(self):
         with self.lock:
             rows = [dict(r) for r in self.db.execute("SELECT jobs.*,COALESCE(folders.name,'') AS folder_name FROM jobs LEFT JOIN folders ON folders.id=jobs.folder_id ORDER BY jobs.seq")]

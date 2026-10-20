@@ -1,7 +1,9 @@
-"""Regression boundary for the petrol redesign: UI changes cannot rewrite execution.
+"""Audited execution and UI-action boundary for the petrol application.
 
 The fixture was recorded from 066c67b (current main before integration) before any presentation changes. Update it
 deliberately when a future task intentionally changes a backend/UI contract.
+The approved idle fix records six explicit exceptions and their previous hashes;
+all other protected modules, QML controller functions and actions remain guarded.
 """
 import hashlib
 import json

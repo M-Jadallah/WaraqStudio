@@ -215,3 +215,187 @@ def test_successful_mutation_is_not_repeated_after_cache_refresh_fails(service):
     assert service.list()[0]["id"] == "account_1"
     assert sum(call[0] == "account.create" for call in service.fake_runtime.calls) == 1
     assert service.status["state"] == "unavailable"
+
+
+def test_automatic_refresh_honors_disabled_retry_and_closed_even_when_forced(service):
+    cfg = {"accounts_enabled": False}
+    service.config.snapshot = lambda: cfg
+    assert not service.request_refresh(force=True)
+    assert not service.fake_runtime.calls
+    cfg["accounts_enabled"] = True
+    service._health["next_retry_at"] = 1002
+    assert not service.request_refresh(force=True)
+    service.clock = lambda: 1002
+    assert service.request_refresh(force=True)
+    service._refresh_thread.join(2)
+    service.close()
+    assert not service.request_refresh(force=True)
+
+
+def test_transient_failures_use_bounded_exponential_backoff(service, monkeypatch):
+    monkeypatch.setattr("waraq.embedded_accounts.time.sleep", lambda _: None)
+    service.fake_runtime.fail = EmbeddedRuntimeError("engine_connection_failed")
+    now = [1000]
+    service.clock = lambda: now[0]
+    for delay in (2, 4, 8, 16, 32, 60, 60):
+        before = len(service.fake_runtime.calls)
+        assert service.request_refresh(force=True)
+        service._refresh_thread.join(2)
+        assert len(service.fake_runtime.calls) == before + 2
+        assert service.status["next_retry_at"] == now[0] + delay
+        assert not service.status["requires_manual_recovery"]
+        assert not service.request_refresh(force=True)
+        now[0] += delay
+    service.fake_runtime.fail = None
+    assert service.request_refresh(force=True)
+    service._refresh_thread.join(2)
+    assert service.status["next_retry_at"] == 0
+
+
+@pytest.mark.parametrize("reason", ["private_path_is_link", "private_permissions_failed", "private_owner_unknown",
+    "engine_payload_missing", "engine_integrity_failed", "engine_manifest_invalid", "engine_version_mismatch",
+    "engine_protocol_mismatch", "engine_owner_unverified", "engine_shutdown_unverified", "engine_already_owned"])
+def test_fixed_errors_latch_once_until_explicit_recheck(service, reason):
+    attempts = []
+    def fail():
+        attempts.append(reason)
+        raise EmbeddedRuntimeError(reason)
+    service.supervisor.ensure = fail
+    assert service.request_refresh()
+    service._refresh_thread.join(2)
+    assert attempts == [reason]  # never the immediate idempotent retry
+    assert service.status["requires_manual_recovery"]
+    assert service.status["next_retry_at"] == 0
+    service.clock = lambda: 10_000
+    assert not service.request_refresh(force=True)
+    with pytest.raises(AccountEngineError, match=reason):
+        service.recheck("")
+    assert attempts == [reason, reason]
+    assert service.status["requires_manual_recovery"]
+    service.supervisor.ensure = lambda: service.fake_runtime
+    service.recheck("")
+    assert service.status["state"] == "ready"
+    assert not service.status["requires_manual_recovery"]
+
+
+def test_mutation_transport_failure_is_never_repeated(service):
+    service.fake_runtime.fail = EmbeddedRuntimeError("engine_connection_failed")
+    with pytest.raises(AccountEngineError):
+        service.create("Synthetic")
+    assert [call[0] for call in service.fake_runtime.calls] == ["account.create"]
+
+
+def test_identical_public_cache_is_not_written_again(service, monkeypatch):
+    writes = []
+    monkeypatch.setattr("waraq.embedded_accounts._atomic_json", lambda path, value: writes.append(json.dumps(value, sort_keys=True)))
+    service.refresh()
+    service.refresh()
+    assert len(writes) == 1
+    service.fake_runtime.rows[0]["alias"] = "Changed"
+    service.refresh()
+    assert len(writes) == 2
+
+
+def test_healthy_metadata_and_quota_keep_existing_intervals(service):
+    now = [1000]
+    service.clock = lambda: now[0]
+    service.config.snapshot = lambda: {"accounts_enabled": True, "accounts_auto_refresh": True,
+                                       "accounts_refresh_seconds": 120}
+    for tick, expected_lists, expected_usage in ((1000, 2, 1), (1004, 2, 1), (1005, 3, 1), (1119, 4, 1), (1120, 4, 1), (1124, 6, 2)):
+        now[0] = tick
+        if service.request_refresh():
+            service._refresh_thread.join(2)
+        methods = [call[0] for call in service.fake_runtime.calls]
+        assert methods.count("accounts.list") == expected_lists
+        assert methods.count("usage.refresh") == expected_usage
+
+
+def test_scheduler_refresh_declines_while_synchronous_manual_work_is_active(service):
+    entered, release = threading.Event(), threading.Event()
+    def response(method, params):
+        entered.set()
+        assert release.wait(2)
+        return {"ok": True, "data": row()}
+    service.fake_runtime.response = response
+    thread = threading.Thread(target=lambda: service._call("account.update", {"accountRef": "account_1"}))
+    thread.start()
+    assert entered.wait(1)
+    assert service.refresh_in_flight
+    assert not service.request_refresh(force=True)
+    release.set()
+    thread.join(2)
+    assert not service.refresh_in_flight
+
+
+def test_attempt_begin_cannot_double_count_in_flight_with_automatic_refresh(service, tmp_path):
+    service.refresh()
+    selected, release = threading.Event(), threading.Event()
+    def response(method, params):
+        if method == "attempt.begin":
+            service.fake_runtime.rows = [row(inFlight=1)]
+            return {"ok": True, "data": {"attemptId": params["attemptId"], "accountRef": "account_1"}}
+        return {"ok": True, "data": {"accounts": service.fake_runtime.rows}}
+    def ensure():
+        if service.fake_runtime.calls[-1][0] == "attempt.begin":
+            selected.set()  # native selection succeeded; local increment is pending
+            assert release.wait(3)
+        return service.fake_runtime
+    service.fake_runtime.response = response
+    service.supervisor.ensure = ensure
+    leases = []
+    thread = threading.Thread(target=lambda: leases.append(service.begin_attempt(1, "oc1", "model", tmp_path)))
+    thread.start()
+    assert selected.wait(1)
+    assert service.refresh_in_flight
+    assert not service.request_refresh(force=True)
+    release.set()
+    thread.join(2)
+    assert len(leases) == 1 and service.list()[0]["in_flight"] == 1
+    assert service.request_refresh(force=True)
+    service._refresh_thread.join(2)
+    assert service.list()[0]["in_flight"] == 1
+
+
+def test_quota_network_wait_does_not_block_execution_control(service, tmp_path):
+    service.refresh()
+    entered, release, completed = threading.Event(), threading.Event(), threading.Event()
+    errors = []
+    def response(method, params):
+        if method == "usage.refresh":
+            entered.set()
+            assert release.wait(3)
+            return {"ok": True, "data": {}}
+        if method == "accounts.list":
+            return {"ok": True, "data": {"accounts": [row()]}}
+        return {"ok": True, "data": {"attemptId": params["attemptId"], "accountRef": "account_1",
+            "state": "closed" if method == "attempt.close" else "active", "events": []}}
+    service.fake_runtime.response = response
+    def quota():
+        try:
+            service.refresh_usage()
+        except Exception as exc:
+            errors.append(exc)
+    def execution():
+        try:
+            lease = service.begin_attempt(1, "oc1", "model", tmp_path)
+            service.resolve_attempt(lease["id"])
+            service.close_attempt(lease["id"])
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+    quota_thread = threading.Thread(target=quota)
+    execution_thread = threading.Thread(target=execution)
+    quota_thread.start()
+    assert entered.wait(1)
+    execution_thread.start()
+    try:
+        assert completed.wait(.5), "execution control blocked behind provider quota network wait"
+        assert not errors
+        assert [call[0] for call in service.fake_runtime.calls][-3:] == ["attempt.begin", "attempt.resolve", "attempt.close"]
+        assert not release.is_set()
+    finally:
+        release.set()
+        quota_thread.join(2)
+        execution_thread.join(2)
+    assert not errors

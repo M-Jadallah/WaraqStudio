@@ -13,9 +13,10 @@ Button {
     property color surface: theme.inset
     implicitHeight: Math.round(36 * uiScale)
     implicitWidth: Math.max(Math.round(76 * uiScale), contentItem.implicitWidth + Math.round(22 * uiScale))
-    font.family: "Segoe UI"
+    font.family: control.theme.fontFamily
+    font.weight: control.theme.fontWeight
     font.pixelSize: Math.max(12, Math.round(14 * uiScale))
-    font.weight: Font.DemiBold
+
     focusPolicy: Qt.StrongFocus
     Accessible.name: text
     background: Rectangle {

@@ -4,6 +4,10 @@ import QtQuick
 QtObject {
     property bool dark: true
     property real scale: 1.0
+    readonly property string fontFamily: "Segoe UI"
+    readonly property string monoFontFamily: "Consolas"
+    readonly property int fontWeight: Font.Bold
+    readonly property real stageTintOpacity: 0.08
     readonly property color bg: dark ? "#0C242A" : "#F2F7F7"
     readonly property color panel: dark ? "#14363E" : "#FFFFFF"
     readonly property color inset: dark ? "#0F2E35" : "#E5F0F1"

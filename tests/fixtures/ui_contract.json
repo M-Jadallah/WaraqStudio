@@ -2,16 +2,16 @@
   "git_reference": "066c67b5248ae560ef57886bb175058f29eebac2",
   "protected_sha256": {
     "build_windows.py": "2e4c94d4254e1a4d65eb8edec772f5146ec3823a35637e7f282712ec165a37c2",
-    "main.py": "faabed51d2c821893326ccab7d339752e06b34b1c04b2c64410d3f79a2dacd87",
+    "main.py": "fb0a92c5c77c8f8789358c2a0174fe7d847fc59a09af49f2799d184e2ba3bcf1",
     "requirements.txt": "8e7d2ecf695527679758826ae50b29bb62079ba69e0025a055a0cd3f29cd8cdb",
     "settings.template.json": "09bc2d20d9461d4e743b53cddd0686923750d85ab26b938c87b3466cfa0127d0",
     "waraq/__init__.py": "f02fe3feb3e90962b79964eb8a0cbb0085790ed6174f4763f15e065c004f9a51",
     "waraq/app_update.py": "b6d244c2497aa2c7eb84694c04bf7b3b632faddc51c26a471d884ccba7551fcb",
-    "waraq/bridge.py": "4570b38b0aa9863bcad2db89a26e50d9b7a744a47c669aeec83c987d3794b231",
+    "waraq/bridge.py": "c6ebc92210c5c45820534eda13c14f6ef8ab967c53251a22686f600afac25c72",
     "waraq/catalog.py": "d17e04d9dd7195fa2a9fbcdac75efbd30b301b77c4123cc289aadecfc195dada",
     "waraq/config.py": "af9cf65ea64003abd49f4cd985cfd30bccc033cb464a7737786c92e775dfc590",
-    "waraq/embedded_accounts.py": "090fe34221756def44c151b17e3ac6d261b6e32c86a2eeffd60fcd9b5d8d8da4",
-    "waraq/embedded_runtime.py": "c3701926fa538fddf219ea13ab89c53d45f475f291ebfde576805c2513205e93",
+    "waraq/embedded_accounts.py": "98162e5efa55adf6fec912e581d6c10b37322724fd0b181bbbad2efdc11e6ca6",
+    "waraq/embedded_runtime.py": "63690f5814f1d057ac0544e4ae1b0a088e25994446d91bda727386c75ec4163a",
     "waraq/internet.py": "35e289b3b6a698f1043714e87d84f3da5ec2680efaad5b7621c3acca4b2c0e09",
     "waraq/library.py": "e618eed33cdbaf0f55395a5392294ba8636adfb11d24de54c8f2242c10ee36da",
     "waraq/mobile_assets.py": "cba99042e34da22020a7444dee5839118d5dede25da80a31e7c05f3150ba9ba8",
@@ -20,9 +20,9 @@
     "waraq/remote_commands.py": "508b38b36f016ace7ca3a9d8f183c9f1216f69155b7ecfa1a6f0b02f743a6477",
     "waraq/remote_common.py": "55b7c54b144e44619e231de5f5220ab9f5b4fe49874a54da6e87a09f7c0cb624",
     "waraq/remote_library.py": "5c8359dd038d220bfb9bf80442ec412b9575a2d2b7f6c0f9f83ba8ba2fbb17e5",
-    "waraq/scheduler.py": "87100f6949f714af951b8314e352291eb333af892dd7c3305eaaf4262b4824eb",
+    "waraq/scheduler.py": "3a5ad1b0bd2ab60a43d69975f994591a9dbfb62e8e6b83d7fa4aaf6cd7d2964f",
     "waraq/services.py": "0762b98ed75b46ce0b38f6bc7c6d23baee8d439e80988c7c369200e070298de7",
-    "waraq/store.py": "0f13e27e0b78d5d456de2fbbc750e088d3d6cfa7c905ee909949453cb81cb2bb",
+    "waraq/store.py": "ecaefd1bf1f9a68bb1105f021fbec3bff097a64dbfa83ea7c3cecd2c0123b3ed",
     "waraq/youtube_update.py": "ce0e16cba920fe975628e650234bb8a05740fbbb86e38644c76c97906480fa69"
   },
   "backend_calls": [
@@ -336,5 +336,32 @@
     "workerStatus",
     "workersPageScroll",
     "youtubeUpdateButton"
-  ]
+  ],
+  "intentional_changes": {
+    "main.py": {
+      "previous_sha256": "faabed51d2c821893326ccab7d339752e06b34b1c04b2c64410d3f79a2dacd87",
+      "reason": "Apply the explicitly requested application Bold font; startup behavior otherwise unchanged."
+    },
+    "waraq/embedded_runtime.py": {
+      "previous_sha256": "c3701926fa538fddf219ea13ab89c53d45f475f291ebfde576805c2513205e93",
+      "reason": "No-follow Windows cache-junction preparation, ownership lease and cancellation before payload validation."
+    },
+    "waraq/embedded_accounts.py": {
+      "previous_sha256": "090fe34221756def44c151b17e3ac6d261b6e32c86a2eeffd60fcd9b5d8d8da4",
+      "reason": "Shared idle polling gate, error backoff/manual recovery, concurrent execution-safe quota work and cache persistence."
+    },
+    "waraq/bridge.py": {
+      "previous_sha256": "4570b38b0aa9863bcad2db89a26e50d9b7a744a47c669aeec83c987d3794b231",
+      "reason": "Sanitized engine reasons, shared polling, busy notifications and unchanged-queue projection reuse."
+    },
+    "waraq/store.py": {
+      "previous_sha256": "0f13e27e0b78d5d456de2fbbc750e088d3d6cfa7c905ee909949453cb81cb2bb",
+      "reason": "Read-only SQLite revision token; no schema or persisted value change."
+    },
+    "waraq/scheduler.py": {
+      "previous_sha256": "87100f6949f714af951b8314e352291eb333af892dd7c3305eaaf4262b4824eb",
+      "reason": "Existing ownership-checked manual recheck now resets account-service recovery latch, including empty account id."
+    }
+  },
+  "approved_change_base": "ff22d55f1d1bcc24969360b7974a1c0b54692377"
 }

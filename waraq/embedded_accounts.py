@@ -7,6 +7,7 @@ worker/background thread supplied by the caller or ``request_refresh``.
 from __future__ import annotations
 
 import copy
+from functools import wraps
 import json
 import math
 from pathlib import Path
@@ -39,6 +40,16 @@ _ERRORS = frozenset(("NO_ELIGIBLE_ACCOUNT", "CONCURRENCY_LIMIT", "LOCATION_BUSY"
                      "AUTH_BUSY", "AUTH_BEGIN_FAILED", "AUTH_ATTEMPT_NOT_FOUND", "ACCOUNT_NOT_AUTHENTICATED",
                      "STORAGE_UNAVAILABLE", "ENGINE_UNAVAILABLE", "LOCATION_MISMATCH", "ATTEMPT_EXISTS"))
 _IDEMPOTENT = frozenset(("health", "accounts.list", "auth.status", "attempt.resolve"))
+# Only transport loss is safe to repeat immediately. Validation, permission,
+# ownership and protocol errors need a deliberate repair/recheck instead.
+_TRANSPORT_ERRORS = frozenset(("engine_connection_failed", "engine_start_timeout", "engine_unavailable"))
+_FIXED_ERRORS = frozenset(("private_path_is_link", "private_permissions_failed", "private_owner_unknown",
+                           "engine_manifest_invalid", "engine_version_mismatch", "engine_integrity_failed",
+                           "engine_payload_missing", "engine_protocol_mismatch", "engine_api_invalid",
+                           "engine_response_too_large", "engine_session_invalid", "engine_already_owned",
+                           "engine_owner_invalid", "engine_owner_unverified", "engine_shutdown_unverified"))
+_HEALTH_ERRORS = _FIXED_ERRORS | _TRANSPORT_ERRORS | frozenset(("engine_http_error", "engine_request_failed",
+                        "ENGINE_UNAVAILABLE", "STORAGE_UNAVAILABLE", "STORAGE_FAILED", "UNAUTHORIZED"))
 
 
 def _number(value, default=0):
@@ -48,6 +59,29 @@ def _number(value, default=0):
 def _timestamp(value):
     value = _number(value)
     return value / 1000 if value > 100_000_000_000 else value
+
+
+def _tracked(method):
+    """Prevent new automatic work while a synchronous operation is active."""
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        with self._lock:
+            self._operations += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            with self._lock:
+                self._operations -= 1
+    return run
+
+
+def _serialized(method):
+    """Serialize metadata/auth updates, without blocking execution control."""
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        with self._refresh_lock:
+            return method(self, *args, **kwargs)
+    return _tracked(run)
 
 
 def _text(value, limit=200):
@@ -141,11 +175,15 @@ class EmbeddedAccountService:
         self.clock = clock or time.time
         self.root = Path(config.home) / "accounts-v2"
         self._lock = threading.RLock()
-        self._refresh_lock = threading.Lock()
+        self._refresh_lock = threading.RLock()
+        self._usage_lock = threading.Lock()
+        self._operations = 0
         self._accounts, self._auth, self._attempts = {}, {}, {}
         self._closed, self._refresh_thread = False, None
         self._failures, self._next_refresh, self._next_usage = 0, 0, 0
         self._health = {"state": "starting", "reason": "", "next_retry_at": 0, "migration_required": True}
+        self._health["requires_manual_recovery"] = False
+        self._persisted_public = None
         # These files contain only allowlisted UI metadata, never plugin state.
         try:
             state = json.loads((self.root / "ui-state.json").read_text(encoding="utf-8"))
@@ -217,6 +255,7 @@ class EmbeddedAccountService:
             candidates = [row["cooldown_until"] for row in self._accounts.values() if row["enabled"] and row["cooldown_until"] > now]
             return min(candidates, default=self._health["next_retry_at"])
 
+    @_tracked
     def _call(self, method, params=None, directory=None):
         with self._lock:
             if self._closed:
@@ -244,29 +283,38 @@ class EmbeddedAccountService:
                 with self._lock:
                     if self._closed:
                         raise AccountEngineError("engine_closed")
-                    self._failures = 0
-                    self._health.update(state="ready", reason="", next_retry_at=0)
+                    # An unrelated successful RPC must not clear a latched
+                    # profile/ownership failure; only explicit recovery does.
+                    if not self._health["requires_manual_recovery"]:
+                        self._failures = 0
+                        self._health.update(state="ready", reason="", next_retry_at=0)
                 return result
             except AccountEngineError as exc:
-                if exc.reason in ("engine_protocol_mismatch", "engine_request_failed", "ENGINE_UNAVAILABLE", "STORAGE_UNAVAILABLE", "STORAGE_FAILED"):
-                    with self._lock:
-                        self._failures += 1
-                        retry = self.clock() + min(60, 2 ** min(self._failures, 6))
-                        self._health.update(state="unavailable", reason=exc.reason, next_retry_at=retry)
-                        for row in self._accounts.values():
-                            row["usage"]["stale"] = True
+                if exc.reason in _HEALTH_ERRORS:
+                    self._record_failure(exc.reason)
                 raise
             except EmbeddedRuntimeError as exc:
-                if attempt + 1 < tries and not self._closed:
+                if exc.reason in _TRANSPORT_ERRORS and attempt + 1 < tries and not self._closed:
                     time.sleep(0.1)
                     continue
-                with self._lock:
-                    self._failures += 1
-                    retry = self.clock() + min(60, 2 ** min(self._failures, 6))
-                    self._health.update(state="unavailable", reason=exc.reason, next_retry_at=retry)
-                    for row in self._accounts.values():
-                        row["usage"]["stale"] = True
+                retry = self._record_failure(exc.reason)
                 raise AccountEngineError(exc.reason, retry) from None
+
+    def _record_failure(self, reason):
+        with self._lock:
+            if self._closed:
+                return 0
+            self._failures += 1
+            manual = reason in _FIXED_ERRORS or reason == "UNAUTHORIZED"
+            # Preserve a fixed error even if an already-running RPC later fails.
+            if self._health["requires_manual_recovery"]:
+                return self._health["next_retry_at"]
+            retry = 0 if manual else self.clock() + min(60, 2 ** min(self._failures, 6))
+            self._health.update(state="unavailable", reason=reason, next_retry_at=retry,
+                                requires_manual_recovery=manual)
+            for row in self._accounts.values():
+                row["usage"]["stale"] = True
+            return retry
 
     def _replace(self, rows):
         if not isinstance(rows, list):
@@ -283,43 +331,68 @@ class EmbeddedAccountService:
             public = self.list()
         # Persist only the sanitized projection. Failure of this optional cache
         # cannot invalidate the engine's successful authoritative mutation.
-        try:
-            private_directory(self.root)
-            _atomic_json(self.root / "public-cache.json", public)
-        except (OSError, EmbeddedRuntimeError):
-            pass
+        with self._lock:
+            if public != self._persisted_public:
+                try:
+                    private_directory(self.root)
+                    _atomic_json(self.root / "public-cache.json", public)
+                    self._persisted_public = copy.deepcopy(public)
+                except (OSError, EmbeddedRuntimeError):
+                    pass
         return public
 
+    @_serialized
     def refresh(self):
         with self._refresh_lock:
             result = self._call("accounts.list")
-            rows = self._replace(result.get("accounts"))
+            try:
+                rows = self._replace(result.get("accounts"))
+            except AccountEngineError:
+                self._record_failure("engine_protocol_mismatch")
+                raise
             with self._lock:
                 self._next_refresh = self.clock() + 5
             return rows
 
     def request_refresh(self, force=False):
-        """Safe from scheduler/Qt threads: single-flight and no synchronous RPC."""
+        """Shared automatic gate for scheduler and GUI; force skips freshness only."""
         with self._lock:
-            due = max(self._next_refresh, self._health["next_retry_at"])
-            if self._closed or (not force and self.clock() < due) or (self._refresh_thread and self._refresh_thread.is_alive()):
+            cfg = self.config.snapshot()
+            if (self._closed or not cfg.get("accounts_enabled", True)
+                    or self._health["requires_manual_recovery"] or self.clock() < self._health["next_retry_at"]
+                    or (not force and self.clock() < self._next_refresh)
+                    or self.refresh_in_flight):
                 return False
-            def run():
-                try:
-                    self.refresh()
-                    cfg = self.config.snapshot()
-                    with self._lock:
-                        usage_due = bool(cfg.get("accounts_auto_refresh", True)) and self.clock() >= self._next_usage
-                        if usage_due:
-                            self._next_usage = self.clock() + max(60, int(cfg.get("accounts_refresh_seconds", 300)))
-                    if usage_due:
-                        self.refresh_usage()
-                except EmbeddedRuntimeError:
-                    pass
-            self._refresh_thread = threading.Thread(target=run, daemon=True, name="embedded-account-refresh")
+            self._refresh_thread = threading.Thread(target=self._background_refresh, daemon=True, name="embedded-account-refresh")
             self._refresh_thread.start()
             return True
 
+    @_tracked
+    def _background_refresh(self):
+        try:
+            with self._lock:
+                # Settings/health may change between reservation and execution.
+                if (self._closed or not self.config.snapshot().get("accounts_enabled", True)
+                        or self._health["requires_manual_recovery"] or self.clock() < self._health["next_retry_at"]):
+                    return
+            self.refresh()
+            with self._lock:
+                cfg = self.config.snapshot()
+                usage_due = (not self._closed and cfg.get("accounts_enabled", True)
+                             and bool(cfg.get("accounts_auto_refresh", True)) and self.clock() >= self._next_usage)
+                if usage_due:
+                    self._next_usage = self.clock() + max(60, int(cfg.get("accounts_refresh_seconds", 300)))
+            if usage_due:
+                self.refresh_usage()
+        except EmbeddedRuntimeError:
+            pass
+
+    @property
+    def refresh_in_flight(self):
+        with self._lock:
+            return bool(self._operations or (self._refresh_thread and self._refresh_thread.is_alive()))
+
+    @_serialized
     def _mutate(self, method, params):
         result = self._call(method, params)
         # A subsequent failed list must not turn an acknowledged mutation into
@@ -374,6 +447,7 @@ class EmbeddedAccountService:
         return [{"id": row["id"], "label": _text(row.get("label"), 80), "type": "oauth"}
                 for row in result.get("authMethods", []) if isinstance(row, dict) and row.get("id") in ("browser", "device")]
 
+    @_serialized
     def begin_login(self, ident, method=None):
         ident = _identifier(ident)
         method = method or "browser"
@@ -392,6 +466,7 @@ class EmbeddedAccountService:
         return {"status": "pending", "mode": "device" if method == "device" else "auto", "url": url,
                 "userCode": _text(result.get("userCode"), 40)}
 
+    @_serialized
     def finish_login(self, ident, code=None):
         ident = _identifier(ident)
         if code:
@@ -413,6 +488,7 @@ class EmbeddedAccountService:
             self.refresh()
         return {"status": state, "authenticated": state == "success"}
 
+    @_serialized
     def cancel_login(self, ident):
         ident = _identifier(ident)
         with self._lock:
@@ -424,7 +500,15 @@ class EmbeddedAccountService:
                     self._auth.pop(ident, None)
         return {"status": "cancelled"}
 
+    @_serialized
     def recheck(self, ident=""):
+        if ident:
+            _identifier(ident)
+        with self._lock:
+            if self._closed:
+                raise AccountEngineError("engine_closed")
+            self._health.update(requires_manual_recovery=False, next_retry_at=0)
+            self._failures = 0
         if ident:
             self._call("usage.refresh", {"accountRef": _identifier(ident), "manual": True})
         rows = self.refresh()
@@ -433,7 +517,14 @@ class EmbeddedAccountService:
         _identifier(ident)
         return next((row for row in rows if row["id"] == ident), {})
 
+    @_tracked
     def refresh_usage(self, account_id=None, manual=False):
+        # A provider quota request can take minutes. Its own gate never holds
+        # the metadata/auth lock or blocks attempt begin/resolve/close RPCs.
+        with self._usage_lock:
+            return self._refresh_usage(account_id, manual)
+
+    def _refresh_usage(self, account_id=None, manual=False):
         params = {"manual": bool(manual)}
         if account_id:
             params["accountRef"] = _identifier(account_id)
@@ -460,6 +551,7 @@ class EmbeddedAccountService:
         # The GUI invokes this synchronous method from its bounded executor.
         return self.refresh_usage(None if all else account_id, manual)
 
+    @_tracked
     def begin_attempt(self, job_id, worker_id, model, directory=None, max_concurrency=None):
         if directory is None:
             raise AccountEngineError("attempt_directory_required")
@@ -510,6 +602,12 @@ class EmbeddedAccountService:
                 "state": _text(result.get("state"), 40), "events": events, "failure": safe_failure}
 
     def close_attempt(self, attempt_id, outcome="success", reason="", retry_after=0):
+        projection = self._close_attempt(attempt_id, outcome, reason, retry_after)
+        self.request_refresh(force=True)
+        return projection
+
+    @_tracked
+    def _close_attempt(self, attempt_id, outcome="success", reason="", retry_after=0):
         attempt_id = _identifier(attempt_id)
         if outcome not in ("success", "failed", "cancelled", "limit", "error", "completed"):
             raise AccountEngineError("invalid_attempt_outcome")
@@ -522,7 +620,6 @@ class EmbeddedAccountService:
             account = lease.get("account_id")
             if account in self._accounts:
                 self._accounts[account]["in_flight"] = max(0, self._accounts[account]["in_flight"] - 1)
-        self.request_refresh(force=True)
         return projection
 
     def acknowledge_migration(self):

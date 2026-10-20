@@ -5,7 +5,8 @@ CheckBox {
     id: control
     property QtObject theme: fallback
     Theme { id: fallback }
-    font.family: "Segoe UI"
+    font.family: control.theme.fontFamily
+    font.weight: control.theme.fontWeight
     font.pixelSize: theme.fs(13)
     implicitHeight: Math.max(30, contentItem.implicitHeight + 8)
     spacing: 8

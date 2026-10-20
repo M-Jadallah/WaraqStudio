@@ -31,7 +31,7 @@ def main():
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Waraq Studio")
     app.setOrganizationName("Waraq")
-    app.setFont(QFont("Segoe UI", 10))
+    app.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
     app.setWindowIcon(QIcon(str(Path(__file__).parent / "waraq" / "icon.svg")))
     home = Path(args.data_dir) if args.data_dir else Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "WaraqStudio"
     home.mkdir(parents=True, exist_ok=True)

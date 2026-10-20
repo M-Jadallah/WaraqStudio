@@ -69,6 +69,10 @@ jobs:
       - name: Embedded account engine native fixture (no OAuth or paid model)
         run: python tests/verify_embedded_engine.py
 
+      - name: Native idle, profile reopen and blocked-engine recovery
+        timeout-minutes: 6
+        run: python -u tests/verify_idle.py
+
       - name: Native UI interaction checks
         timeout-minutes: 5
         run: python -u tests/verify_ui.py
@@ -76,6 +80,10 @@ jobs:
       - name: Petrol theme, layout and dialog matrix
         timeout-minutes: 5
         run: python tests/verify_redesign.py
+
+      - name: Bold stage badges, status identity and contrast
+        timeout-minutes: 2
+        run: python tests/verify_stage_badges.py
 
       - name: Native account management and quota UI checks
         run: python tests/verify_accounts_ui.py

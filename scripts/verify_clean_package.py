@@ -39,6 +39,13 @@ def main():
             assert Path(report[name]).resolve().is_relative_to(executable.parent), report
         if os.environ.get('VERSION'):
             assert report['version'] == os.environ['VERSION'], report
+        # Windows may create compatibility cache junctions during the first
+        # native host start. Reusing this exact profile must remain supported.
+        subprocess.run([str(executable), '--data-dir', str(root / 'data'), '--check-environment', str(report_path)],
+                       env=env, cwd=root, check=True, timeout=120)
+        reopened = json.loads(report_path.read_text(encoding='utf-8'))
+        assert reopened['embedded_integrity'] and reopened['embedded_engine_ready'], reopened
+        assert reopened['version'] == report['version'], reopened
         subprocess.run([str(executable), '--data-dir', str(root / 'data'), '--smoke'],
                        env=env, cwd=root, check=True, timeout=120)
         print(json.dumps(report, ensure_ascii=False, indent=2))

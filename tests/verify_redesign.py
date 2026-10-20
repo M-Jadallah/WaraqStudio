@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QObject, QMetaObject, Q_ARG, QPoint, Qt, QUrl, QCoreApplication, QEvent, qInstallMessageHandler
+from PySide6.QtGui import QFont
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtTest import QTest
@@ -33,6 +34,7 @@ def main():
         os.environ.setdefault("QT_QPA_FONTDIR", str(Path(os.environ["WINDIR"]) / "Fonts"))
     QQuickStyle.setStyle("Basic")
     app = QApplication([])
+    app.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
     messages = []
     qInstallMessageHandler(lambda kind, context, text: messages.append(text))
     arguments = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
@@ -101,6 +103,57 @@ def main():
             assert found is not None, name
             return found
 
+        def assert_bold_text():
+            items = set(root.findChildren(QObject))
+            pending = [root.contentItem()]
+            while pending:
+                item = pending.pop()
+                items.add(item)
+                pending.extend(item.childItems())
+            for item in items:
+                meta = item.metaObject()
+                if meta.indexOfProperty("font") < 0 or meta.indexOfProperty("text") < 0:
+                    continue
+                if not item.property("visible") or not item.property("text"):
+                    continue
+                font = item.property("font")
+                assert font.weight() == QFont.Weight.Bold, (item.objectName(), item.property("text"), font.weight())
+                expected = "Consolas" if item.objectName() == "rawSettings" else "Segoe UI"
+                assert font.family() == expected, (item.objectName(), font.family())
+
+        def assert_stage_layout():
+            job = bridge.jobById(jobs[0]["id"])
+            flow = find("queueStages-" + job["id"])
+            wide = root.property("contentUnits") >= 1100
+            target = find(("queueStageColumn-" if wide else "queueTaskHeading-") + job["id"])
+            assert flow.parentItem() == target
+            assert flow.width() > 0 and flow.height() > 0
+            badges = [find("queueStage-" + job["id"] + "-" + step["name"]) for step in job["steps"]]
+            assert all(badge.isVisible() for badge in badges)
+            for previous, badge in zip(badges, badges[1:]):
+                assert badge.y() > previous.y() or badge.x() < previous.x(), "Stage order must read RTL"
+            row = find("queueRow-" + job["id"])
+            for badge in badges:
+                point = badge.mapToItem(row, badge.boundingRect().bottomRight())
+                assert point.y() <= row.height() + 1, (row.height(), point.y(), [(v.objectName(), v.property("implicitHeight"), v.property("height"), v.property("y")) for v in (flow, target, row)])
+                assert badge.x() + badge.width() <= flow.width() + 1, (badge.x(), badge.width(), flow.width())
+            if root.width() == 1060 and root.height() == 720 and abs(root.property("uiScale") - 1.4) < .01:
+                view = find("jobsList")
+                assert view.height() >= row.height(), (view.height(), row.height(), root.property("railOpen"))
+                top = row.mapToItem(view, row.boundingRect().topLeft()).y()
+                bottom = row.mapToItem(view, row.boundingRect().bottomRight()).y()
+                assert top >= -1 and bottom <= view.height() + 1, (top, bottom, view.height())
+                for badge in badges:
+                    bottom = badge.mapToItem(view, badge.boundingRect().bottomRight()).y()
+                    assert bottom <= view.height() + 1, (badge.objectName(), bottom, view.height())
+                # State/progress/details remain within the fully visible row alongside its title and badges.
+                for child in row.childItems():
+                    if child.metaObject().className().startswith("QQuickRowLayout"):
+                        for control in child.childItems():
+                            point = control.mapToItem(view, control.boundingRect().center())
+                            assert -1 <= point.y() <= view.height() + 1, (control.objectName(), point.y(), view.height())
+
+
         def click(name):
             item = find(name)
             point = item.mapToScene(item.boundingRect().center())
@@ -168,6 +221,9 @@ def main():
                             root.setProperty("settingsTab", tab)
                             QTest.qWait(5)
                         assert find("promptField").property("text") == config.data["prompt"]
+                    assert_bold_text()
+                    if page == 0:
+                        assert_stage_layout()
                     cases += 1
 
         # Updates preserve the jobs/source/results/files offsets and keyboard focus.
@@ -228,6 +284,7 @@ def main():
                     tune(theme="light" if theme == "dark" else "dark")
                     assert model.property("editText") == "nova-custom-draft"
                     tune(theme=theme)
+                assert_bold_text()
                 save(f"{theme}-{round(scale * 100)}-{name}")
                 # Live palette switch must not destroy an already-open draft.
                 if name == "templatesDialog":
@@ -238,6 +295,23 @@ def main():
                 assert find("runButton").hasActiveFocus(), name
                 modal_cases += 1
 
+        # A real TXT import publishes only the Word step; do not invent other badges.
+        imported = home / "imported.txt"
+        imported.write_text("تفريغ محلي لاختبار مراحل Word فقط", encoding="utf-8")
+        imported_id = store.add([{"video_id": "local-text", "title": "تفريغ محلي إلى Word", "position": 65}], config.snapshot(), input_path=str(imported))[0]
+        bridge.refresh()
+        tune(theme="dark", ui_scale=1.0)
+        root.setWidth(1060); root.setHeight(900); root.setProperty("page", 0)
+        QTest.qWait(50)
+        view = find("jobsList")
+        view.setProperty("contentY", max(0, view.property("contentHeight") - view.property("height")))
+        QTest.qWait(80)
+        local_flow = find("queueStages-" + imported_id)
+        badges = [child.objectName() for child in local_flow.childItems() if child.objectName().startswith("queueStage-")]
+        assert badges == ["queueStage-" + imported_id + "-opencode"], badges
+        assert_bold_text()
+        save("dark-word-only-import")
+
         root.close(); harness.shutdown_and_join()
         engine.deleteLater()
         QCoreApplication.sendPostedEvents(engine, QEvent.Type.DeferredDelete)
@@ -246,7 +320,7 @@ def main():
     if evidence:
         (evidence / "qml-messages.json").write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
     assert not failures, failures[:20]
-    print(f"Redesign acceptance passed: {cases} page configurations, {modal_cases} modal configurations, retained drafts/selections, stable models/focus, no QML errors.")
+    print(f"Redesign acceptance passed: {cases} page configurations, {modal_cases} modal configurations, retained drafts/selections, stable models/focus, Bold text and responsive RTL stage badges, no QML errors.")
 
 
 if __name__ == "__main__":

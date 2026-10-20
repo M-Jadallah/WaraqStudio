@@ -2,6 +2,7 @@
 from __future__ import annotations
 import copy
 import json
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -88,6 +89,11 @@ class EmbeddedAccountsDouble:
     def refresh(self):
         self._called("refresh")
         return self.list()
+
+    def request_refresh(self, force=False):
+        # Presentation/phone fixtures own their synthetic rows. Automatic
+        # polling is exercised separately with the real account-service gate.
+        return False
 
     def refresh_usage(self, account_id=None, manual=False):
         self._called("usage")
@@ -246,3 +252,289 @@ def test_engine_health_and_migration_acknowledgement(account_ui):
     env.bridge.recoverAccountEngine()
     pump(env.app, lambda: not env.bridge._account_operation_busy())
     assert "refresh" in [action for action, _ in env.accounts.calls]
+
+
+def test_engine_reason_projection_is_allowlisted_and_actionable(account_ui):
+    env = account_ui
+    env.accounts.status.update(state="unavailable", reason="private_path_is_link", next_retry_at=0,
+                               requires_manual_recovery=True)
+    env.bridge._publish_accounts()
+    status = env.bridge.accountEngine
+    assert status["reasonCode"] == "private_path_is_link"
+    assert status["requiresManualRecovery"] and status["nextRetryAt"] == 0
+    assert "رابط" in status["message"]
+    env.accounts.status.update(reason="C:/SECRET/token", next_retry_at=float("inf"))
+    env.bridge._publish_accounts()
+    status = env.bridge.accountEngine
+    assert status["reasonCode"] == "engine_unavailable" and status["nextRetryAt"] == 0
+    assert "SECRET" not in json.dumps(status)
+
+
+def test_disabled_accounts_do_not_claim_engine_is_starting(account_ui):
+    env = account_ui
+    env.config.snapshot = lambda: {"accounts_enabled": False}
+    env.accounts.status = {"state": "starting"}
+    env.bridge._publish_accounts()
+    assert env.bridge.accountEngine["reasonCode"] == "accounts_disabled"
+    assert "معطّلة" in env.bridge.accountEngine["message"]
+    env.accounts.status = {"state": "ready"}
+    env.bridge._publish_accounts()
+    assert env.bridge.accountEngine["state"] == "ready"
+    assert "جاهز" in env.bridge.accountEngine["message"]
+
+
+def _add_synthetic_job(env):
+    return env.store.add([{"video_id": "synthetic", "title": "Synthetic", "position": 1}], env.config.snapshot())[0]
+
+
+def test_idle_projection_skips_jobs_sql_and_json_until_real_sqlite_writes(account_ui, monkeypatch):
+    env = account_ui
+    ident = _add_synthetic_job(env)
+    env.bridge.refresh()
+    queries = []
+    env.store.db.set_trace_callback(queries.append)
+    original = env.store.jobs
+    reads = []
+    def jobs():
+        reads.append(True)
+        return original()
+    monkeypatch.setattr(env.store, "jobs", jobs)
+    for _ in range(5):
+        env.bridge.refresh()
+    assert not reads
+    assert not any("FROM jobs" in query or "FROM stages" in query for query in queries)
+    # Same-connection writes require total_changes, not just data_version.
+    revision = env.store.revision()
+    env.store.set_stage(ident, "download", "running", progress=37)
+    assert env.store.revision() != revision
+    env.bridge.refresh()
+    assert len(reads) == 1 and env.bridge.jobs[0]["progress"] == 37
+    # External commits require data_version, not just total_changes.
+    revision = env.store.revision()
+    with sqlite3.connect(env.store.path) as external:
+        external.execute("UPDATE jobs SET title=? WHERE id=?", ("External title", ident))
+    assert env.store.revision() != revision
+    env.bridge.refresh()
+    assert len(reads) == 2 and env.bridge.jobs[0]["title"] == "External title"
+    env.store.db.set_trace_callback(None)
+
+
+def test_retry_deadline_and_midnight_reproject_without_full_job_reads(account_ui, monkeypatch):
+    env = account_ui
+    ident = _add_synthetic_job(env)
+    midnight = time.mktime((2026, 10, 21, 0, 0, 0, 0, 0, -1))
+    now = [midnight - 10]
+    deadline = midnight + 60
+    env.store.set_stage(ident, "download", "pending", next_retry=deadline)
+    monkeypatch.setattr("waraq.bridge.time.time", lambda: now[0])
+    actual_localtime = time.localtime
+    monkeypatch.setattr("waraq.bridge.time.localtime", lambda value=None: actual_localtime(now[0] if value is None else value))
+    env.bridge.refresh()
+    assert env.bridge.jobs[0]["retryAt"].startswith("2026-10-21")
+    monkeypatch.setattr(env.store, "jobs", lambda: pytest.fail("unchanged jobs were reread"))
+    now[0] = midnight + 1
+    env.bridge.refresh()
+    assert env.bridge.jobs[0]["retryAt"] == "00:01"
+    now[0] = deadline
+    env.bridge.refresh()
+    assert env.bridge.jobs[0]["retryAt"] == ""
+    # A backwards wall-clock adjustment restores a future retry label too.
+    now[0] = midnight + 30
+    env.bridge.refresh()
+    assert env.bridge.jobs[0]["retryAt"] == "00:01"
+
+
+def test_cached_jobs_keep_worker_elapsed_logs_and_auto_stop_heartbeat(account_ui, monkeypatch):
+    env = account_ui
+    ident = _add_synthetic_job(env)
+    elapsed = [1]
+    env.scheduler.running = True
+    env.scheduler.workers = lambda: [{"id": "synthetic", "stage": "download", "elapsed": elapsed[0]}]
+    env.bridge.refresh()
+    original = env.store.jobs
+    reads = []
+    monkeypatch.setattr(env.store, "jobs", lambda: reads.append(True) or original())
+    elapsed[0] = 2
+    env.bridge.refresh()
+    assert env.bridge.workers[0]["elapsed"] == 2 and not reads
+    env.store.event(ident, "Synthetic event")
+    env.bridge.refresh()
+    assert env.bridge.logs[0]["message"] == "Synthetic event"
+    env.bridge._auto_stop = True
+    env.bridge.refresh()
+    assert env.bridge._auto_stop_seen
+    for stage in ("download", "deepgram", "opencode"):
+        env.store.set_stage(ident, stage, "completed")
+    env.bridge.refresh()
+    assert env.bridge._auto_stop_fired
+
+
+@pytest.fixture
+def automatic_ui(account_ui, monkeypatch):
+    from waraq.embedded_accounts import EmbeddedAccountService
+    env = account_ui
+    calls, fault, gate, response = [], [None], [None], [None]
+    def rpc(method, params, directory=None):
+        calls.append(method)
+        if gate[0]:
+            assert gate[0].wait(3)
+        if fault[0]:
+            raise fault[0]
+        if response[0]:
+            return response[0](method, params)
+        return {"ok": True, "data": {"accounts": []}}
+    runtime = SimpleNamespace(rpc=rpc)
+    supervisor = SimpleNamespace(ensure=lambda: runtime, close=lambda: None)
+    monkeypatch.setattr("waraq.embedded_accounts.private_directory", lambda path: path.mkdir(parents=True, exist_ok=True))
+    client = EmbeddedAccountService(env.config, supervisor)
+    env.scheduler.accounts = client
+    env.scheduler.recheck_account = client.recheck
+    env.client, env.calls, env.fault, env.gate, env.response = client, calls, fault, gate, response
+    try:
+        yield env
+    finally:
+        if gate[0]:
+            gate[0].set()
+        client.close()
+        if client._refresh_thread:
+            client._refresh_thread.join(3)
+
+
+def test_qt_account_timer_shares_scheduler_single_flight_and_busy_state(automatic_ui):
+    env = automatic_ui
+    env.gate[0] = threading.Event()
+    env.bridge._account_usage_timer.start(10)
+    env.bridge.timer.start(15)
+    pump(env.app, lambda: bool(env.calls))
+    assert env.calls == ["accounts.list"]
+    assert env.bridge.accountBusy
+    assert not env.client.request_refresh(force=True)  # simultaneous scheduler wakeup
+    for _ in range(5):
+        env.app.processEvents()
+        time.sleep(.015)
+    assert env.calls == ["accounts.list"]
+    env.gate[0].set()
+    pump(env.app, lambda: not env.client.refresh_in_flight)
+    env.bridge.refresh()
+    assert not env.bridge.accountBusy
+    assert env.calls == ["accounts.list", "usage.refresh", "accounts.list"]
+    # Busy changes still notify QML once healthy metadata/rows stay identical.
+    from PySide6.QtTest import QSignalSpy
+    spy = QSignalSpy(env.bridge.accountsChanged)
+    env.gate[0].clear()
+    assert env.client.request_refresh(force=True)
+    env.bridge._publish_accounts()
+    assert env.bridge.accountBusy and spy.count() == 1
+    env.gate[0].set()
+    env.client._refresh_thread.join(2)
+    env.bridge._publish_accounts()
+    assert not env.bridge.accountBusy and spy.count() == 2
+
+
+def test_qt_account_timer_disabled_backoff_static_and_manual_recovery(automatic_ui):
+    from waraq.embedded_runtime import EmbeddedRuntimeError
+    env = automatic_ui
+    cfg = {"accounts_enabled": False, "accounts_auto_refresh": False}
+    env.config.snapshot = lambda: cfg
+    env.bridge._account_usage_timer.start(10)
+    for _ in range(8):
+        env.app.processEvents()
+        time.sleep(.01)
+    assert not env.calls
+    cfg["accounts_enabled"] = True
+    env.fault[0] = EmbeddedRuntimeError("private_path_is_link")
+    pump(env.app, lambda: env.client.status["requires_manual_recovery"])
+    for _ in range(8):
+        env.app.processEvents()
+        time.sleep(.01)
+    assert env.calls == ["accounts.list"]
+    env.fault[0] = None
+    pump(env.app, lambda: not env.client.refresh_in_flight)
+    env.bridge.recoverAccountEngine()
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert env.client.status["state"] == "ready" and len(env.calls) == 2
+    env.client._health.update(state="unavailable", reason="engine_connection_failed", next_retry_at=time.time() + 60)
+    env.client._next_refresh = 0
+    for _ in range(8):
+        env.app.processEvents()
+        time.sleep(.01)
+    assert len(env.calls) == 2
+    assert not env.client.request_refresh(force=True)
+
+
+def _configure_login_runtime(env, auth_response=None):
+    account = {"accountRef": "account_1", "alias": "Synthetic", "loginState": "signed_out", "health": "ready"}
+    def response(method, params):
+        if auth_response and method in ("auth.status", "auth.begin"):
+            overridden = auth_response(method, params)
+            if overridden is not None:
+                return overridden
+        data = {"accounts": [account]}
+        if method == "health":
+            data = {"authMethods": [{"id": "browser", "label": "Browser"}]}
+        elif method == "auth.begin":
+            data = {"attemptId": "challenge_1", "accountRef": "account_1", "url": "https://auth.openai.com/login"}
+        elif method == "auth.status":
+            data = {"accountRef": "account_1", "state": "success"}
+        return {"ok": True, "data": data}
+    cfg = env.config.snapshot()
+    cfg["accounts_auto_refresh"] = False
+    env.config.snapshot = lambda: cfg
+    env.response[0] = response
+    env.client.refresh()
+    env.bridge._publish_accounts()
+    env.bridge.loginAccount("account_1")
+    pump(env.app, lambda: not env.bridge.accountLoginChoice.get("loading"))
+
+
+def test_delayed_auth_status_then_cancel_keeps_native_cancellation_intent(automatic_ui):
+    env = automatic_ui
+    entered, release = threading.Event(), threading.Event()
+    def delayed(method, params):
+        if method == "auth.status":
+            entered.set()
+            assert release.wait(3)
+            return {"ok": True, "data": {"accountRef": "account_1", "state": "pending"}}
+    _configure_login_runtime(env, delayed)
+    env.bridge.chooseAccountLoginMethod("account_1", "browser")
+    pump(env.app, entered.is_set)
+    assert env.client.refresh_in_flight
+    env.bridge.cancelAccountLogin("account_1")
+    assert env.bridge._account_ops["account_1"] == "cancel" and env.bridge.accountBusy
+    release.set()
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert env.calls.count("auth.cancel") == 1
+    assert not env.client._auth and not env.bridge._account_logins
+
+
+def test_automatic_refresh_racing_login_choice_queues_user_selection(automatic_ui):
+    env = automatic_ui
+    _configure_login_runtime(env)
+    env.gate[0] = threading.Event()
+    assert env.client.request_refresh(force=True)
+    pump(env.app, lambda: env.calls.count("accounts.list") == 2)
+    env.bridge.chooseAccountLoginMethod("account_1", "browser")
+    assert not env.bridge.accountLoginChoice
+    assert env.bridge._account_ops["account_1"] == "begin" and env.bridge.accountBusy
+    assert "auth.begin" not in env.calls  # queued behind the automatic RPC
+    env.gate[0].set()
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert env.calls.count("auth.begin") == 1 and len(env.opened) == 1
+
+
+def test_cancel_during_auth_begin_waits_for_challenge_binding_then_cancels(automatic_ui):
+    env = automatic_ui
+    entered, release = threading.Event(), threading.Event()
+    def delayed(method, params):
+        if method == "auth.begin":
+            entered.set()
+            assert release.wait(3)
+    _configure_login_runtime(env, delayed)
+    env.bridge.chooseAccountLoginMethod("account_1", "browser")
+    pump(env.app, entered.is_set)
+    env.bridge.cancelAccountLogin("account_1")
+    assert env.bridge._account_ops["account_1"] == "cancel" and env.bridge.accountBusy
+    release.set()
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert env.calls.count("auth.cancel") == 1
+    assert not env.client._auth and not env.opened

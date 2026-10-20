@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -16,6 +17,8 @@ import queue
 import re
 import secrets
 import signal
+import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -53,7 +56,82 @@ def _reject_links(path):
             raise EmbeddedRuntimeError("private_path_is_link")
 
 
-def _windows_acl(path, sid):
+def _check_cancelled(cancelled=None):
+    if cancelled is not None and cancelled():
+        raise EmbeddedRuntimeError("engine_closed")
+
+
+class _WindowsPath:
+    """Pin a path without following its final reparse point or sharing delete."""
+    def __init__(self, path, writable=False, create=False, share_write=False, metadata_only=False):
+        from ctypes import wintypes
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                           ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        self.kernel.CreateFileW.restype = wintypes.HANDLE
+        self.kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        self.kernel.GetFileInformationByHandleEx.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+        self.kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
+        self.kernel.DeviceIoControl.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                                               ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p)
+        self.kernel.DeviceIoControl.restype = wintypes.BOOL
+        # Include READ_DATA/LIST_DIRECTORY: attribute-only handles do not enforce
+        # Windows sharing restrictions and therefore cannot prevent replacement.
+        access = 0x60081 if writable else 0x81  # READ_CONTROL, WRITE_DAC, READ_ATTRIBUTES, READ_DATA
+        if metadata_only:
+            # Windows' compatibility junction denies LIST_DIRECTORY to Everyone.
+            # DELETE access still enforces no-delete sharing without reading its contents.
+            access = 0x70080 if writable else 0x10080
+        if create:
+            access |= 0xC0000000  # lock file needs read/write
+        self.handle = self.kernel.CreateFileW(str(path), access, 3 if create or share_write else 1, None, 4 if create else 3,
+                                              0x02200000, None)  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+        if self.handle == ctypes.c_void_p(-1).value:
+            self.handle = None
+            raise EmbeddedRuntimeError("private_permissions_failed")
+        info = (wintypes.DWORD * 2)()
+        if not self.kernel.GetFileInformationByHandleEx(self.handle, 9, info, ctypes.sizeof(info)):
+            self.close()
+            raise EmbeddedRuntimeError("private_permissions_failed")
+        self.attributes, self.tag = info
+
+    def junction_target(self):
+        from ctypes import wintypes
+        data, count = ctypes.create_string_buffer(16384), wintypes.DWORD()
+        if self.tag != 0xA0000003 or not self.kernel.DeviceIoControl(
+                self.handle, 0x900A8, None, 0, data, len(data), ctypes.byref(count), None):
+            raise EmbeddedRuntimeError("private_path_is_link")
+        raw = data.raw[:count.value]
+        try:
+            tag, size, _, offset, length, _, _ = struct.unpack_from("<IHHHHHH", raw)
+            if tag != 0xA0000003 or size + 8 > len(raw) or length % 2 or 16 + offset + length > len(raw):
+                raise ValueError()
+            target = raw[16 + offset:16 + offset + length].decode("utf-16-le")
+            if not target.startswith("\\??\\"):
+                raise ValueError()
+            return target[4:]
+        except (ValueError, struct.error, UnicodeError):
+            raise EmbeddedRuntimeError("private_path_is_link") from None
+
+    def canonical_path(self):
+        from ctypes import wintypes
+        self.kernel.GetFinalPathNameByHandleW.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+        self.kernel.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+        count = self.kernel.GetFinalPathNameByHandleW(self.handle, None, 0, 0)
+        data = ctypes.create_unicode_buffer(count + 1)
+        if not count or not self.kernel.GetFinalPathNameByHandleW(self.handle, data, len(data), 0):
+            raise EmbeddedRuntimeError("private_path_is_link")
+        value = data.value
+        return value[4:] if value.startswith("\\\\?\\") else value
+
+    def close(self):
+        if self.handle is not None:
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
+
+
+def _windows_acl_handle(handle, sid):
+    """Set only this pinned object's ACL; never propagate through reparse aliases."""
     from ctypes import wintypes
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -63,12 +141,11 @@ def _windows_acl(path, sid):
     advapi.GetSecurityDescriptorDacl.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
                                                 ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL))
     advapi.GetSecurityDescriptorDacl.restype = wintypes.BOOL
-    advapi.SetNamedSecurityInfoW.argtypes = (wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
-                                            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-    advapi.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi.SetKernelObjectSecurity.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p)
+    advapi.SetKernelObjectSecurity.restype = wintypes.BOOL
     kernel.LocalFree.argtypes = (ctypes.c_void_p,)
-    kernel.LocalFree.restype = ctypes.c_void_p
     descriptor = ctypes.c_void_p()
+    # New children inherit privacy; existing children are secured through their own handles.
     if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
             "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + sid + ")", 1, ctypes.byref(descriptor), None):
         raise EmbeddedRuntimeError("private_permissions_failed")
@@ -76,32 +153,209 @@ def _windows_acl(path, sid):
         present, defaulted, acl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
         if not advapi.GetSecurityDescriptorDacl(descriptor, ctypes.byref(present), ctypes.byref(acl), ctypes.byref(defaulted)) or not present:
             raise EmbeddedRuntimeError("private_permissions_failed")
-        if advapi.SetNamedSecurityInfoW(str(path), 1, 0x80000004, None, None, acl, None):
+        # Unlike SetSecurityInfo's tree propagation, this changes this object only.
+        if not advapi.SetKernelObjectSecurity(handle, 0x80000004, descriptor):
             raise EmbeddedRuntimeError("private_permissions_failed")
     finally:
         kernel.LocalFree(descriptor)
 
 
-def private_directory(path, recursive=False):
-    path = Path(path).absolute()
-    _reject_links(path)
-    path.mkdir(parents=True, exist_ok=True)
-    if os.name == "nt":
-        system = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "whoami.exe"
-        result = subprocess.run([str(system), "/user", "/fo", "csv", "/nh"], capture_output=True,
-                                text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-        match = re.search(r"S-1-[0-9-]+", result.stdout)
-        if result.returncode or not match:
+def _owner_sid():
+    from ctypes import wintypes
+    advapi, kernel = ctypes.WinDLL("advapi32", use_last_error=True), ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    advapi.GetTokenInformation.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
+    advapi.ConvertSidToStringSidW.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR))
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    token, count, text = wintypes.HANDLE(), wintypes.DWORD(), wintypes.LPWSTR()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 8, ctypes.byref(token)):
+        raise EmbeddedRuntimeError("private_owner_unknown")
+    try:
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(count))
+        data = ctypes.create_string_buffer(count.value)
+        if not advapi.GetTokenInformation(token, 1, data, len(data), ctypes.byref(count)):
             raise EmbeddedRuntimeError("private_owner_unknown")
-        secure = lambda item: _windows_acl(item, match.group(0))
-    else:
-        secure = lambda item: item.chmod(0o700 if item.is_dir() else 0o600)
-    secure(path)
-    if recursive:
-        for child in path.rglob("*"):
-            _reject_links(child)
-            secure(child)
-    return path
+        sid = ctypes.c_void_p.from_buffer(data).value
+        if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            raise EmbeddedRuntimeError("private_owner_unknown")
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(text)
+    finally:
+        kernel.CloseHandle(token)
+
+
+_CACHE_ALIAS = Path("home/AppData/Local/Microsoft/Windows/INetCache/Content.IE5")
+
+
+class _PrivateTree:
+    """Pin ancestors before inspecting descendants, and mutate only opened objects."""
+    def __init__(self, root, cancelled=None):
+        self.root, self.cancelled = Path(root).absolute(), cancelled
+        self.stack = ExitStack()
+        self.descendants = ExitStack()
+        self.nodes = {}
+        try:
+            for path in reversed((self.root, *self.root.parents)):
+                _check_cancelled(cancelled)
+                parent = self.nodes.get(path.parent)
+                if parent is not None:
+                    try:
+                        if os.name == "nt":
+                            path.mkdir(exist_ok=True)
+                        else:
+                            os.mkdir(path.name, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                node = self.open(path, writable=path == self.root)
+                self.reject(node, directory=True)
+                self.nodes[path] = node
+        except BaseException:
+            self.close()
+            raise
+
+    def open(self, path, writable=True):
+        _check_cancelled(self.cancelled)
+        if os.name == "nt":
+            cache_candidate = path == self.root / _CACHE_ALIAS
+            node = _WindowsPath(path, writable=writable,
+                                share_write=not path.is_relative_to(self.root) or path == self.root / "runtime.lock",
+                                metadata_only=cache_candidate)
+            stack = self.descendants if path != self.root and path.is_relative_to(self.root) else self.stack
+            stack.callback(node.close)
+        else:
+            parent = self.nodes.get(path.parent)
+            try:
+                node = os.open(path.name if parent is not None else path,
+                               os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            except OSError as exc:
+                if exc.errno in (40, 62):
+                    raise EmbeddedRuntimeError("private_path_is_link") from None
+                raise EmbeddedRuntimeError("private_permissions_failed") from None
+            stack = self.descendants if path != self.root and path.is_relative_to(self.root) else self.stack
+            stack.callback(os.close, node)
+        return node
+
+    @staticmethod
+    def reject(node, directory=False):
+        if os.name == "nt" and node.attributes & 0x400:
+            raise EmbeddedRuntimeError("private_path_is_link")
+        if directory and not (node.attributes & 0x10 if os.name == "nt" else stat.S_ISDIR(os.fstat(node).st_mode)):
+            raise EmbeddedRuntimeError("private_permissions_failed")
+
+    def prepare(self, recursive=True, allow_cache_alias=False, required=()):
+        sid = _owner_sid() if os.name == "nt" else None
+        def secure(node):
+            _check_cancelled(self.cancelled)
+            if os.name == "nt":
+                _windows_acl_handle(node.handle, sid)
+            else:
+                os.fchmod(node, 0o700 if stat.S_ISDIR(os.fstat(node).st_mode) else 0o600)
+        # Pin required directories before walking. Never create a directory via a link.
+        for suffix in required:
+            path = self.root
+            for name in Path(suffix).parts:
+                parent, path = path, path / name
+                if path in self.nodes:
+                    continue
+                try:
+                    if os.name == "nt":
+                        path.mkdir(exist_ok=True)
+                    else:
+                        os.mkdir(name, dir_fd=self.nodes[parent])
+                except FileExistsError:
+                    pass
+                node = self.open(path)
+                self.reject(node, directory=True)
+                self.nodes[path] = node
+        secure(self.nodes[self.root])
+        aliases = []
+        def walk(path):
+            _check_cancelled(self.cancelled)
+            names = os.listdir(path if os.name == "nt" else self.nodes[path])
+            for name in names:
+                _check_cancelled(self.cancelled)
+                child = path / name
+                node = self.nodes.get(child)
+                if node is None:
+                    node = self.open(child)
+                    if os.name == "nt" and node.attributes & 0x400:
+                        if allow_cache_alias and child == self.root / _CACHE_ALIAS:
+                            target = node.junction_target()
+                            expected = child.parent / "IE"
+                            aliases.append((expected, target))
+                            continue  # Neither ACL mutation nor traversal through the alias.
+                        self.reject(node)
+                    self.nodes[child] = node
+                secure(node)
+                directory = bool(node.attributes & 0x10) if os.name == "nt" else stat.S_ISDIR(os.fstat(node).st_mode)
+                if directory:
+                    walk(child)
+        if recursive:
+            walk(self.root)
+        for target, substitute in aliases:
+            # Walking the real tree has opened/pinned and secured IE and every ancestor.
+            node = self.nodes.get(target)
+            if node is None or not node.attributes & 0x10:
+                raise EmbeddedRuntimeError("private_path_is_link")
+            # Compare only the exact real sibling (including the canonical DOS
+            # spelling when the profile itself was supplied through an 8.3 path).
+            allowed = {os.path.normcase(str(target)), os.path.normcase(node.canonical_path())}
+            if os.path.normcase(substitute) not in allowed:
+                raise EmbeddedRuntimeError("private_path_is_link")
+        return self.root
+
+    def close(self):
+        self.descendants.close()
+        self.stack.close()
+
+    def release_descendants(self):
+        self.descendants.close()
+        self.nodes = {path: node for path, node in self.nodes.items() if path == self.root or not path.is_relative_to(self.root)}
+
+    def allow_runtime_writes(self):
+        if os.name == "nt":
+            # Overlap the pins: retain replacement protection while allowing the
+            # owned engine to create/rename its cache files beneath the root.
+            old = self.nodes[self.root]
+            node = _WindowsPath(self.root, writable=True, share_write=True)
+            self.stack.callback(node.close)
+            self.reject(node)
+            self.nodes[self.root] = node
+            old.close()
+
+
+def prepare_private_profile(root, cancelled=None, *, _tree=None):
+    """Secure a runtime profile, with the single Windows cache alias exception."""
+    tree = _tree or _PrivateTree(root, cancelled)
+    try:
+        return tree.prepare(allow_cache_alias=True,
+                            required=("home", "data", "state", "cache", "config", "config/opencode", "tmp"))
+    finally:
+        if _tree is None:
+            tree.close()
+
+
+def _windows_acl(path, sid):
+    path = Path(path).absolute()
+    tree = _PrivateTree(path.parent)
+    try:
+        node = tree.open(path)
+        tree.reject(node)
+        _windows_acl_handle(node.handle, sid)
+    finally:
+        tree.close()
+
+
+def private_directory(path, recursive=False):
+    tree = _PrivateTree(path)
+    try:
+        return tree.prepare(recursive=recursive)
+    finally:
+        tree.close()
 
 
 def isolated_environment(root, payload, inherited=None):
@@ -129,9 +383,36 @@ def isolated_environment(root, payload, inherited=None):
     return env
 
 
-def _lock_profile(root):
-    handle = (Path(root) / "runtime.lock").open("a+b")
+class _ProfileLease:
+    def __init__(self, handle, tree):
+        self.handle, self.tree = handle, tree
+
+    def close(self):
+        try:
+            self.handle.close()
+        finally:
+            self.tree.close()
+
+
+def _lock_profile(root, cancelled=None):
+    tree = _PrivateTree(root, cancelled)
+    handle = None
     try:
+        path = tree.root / "runtime.lock"
+        if os.name == "nt":
+            import msvcrt
+            node = _WindowsPath(path, create=True)
+            try:
+                tree.reject(node)
+                descriptor = msvcrt.open_osfhandle(node.handle, os.O_RDWR | os.O_BINARY)
+                node.handle = None  # transferred to the Python file
+                handle = os.fdopen(descriptor, "r+b")
+            finally:
+                node.close()
+        else:
+            descriptor = os.open("runtime.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600,
+                                 dir_fd=tree.nodes[tree.root])
+            handle = os.fdopen(descriptor, "r+b")
         if not handle.seek(0, 2):
             handle.write(b"0")
             handle.flush()
@@ -142,10 +423,17 @@ def _lock_profile(root):
         else:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return handle
+        return _ProfileLease(handle, tree)
     except OSError:
-        handle.close()
+        if handle:
+            handle.close()
+        tree.close()
         raise ExecutionOwnershipError("engine_already_owned") from None
+    except BaseException:
+        if handle:
+            handle.close()
+        tree.close()
+        raise
 
 
 def _atomic_json(path, value):
@@ -173,12 +461,15 @@ def _record_exit(root, owner):
 
 class PackagedPayload:
     """Manifest paths cannot escape the installed immutable payload directory."""
-    def __init__(self, root=None):
+    def __init__(self, root=None, cancelled=None):
         default_root = (Path(sys._MEIPASS) / "embedded-runtime" if hasattr(sys, "_MEIPASS") else
                         Path(__file__).resolve().parent.parent / "build" / "embedded-runtime")
         self.root = Path(root or default_root).absolute()
         self._checked_paths = set()
+        interrupted = threading.Event()
+        self._cancelled = lambda: interrupted.is_set() or (cancelled is not None and cancelled())
         try:
+            _check_cancelled(self._cancelled)
             self._check_links(self.root)
             manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
             if manifest.get("schema") != 1 or manifest.get("platform") != "win32-x64":
@@ -197,21 +488,37 @@ class PackagedPayload:
                 if member.relative_to(self.root).as_posix() not in checksums:
                     raise EmbeddedRuntimeError("engine_manifest_invalid")
             def verify_member(item):
+                _check_cancelled(self._cancelled)
                 name, digest = item
                 member = self._member(name)
                 if not re.fullmatch(r"[a-f0-9]{64}", str(digest)):
                     raise EmbeddedRuntimeError("engine_manifest_invalid")
                 with member.open("rb") as stream:
-                    actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                    digest_state = hashlib.sha256()
+                    while True:
+                        _check_cancelled(self._cancelled)
+                        block = stream.read(1024 * 1024)
+                        if not block:
+                            break
+                        digest_state.update(block)
+                    actual = digest_state.hexdigest()
                 if actual != digest:
                     raise EmbeddedRuntimeError("engine_integrity_failed")
             # Independent reads are bounded so cold Windows file inspection
             # cannot serialize startup behind every dependency's first open.
             with ThreadPoolExecutor(max_workers=min(8, len(checksums))) as readers:
-                for _ in readers.map(verify_member, checksums.items()):
-                    pass
-            actual_files = {member.relative_to(self.root).as_posix() for member in self.root.rglob("*")
-                            if member.is_file() and member != self.root / "manifest.json"}
+                try:
+                    for _ in readers.map(verify_member, checksums.items()):
+                        _check_cancelled(self._cancelled)
+                except BaseException:
+                    interrupted.set()
+                    raise
+            actual_files = set()
+            for member in self.root.rglob("*"):
+                _check_cancelled(self._cancelled)
+                self._check_links(member)
+                if member.is_file() and member != self.root / "manifest.json":
+                    actual_files.add(member.relative_to(self.root).as_posix())
             if actual_files != set(checksums):
                 raise EmbeddedRuntimeError("engine_integrity_failed")
         except EmbeddedRuntimeError:
@@ -233,6 +540,7 @@ class PackagedPayload:
         # Check each ancestor once per validation, avoiding hundreds of thousands
         # of repeated Windows reparse-point queries. Every file is still hashed.
         for part in (member, *member.parents):
+            _check_cancelled(self._cancelled)
             if part in self._checked_paths:
                 break
             if part.is_symlink() or getattr(part, "is_junction", lambda: False)():
@@ -341,7 +649,7 @@ def _process_identity(pid):
 
 
 class EmbeddedRuntime:
-    def __init__(self, supervisor, payload, root, startup_timeout=30):
+    def __init__(self, supervisor, payload, root, startup_timeout=30, *, lease=None):
         self.supervisor, self.payload, self.profile = supervisor, payload, Path(root)
         self.executable = payload.opencode
         self.password, self.instance_id = secrets.token_urlsafe(32), secrets.token_hex(16)
@@ -349,9 +657,12 @@ class EmbeddedRuntime:
         self.url, self.process, self._job, self._created = "", None, None, None
         self._lock, self._stopping = threading.RLock(), False
         self.sessions = set()
-        self.env = isolated_environment(root, payload)
-        self._lease = _lock_profile(root)
+        self._lease = lease or _lock_profile(root)
         try:
+            if lease is None:
+                self._lease.tree.allow_runtime_writes()
+            self.env = isolated_environment(root, payload)
+            _check_cancelled(lambda: supervisor._closed)
             owner = self.profile / "runtime-owner.json"
             if owner.exists():
                 try:
@@ -431,10 +742,18 @@ class EmbeddedRuntime:
                 parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
             raise EmbeddedRuntimeError("engine_start_timeout")
         self.url = url.rstrip("/")
-        self.request("GET", "/api/info", timeout=5)
-        health = self.rpc("health", {})
-        if not isinstance(health, dict) or health.get("ok") is not True or health.get("data", {}).get("apiVersion") != API_VERSION:
-            raise EmbeddedRuntimeError("engine_protocol_mismatch")
+        while True:
+            _check_cancelled(lambda: self.supervisor._closed)
+            try:
+                self.request("GET", "/api/info", timeout=1)
+                health = self.rpc("health", {}, timeout=1)
+                if not isinstance(health, dict) or health.get("ok") is not True or health.get("data", {}).get("apiVersion") != API_VERSION:
+                    raise EmbeddedRuntimeError("engine_protocol_mismatch")
+                break
+            except EmbeddedRuntimeError as exc:
+                if exc.reason not in ("engine_connection_failed", "engine_http_error") or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
     def request(self, method, path, data=None, directory=None, timeout=15):
         if not isinstance(path, str) or not path.startswith("/api/") or "://" in path or "#" in path:
@@ -584,6 +903,7 @@ class EmbeddedRuntime:
                 if not self._job.empty():
                     raise ExecutionOwnershipError("engine_shutdown_unverified")
                 self._job.close()
+                self._job = None
             owner = self.profile / "runtime-owner.json"
             if proc and self._created:
                 _record_exit(self.profile, {"pid": proc.pid, "created": self._created, "instance_id": self.instance_id})
@@ -616,12 +936,22 @@ class EmbeddedRuntimeSupervisor:
             if self._runtime:
                 self._runtime.stop()
                 self._runtime = None
-            payload = PackagedPayload(self.payload_root)
-            private_directory(self.root, recursive=True)
-            for suffix in ("home", "data", "state", "cache", "config", "config/opencode", "tmp"):
-                private_directory(self.root / suffix)
-            self._runtime = EmbeddedRuntime(self, payload, self.root)
-            return self._runtime
+            cancelled = lambda: self._closed
+            lease = _lock_profile(self.root, cancelled)
+            try:
+                prepare_private_profile(self.root, cancelled, _tree=lease.tree)
+                payload = PackagedPayload(self.payload_root, cancelled=cancelled)
+                _check_cancelled(cancelled)
+                # ACL inspection has completed. Permit the engine to replace its own
+                # cache/owner files, while the lease still pins the root and ancestors.
+                lease.tree.release_descendants()
+                lease.tree.allow_runtime_writes()
+                owned_lease, lease = lease, None
+                self._runtime = EmbeddedRuntime(self, payload, self.root, lease=owned_lease)
+                return self._runtime
+            finally:
+                if lease is not None:
+                    lease.close()
 
     def confirm_stopped(self, session_id="", instance_id="", workpath=None, **ignored):
         """Old attempts can replay only after this exact server is proven absent."""
