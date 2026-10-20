@@ -23,7 +23,7 @@ import threading
 import time
 import traceback
 from unittest.mock import patch
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -108,6 +108,7 @@ def browser_checks(base, bridges, gui, output):
             page = context.new_page()
             errors = []
             page.on("pageerror", lambda exc: errors.append(str(exc)))
+            library_delay = max(0, float(os.environ.get("WARAQ_STACK_LIBRARY_DELAY_MS", "0"))) / 1000
 
             def open_scanned_link(url):
                 # Use a genuinely different site, rather than spoofing browser
@@ -193,8 +194,41 @@ def browser_checks(base, bridges, gui, output):
             next_listing = api(f"/api/devices/{id_a}/library/files?limit=50&cursor="+quote(listing["next_cursor"],safe=""))
             assert next_listing["status"] == 200 and len(next_listing["body"]["files"]) == 4
             assert not ({entry["file_id"] for entry in listing["files"]} & {entry["file_id"] for entry in next_listing["body"]["files"]})
-            page.locator("#library-more").click()
-            expect(page.locator("#library-files article")).to_have_count(54)
+            def library_state():
+                return page.evaluate("""() => ({loaded:ui.library.loaded, loading:ui.library.loading,
+                    busy:ui.library.busy, organizing:ui.library.organizing, pending:ui.pending,
+                    polling:ui.polling, online:ui.online, next:ui.library.next,
+                    files:ui.library.files.length, status:document.querySelector('#library-status').textContent,
+                    error:document.querySelector('#library-error').textContent})""")
+            expect(page.locator("#library-more")).to_be_visible()
+            expect(page.locator("#library-more")).to_be_enabled()
+            before_more = library_state()
+            assert before_more["loaded"] and before_more["next"] == listing["next_cursor"], before_more
+            if library_delay:
+                # Delay only this append's real TLS response beyond the old 5s
+                # DOM wait. Other API reads/navigation keep normal semantics.
+                def delayed_more(route):
+                    response = route.fetch()
+                    time.sleep(library_delay)
+                    route.fulfill(response=response)
+                page.route("**/library/files?*", delayed_more, times=1)
+            try:
+                # A TLS relay read may outlast the DOM assertion's default 5s.
+                # Observe completion of this one click's real cursor request,
+                # then retain the exact rendered count assertion unchanged.
+                with page.expect_response(lambda response: urlsplit(response.url).path == f"/api/devices/{id_a}/library/files"
+                        and parse_qs(urlsplit(response.url).query).get("cursor") == [listing["next_cursor"]], timeout=15000) as more_response:
+                    page.locator("#library-more").click()
+                assert more_response.value.status == 200
+                more = more_response.value.json()
+                assert not more["busy"] and len(more["files"]) == 4 and more["total"] == 54, more
+                expect(page.locator("#library-files article")).to_have_count(54)
+                assert not page.evaluate("ui.library.loading")
+            except Exception as exc:
+                raise AssertionError(f"Library More failed; before={before_more!r}; after={library_state()!r}") from exc
+            finally:
+                if library_delay:
+                    page.unroute("**/library/files?*", delayed_more)
             page.locator("#library-panel > #library-controls > details > summary").click()
             page.locator("#library-search").fill("درس الإنترنت")
             expect(page.locator("#library-files article")).to_have_count(1)

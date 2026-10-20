@@ -95,6 +95,8 @@ jobs:
         run: python -m playwright install msedge
 
       - name: LAN and Internet phone acceptance
+        env:
+          WARAQ_STACK_LIBRARY_DELAY_MS: "6000"
         run: |
           python tests/verify_mobile.py
           python tests/verify_mobile_internet.py
