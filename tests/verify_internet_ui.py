@@ -91,7 +91,7 @@ def main():
                          if item.isVisible() and item.property("text") == value), None)
 
         def control(name):
-            item = find(name)
+            item = find(name) or root.findChild(QObject, name)
             assert item is not None, name
             return item
 
@@ -128,6 +128,12 @@ def main():
             QTest.qWait(100)
 
         def quick_click():
+            options = root.findChild(QObject, "operationOptionsPopup")
+            if not options.property("visible"):
+                opener = control("operationOptionsButton")
+                point = opener.mapToScene(opener.boundingRect().center())
+                QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(round(point.x()), round(point.y())))
+                QTest.qWait(100)
             button = control("quickInternetButton")
             assert button.isVisible() and button.property("enabled")
             origin = button.mapToScene(QPointF(0, 0))
@@ -136,6 +142,9 @@ def main():
             point = button.mapToScene(button.boundingRect().center())
             QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(round(point.x()), round(point.y())))
             QTest.qWait(100)
+            if options.property("visible"):
+                QMetaObject.invokeMethod(options, "close")
+                QTest.qWait(50)
 
         def bounds():
             card = control("internetAccessCard")
@@ -264,6 +273,10 @@ def main():
                         root.grabWindow().save(str(output / f"internet-native-{theme}-{round(scale * 100)}.png"))
                     root.setProperty("page", 0)
                     QTest.qWait(100)
+                    opener = control("operationOptionsButton")
+                    point = opener.mapToScene(opener.boundingRect().center())
+                    QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(round(point.x()), round(point.y())))
+                    QTest.qWait(100)
                     for object_name in ("quickInternetButton", "quickInternetStatus", "runButton", "autoStopBox"):
                         item = control(object_name)
                         origin = item.mapToScene(QPointF(0, 0))
@@ -271,6 +284,8 @@ def main():
                         assert origin.y() >= -1 and origin.y()+item.height() <= root.height()+1, object_name
                     if output:
                         root.grabWindow().save(str(output / f"internet-main-{theme}-{round(scale * 100)}.png"))
+                    QTest.keyClick(root, Qt.Key_Escape)
+                    QTest.qWait(40)
                     root.setProperty("page", 5)
                     QTest.qWait(100)
 

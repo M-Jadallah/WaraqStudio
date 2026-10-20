@@ -85,6 +85,12 @@ jobs:
       - name: Native account management and quota UI checks
         run: python tests/verify_accounts_ui.py
 
+      - name: Task details and frozen account comparison table
+        timeout-minutes: 3
+        run: |
+          python tests/verify_task_dialog.py
+          python tests/verify_account_table.py
+
       - name: Native queue scrolling stress
         run: python tests/verify_queue_scroll.py
 

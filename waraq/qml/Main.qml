@@ -487,50 +487,100 @@ ApplicationWindow {
             spacing: 0
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: headerContent.implicitHeight + (win.shortOperations ? 8 : 28)
+                Layout.preferredHeight: headerContent.implicitHeight + 20
                 color: win.bg
                 ColumnLayout {
                     id: headerContent
                     anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                    anchors.margins: 16; anchors.topMargin: win.shortOperations ? 4 : 16; spacing: win.shortOperations ? 2 : 8
+                    anchors.leftMargin: 16; anchors.rightMargin: 16; anchors.topMargin: 10
+                    spacing: 7
                     RowLayout {
-                        Layout.fillWidth: true
+                        Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: 12
                         SubText { text: backend.running ? "● المحرك يعمل" : "○ المحرك متوقف"; color: backend.running ? visualTheme.success : win.muted }
-                        Item { Layout.fillWidth: true }
-                        ColumnLayout {
-                            Layout.fillWidth: true; spacing: 2
-                            LabelText { text: win.pageNames[win.page]; font.pixelSize: win.fs(22); font.weight: visualTheme.fontWeight; Layout.fillWidth: true }
-                            SubText { text: win.pageDescriptions[win.page]; Layout.fillWidth: true }
-                        }
-                    }
-                    // Reconnect the already paired phone without leaving the main page.
-                    ActionRow {
-                        AppButton {
-                            id: quickInternetButton; objectName: "quickInternetButton"
-                            readonly property bool active: win.internetState.enabled === true || win.internetState.connected
-                            text: active ? "إيقاف اتصال الإنترنت" : (win.internetState.registered ? "تفعيل اتصال الإنترنت" : "إعداد ربط الهاتف")
-                            primary: !active
-                            enabled: !win.internetState.busy
+                        SubText {
+                            id: operationSummary
+                            objectName: "operationOptionsSummary"
+                            Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 1
+                            text: win.internetState.error ? "تعذّر ربط الهاتف: " + win.internetState.error
+                                : [win.lastForce.provider ? win.forceSummary() : "", autoStopBox.checked ? "إغلاق تلقائي مفعّل" : "", "الهاتف: " + win.internetState.status].filter(function(value) { return value.length > 0 }).join(" · ")
+                            color: win.internetState.error ? visualTheme.warning : win.muted
+                            activeFocusOnTab: true
+                            ToolTip.visible: summaryHover.hovered || activeFocus
+                            ToolTip.text: text
+                            HoverHandler { id: summaryHover }
                             Accessible.name: text
-                            onClicked: {
-                                if (active) backend.stopInternet()
-                                else if (win.internetState.registered) backend.startInternet()
-                                else win.page = 5
-                            }
                         }
-                        LabelText {
-                            objectName: "quickInternetStatus"
-                            text: "ربط الهاتف: " + win.internetState.status + (win.internetState.name ? " · " + win.internetState.name : "") + (win.internetState.error ? " · " + win.internetState.error : "")
-                            color: win.internetState.error ? (win.dark ? "#ffba82" : "#9a4409") : (win.internetState.connected ? (win.dark ? "#61ddbb" : "#08765b") : win.muted)
-                            width: Math.max(160, parent.width - quickInternetButton.width - 12)
-                        }
+                        LabelText { text: win.pageNames[win.page]; font.pixelSize: win.fs(20); font.weight: visualTheme.fontWeight; Layout.minimumWidth: 0; Layout.maximumWidth: (win.width - navRail.width - 32) * 0.4 }
                     }
+                    SubText { text: win.pageDescriptions[win.page]; visible: win.page !== 0; Layout.fillWidth: true }
                     ActionRow {
-                        AppButton { objectName: "runButton"; text: backend.running ? "إيقاف بعد المهام الحالية" : "تشغيل الطابور"; primary: !backend.running; onClicked: win.runClicked() }
-                        AppButton { objectName: "forceButton"; text: "فرض إعداد على عمال OpenCode"; onClicked: win.openForceDialog(false) }
-                        AppCheck { objectName: "autoStopBox"; text: "إيقاف التطبيق بعد اكتمال الطابور"; onClicked: backend.setAutoStop(checked); Accessible.name: "إيقاف التطبيق تلقائيًا بعد اكتمال الطابور" }
+                        id: operationToolbar
+                        objectName: "operationToolbar"
+                        AppButton {
+                            objectName: "runButton"
+                            text: backend.running ? (win.narrowHeader ? "إيقاف بعد الحالية" : "إيقاف بعد المهام الحالية") : "تشغيل الطابور"
+                            primary: !backend.running
+                            onClicked: win.runClicked()
+                            Accessible.name: backend.running ? "إيقاف بعد المهام الحالية" : "تشغيل الطابور"
+                            ToolTip.visible: hovered || activeFocus
+                            ToolTip.text: Accessible.name
+                        }
+                        AppButton { objectName: "addSourceButton"; text: "إضافة مصدر"; gold: true; onClicked: win.page = 1 }
+                        AppButton { objectName: "exportReportButton"; text: "تقرير Excel"; onClicked: backend.exportReport() }
+                        AppButton { id: operationOptionsButton; objectName: "operationOptionsButton"; text: "خيارات التشغيل والاتصال"; onClicked: operationOptionsPopup.open() }
                     }
-                    SubText { objectName: "forceSummary"; text: win.forceSummary(); color: win.lastForce.provider ? win.accent : win.muted; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; visible: !!win.lastForce.provider }
+                }
+                Popup {
+                    id: operationOptionsPopup
+                    objectName: "operationOptionsPopup"
+                    parent: Overlay.overlay
+                    width: Math.min(win.width - 32, Math.round(520 * win.uiScale))
+                    height: Math.min(optionsContent.implicitHeight + 24, win.height - 80)
+                    x: Math.max(16, Math.min(win.width - width - 16, operationOptionsButton.mapToItem(parent, 0, 0).x))
+                    y: Math.max(16, Math.min(win.height - height - 16, operationOptionsButton.mapToItem(parent, 0, operationOptionsButton.height).y + 6))
+                    padding: 12
+                    modal: true; focus: true
+                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                    onOpened: forceButton.forceActiveFocus()
+                    onClosed: operationOptionsButton.forceActiveFocus()
+                    background: Rectangle { color: win.panel; border.color: win.line; radius: 10 }
+                    contentItem: ScrollView {
+                        id: runOptionsScroll
+                        objectName: "operationOptionsScroll"
+                        clip: true; contentWidth: availableWidth
+                        ScrollBar.vertical: AppScroll {}
+                        ColumnLayout {
+                            id: optionsContent
+                            width: runOptionsScroll.availableWidth
+                            spacing: 10
+                            LabelText { text: "خيارات التشغيل والاتصال"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                            AppButton { id: forceButton; objectName: "forceButton"; text: "فرض إعداد على عمال OpenCode"; Layout.fillWidth: true; onClicked: { operationOptionsPopup.close(); win.openForceDialog(false) } }
+                            SubText { objectName: "forceSummary"; text: win.forceSummary(); color: win.lastForce.provider ? win.accent : win.muted; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                            AppCheck { id: autoStopBox; objectName: "autoStopBox"; text: "إيقاف التطبيق بعد اكتمال الطابور"; Layout.fillWidth: true; onClicked: backend.setAutoStop(checked); Accessible.name: "إيقاف التطبيق تلقائيًا بعد اكتمال الطابور" }
+                            Rule {}
+                            AppButton {
+                                id: quickInternetButton; objectName: "quickInternetButton"
+                                readonly property bool active: win.internetState.enabled === true || win.internetState.connected
+                                text: active ? "إيقاف اتصال الإنترنت" : (win.internetState.registered ? "تفعيل اتصال الإنترنت" : "إعداد ربط الهاتف")
+                                primary: !active
+                                enabled: !win.internetState.busy
+                                Layout.fillWidth: true
+                                Accessible.name: text
+                                onClicked: {
+                                    if (active) backend.stopInternet()
+                                    else if (win.internetState.registered) backend.startInternet()
+                                    else { operationOptionsPopup.close(); win.page = 5 }
+                                }
+                            }
+                            LabelText {
+                                objectName: "quickInternetStatus"
+                                text: "ربط الهاتف: " + win.internetState.status + (win.internetState.name ? " · " + win.internetState.name : "") + (win.internetState.error ? " · " + win.internetState.error : "")
+                                color: win.internetState.error ? visualTheme.warning : (win.internetState.connected ? visualTheme.success : win.muted)
+                                Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; elide: Text.ElideNone
+                            }
+                            AppButton { text: "تم"; Layout.alignment: Qt.AlignLeft; onClicked: operationOptionsPopup.close() }
+                        }
+                    }
                 }
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
             }
@@ -546,11 +596,18 @@ ApplicationWindow {
 
                 // Operations
                 ColumnLayout {
-                    spacing: win.shortOperations ? 4 : 12
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 4
-                        columnSpacing: 10; rowSpacing: 8
+                    id: operationsPage
+                    objectName: "operationsPage"
+                    readonly property bool miniStages: win.contentUnits < 1000
+                    readonly property real statusWidth: Math.round((miniStages ? 86 : 118) * win.uiScale)
+                    readonly property real progressWidth: Math.round((miniStages ? 54 : 76) * win.uiScale)
+                    readonly property real stagesWidth: Math.round((miniStages ? 138 : 282) * win.uiScale)
+                    readonly property real actionWidth: Math.round(52 * win.uiScale)
+                    readonly property real selectionWidth: Math.round(28 * win.uiScale)
+                    readonly property real columnGap: Math.round(6 * win.uiScale)
+                    spacing: Math.round(8 * win.uiScale)
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 8
                         Repeater {
                             model: [
                                 {label: "تحتاج انتباهك", value: backend.stats.attention, color: visualTheme.warning},
@@ -560,90 +617,125 @@ ApplicationWindow {
                             ]
                             delegate: Box {
                                 required property var modelData
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: win.shortOperations ? statContent.implicitHeight + 12 : Math.round(72 * win.uiScale)
-                                GridLayout {
-                                    id: statContent
-                                    anchors.fill: parent; anchors.margins: win.shortOperations ? 6 : 12
-                                    columns: win.shortOperations ? 2 : 1
-                                    layoutDirection: Qt.RightToLeft
-                                    columnSpacing: 8; rowSpacing: 3
-                                    SubText { text: modelData.label; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
-                                    LabelText { text: modelData.value; font.pixelSize: win.fs(24); color: win.dark ? modelData.color : win.ink; Layout.alignment: Qt.AlignRight }
+                                required property int index
+                                objectName: "operationStat-" + index
+                                Layout.fillWidth: true; Layout.preferredWidth: 1
+                                Layout.preferredHeight: Math.round(40 * win.uiScale)
+                                RowLayout {
+                                    anchors.fill: parent; anchors.margins: 8; spacing: 6
+                                    LabelText { text: modelData.value; font.pixelSize: win.fs(20); color: win.dark ? modelData.color : win.ink }
+                                    SubText { text: modelData.label; Layout.fillWidth: true; Layout.minimumWidth: 0; Accessible.name: modelData.label + ": " + modelData.value }
                                 }
                             }
                         }
                     }
                     RowLayout {
-                        Layout.fillWidth: true
-                        AppButton { text: "إضافة مصدر"; gold: true; onClicked: win.page = 1 }
-                        AppButton { text: "تقرير Excel"; onClicked: backend.exportReport() }
-                        Item { Layout.fillWidth: true }
-                        AppField { objectName: "queueSearch"; Layout.preferredWidth: Math.min(240, win.width * 0.2); Layout.minimumWidth: 0; placeholderText: "بحث في المهام"; horizontalAlignment: Text.AlignRight; onTextChanged: win.search = text; Accessible.name: "بحث في المهام" }
-                        LabelText { text: "طابور المعالجة"; font.pixelSize: win.fs(18); font.weight: visualTheme.fontWeight }
+                        objectName: "queueSearchFilterRow"
+                        Layout.fillWidth: true; spacing: 8
+                        AppButton {
+                            id: bulkRetryButton
+                            objectName: "bulkRetryMenuButton"
+                            text: "إعادة جماعية"
+                            visible: win.filter === "attention"
+                            enabled: win.attentionGroups().length > 0
+                            onClicked: bulkRetryPopup.open()
+                            Popup {
+                                id: bulkRetryPopup
+                                objectName: "bulkRetryPopup"
+                                y: parent.height + 4
+                                width: Math.min(420 * win.uiScale, operationsPage.width)
+                                height: Math.min(bulkRetryContent.implicitHeight + 20, win.height * 0.55)
+                                padding: 10; focus: true; modal: true
+                                onClosed: bulkRetryButton.forceActiveFocus()
+                                background: Rectangle { color: win.panel; border.color: win.line; radius: 8 }
+                                contentItem: ScrollView {
+                                    id: bulkRetryScroll
+                                    clip: true; contentWidth: availableWidth
+                                    ColumnLayout {
+                                        id: bulkRetryContent
+                                        width: bulkRetryScroll.availableWidth; spacing: 8
+                                        Repeater {
+                                            model: win.attentionGroups()
+                                            delegate: AppButton {
+                                                required property var modelData
+                                                Layout.fillWidth: true
+                                                text: "إعادة " + modelData.label + " (" + modelData.ids.length + ")"
+                                                onClicked: { win.bulkGroup = modelData; bulkRetryPopup.close(); bulkRetry.open() }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        AppField { objectName: "queueSearch"; Layout.fillWidth: true; Layout.minimumWidth: 60; placeholderText: "بحث في المهام"; horizontalAlignment: Text.AlignRight; onTextChanged: win.search = text; Accessible.name: "بحث في المهام" }
+                        AppCombo {
+                            objectName: "queueFilterCombo"
+                            visible: win.contentUnits < 850
+                            Layout.preferredWidth: Math.round(135 * win.uiScale)
+                            model: [{id:"all",label:"الكل"},{id:"running",label:"نشطة"},{id:"completed",label:"مكتملة"},{id:"attention",label:"تحتاج إجراء"}]
+                            textRole: "label"; valueRole: "id"
+                            currentIndex: Math.max(0, model.findIndex(function(value) { return value.id === win.filter }))
+                            onActivated: win.filter = currentValue
+                            Accessible.name: "تصفية حالة المهام"
+                        }
+                        RowLayout {
+                            visible: win.contentUnits >= 850; spacing: 6
+                            Repeater {
+                                model: [{id:"attention",label:"تحتاج إجراء"},{id:"completed",label:"مكتملة"},{id:"running",label:"نشطة"},{id:"all",label:"الكل"}]
+                                delegate: AppButton {
+                                    required property var modelData
+                                    objectName: "queueFilter-" + modelData.id
+                                    text: modelData.label; primary: win.filter === modelData.id
+                                    onClicked: win.filter = modelData.id
+                                }
+                            }
+                        }
+                        LabelText { text: "الطابور"; visible: win.contentUnits >= 1000; font.pixelSize: win.fs(16) }
                     }
                     RowLayout {
-                        Layout.alignment: Qt.AlignRight
-                        spacing: 8
-                        Repeater {
-                            model: [{id:"attention",label:"تحتاج إجراء"},{id:"completed",label:"مكتملة"},{id:"running",label:"نشطة"},{id:"all",label:"الكل"}]
-                            delegate: AppButton {
-                                required property var modelData
-                                objectName: "queueFilter-" + modelData.id
-                                text: modelData.label; primary: win.filter === modelData.id
-                                implicitHeight: 30
-                                onClicked: win.filter = modelData.id
-                            }
+                        objectName: "queueSelectionActions"
+                        visible: win.selectedQueueIds.length > 0
+                        Layout.fillWidth: true; spacing: 8
+                        AppButton { objectName: "deleteSelectedJobsButton"; text: "حذف المحدد"; danger: true; enabled: win.selectedQueueIds.length > 0; onClicked: win.deleteQueueSelection() }
+                        LabelText { objectName: "selectedJobsCount"; text: "المحدد: " + win.selectedQueueIds.length }
+                        SubText {
+                            objectName: "queueDeletionNotice"
+                            text: "الحذف يزيل السجلات فقط؛ تبقى الملفات محفوظة. يشمل المحدد خارج الفلتر أيضًا."
+                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                            activeFocusOnTab: true
+                            Accessible.name: text
+                            ToolTip.visible: deletionHover.hovered || activeFocus
+                            ToolTip.text: text
+                            HoverHandler { id: deletionHover }
                         }
-                    }
-                    Flow {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: childrenRect.height
-                        spacing: 8
-                        visible: win.filter === "attention"
-                        Repeater {
-                            model: win.attentionGroups()
-                            delegate: AppButton {
-                                required property var modelData
-                                text: "إعادة " + modelData.label + " (" + modelData.ids.length + ")"
-                                implicitHeight: 30
-                                onClicked: { win.bulkGroup = modelData; bulkRetry.open() }
-                            }
-                        }
-                    }
-                    ColumnLayout {
-                        Layout.fillWidth: true; spacing: win.rs(4)
-                        RowLayout {
-                            Layout.fillWidth: true; spacing: win.rs(10)
-                            AppButton { objectName: "deleteSelectedJobsButton"; text: "حذف المحدد"; danger: true; enabled: win.selectedQueueIds.length > 0; onClicked: win.deleteQueueSelection() }
-                            LabelText { objectName: "selectedJobsCount"; text: "المحدد: " + win.selectedQueueIds.length }
-                            Item { Layout.fillWidth: true }
-                            AppCheck {
-                                objectName: "selectAllJobsBox"
-                                text: "تحديد الكل في العرض"
-                                palette.windowText: win.ink
-                                enabled: win.visibleQueueIds().length > 0
-                                tristate: true
-                                checkState: win.visibleQueueIds().length > 0 && win.visibleQueueSelectionCount() === win.visibleQueueIds().length ? Qt.Checked : win.visibleQueueSelectionCount() > 0 ? Qt.PartiallyChecked : Qt.Unchecked
-                                nextCheckState: function() { return checkState === Qt.Checked ? Qt.Unchecked : Qt.Checked }
-                                onClicked: win.selectVisibleQueue(checkState === Qt.Checked)
-                            }
-                        }
-                        SubText { text: "الحذف يزيل السجلات فقط؛ تبقى الملفات محفوظة. يشمل المحدد خارج الفلتر أيضًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                     }
                     Box {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        Layout.minimumHeight: Math.round((settings.ui_compact ? 36 : 44) * win.uiScale) + Math.round(36 * win.uiScale) + 2
                         ColumnLayout {
                             anchors.fill: parent; spacing: 0
                             RowLayout {
-                                Layout.fillWidth: true; Layout.preferredHeight: 38; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                SubText { text: "التفاصيل"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignLeft }
-                                SubText { text: "الحالة"; Layout.preferredWidth: 140 * win.uiScale }
-                                SubText { text: "التقدم"; Layout.preferredWidth: 90 * win.uiScale }
-                                SubText { text: "مراحل المعالجة"; Layout.preferredWidth: 408 * win.uiScale; visible: win.contentUnits >= 1100 }
+                                objectName: "queueTableHeader"
+                                Layout.fillWidth: true; Layout.preferredHeight: Math.round(36 * win.uiScale)
+                                Layout.leftMargin: 10; Layout.rightMargin: 10; spacing: operationsPage.columnGap
+                                SubText { text: "عرض"; Layout.maximumWidth: operationsPage.actionWidth; Layout.preferredWidth: operationsPage.actionWidth; horizontalAlignment: Text.AlignHCenter }
+                                SubText { text: "الحالة"; Layout.maximumWidth: operationsPage.statusWidth; Layout.preferredWidth: operationsPage.statusWidth }
+                                SubText { text: "التقدم"; Layout.maximumWidth: operationsPage.progressWidth; Layout.preferredWidth: operationsPage.progressWidth }
+                                SubText { text: "المراحل"; Layout.maximumWidth: operationsPage.stagesWidth; Layout.preferredWidth: operationsPage.stagesWidth }
                                 SubText { text: "الفيديو / الملف"; Layout.fillWidth: true; Layout.minimumWidth: 0 }
-                                SubText { text: "تحديد"; Layout.preferredWidth: 40; font.pixelSize: win.fs(11) }
+                                AppCheck {
+                                    objectName: "selectAllJobsBox"
+                                    Layout.maximumWidth: operationsPage.selectionWidth; Layout.preferredWidth: operationsPage.selectionWidth
+                                    text: ""
+                                    enabled: win.visibleQueueIds().length > 0
+                                    tristate: true
+                                    checkState: win.visibleQueueIds().length > 0 && win.visibleQueueSelectionCount() === win.visibleQueueIds().length ? Qt.Checked : win.visibleQueueSelectionCount() > 0 ? Qt.PartiallyChecked : Qt.Unchecked
+                                    nextCheckState: function() { return checkState === Qt.Checked ? Qt.Unchecked : Qt.Checked }
+                                    onClicked: win.selectVisibleQueue(checkState === Qt.Checked)
+                                    Accessible.name: "تحديد الكل في العرض"
+                                    ToolTip.visible: hovered || activeFocus
+                                    ToolTip.text: "تحديد الكل في العرض. الحذف يزيل السجلات فقط وتبقى الملفات؛ يشمل المحدد خارج الفلتر أيضًا."
+                                }
                             }
                             Rectangle { Layout.fillWidth: true; height: 1; color: win.line }
                             PinList {
@@ -654,66 +746,71 @@ ApplicationWindow {
                                 model: backend.jobsModel
                                 ScrollBar.vertical: AppScroll { objectName: "queueScrollBar" }
                                 delegate: Rectangle {
+                                    id: queueRow
                                     objectName: "queueRow-" + row.id
                                     width: jobsList.width
-                                    height: win.matches(row) ? Math.max(win.rh(settings.ui_compact ? 56 : 64), queueContent.implicitHeight + 2 * win.rs(8)) : 0
+                                    height: win.matches(row) ? Math.round((settings.ui_compact ? 36 : 44) * win.uiScale) : 0
                                     visible: height > 0
-                                    color: row && win.selectedQueueIds.indexOf(row.id) >= 0 ? visualTheme.hover : rowMouse.containsMouse ? visualTheme.hover : (index % 2 === 0 ? win.panel : visualTheme.inset)
+                                    activeFocusOnTab: visible
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: row.title + " — " + row.statusLabel
+                                    Keys.onReturnPressed: win.openJob(row.id)
+                                    color: activeFocus || (row && win.selectedQueueIds.indexOf(row.id) >= 0) || rowMouse.containsMouse ? visualTheme.hover : (index % 2 === 0 ? win.panel : visualTheme.inset)
+                                    border.width: activeFocus ? 2 : 0; border.color: win.accent
+                                    ToolTip.visible: rowMouse.containsMouse || activeFocus
+                                    ToolTip.delay: 700
+                                    ToolTip.text: row.title + "\n#" + String(row.position).padStart(3,"0") + " · " + row.video_id + " · " + row.statusLabel + (row.retryAt ? " · محاولة قادمة " + row.retryAt : " · " + (row.worker || row.stageLabel))
                                     MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.openJob(row.id); cursorShape: Qt.PointingHandCursor }
                                     RowLayout {
                                         id: queueContent
-                                        anchors.fill: parent; anchors.leftMargin: win.rs(12); anchors.rightMargin: win.rs(12); spacing: win.rs(10)
-                                        AppButton { text: "عرض"; implicitWidth: 64; implicitHeight: Math.max(22, Math.round(28 * win.density)); onClicked: win.openJob(row.id) }
-                                        ColumnLayout {
-                                            Layout.preferredWidth: 140 * win.uiScale
-                                            LabelText { text: row.statusLabel; color: win.stateColor(row.status); Layout.alignment: Qt.AlignRight }
-                                            SubText { text: row.retryAt ? "محاولة قادمة " + row.retryAt : (row.worker || row.stageLabel); Layout.alignment: Qt.AlignRight }
+                                        anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: operationsPage.columnGap
+                                        AppButton { text: "عرض"; Layout.maximumWidth: operationsPage.actionWidth; Layout.preferredWidth: operationsPage.actionWidth; Layout.minimumWidth: 0; implicitHeight: Math.round(28 * win.uiScale); onClicked: win.openJob(row.id); Accessible.name: "عرض تفاصيل " + row.title }
+                                        LabelText {
+                                            objectName: "queueStatus-" + row.id
+                                            text: row.statusLabel; color: win.stateColor(row.status)
+                                            Layout.maximumWidth: operationsPage.statusWidth; Layout.preferredWidth: operationsPage.statusWidth; Layout.minimumWidth: 0
+                                            font.pixelSize: win.fs(12)
                                         }
                                         ColumnLayout {
-                                            Layout.preferredWidth: 90 * win.uiScale
-                                            AppProgress { Layout.fillWidth: true; from: 0; to: 100; value: Math.max(0, row.progress); indeterminate: row.status === "running" && row.progress < 0 }
-                                            SubText { text: row.progress >= 0 ? Math.round(row.progress) + "٪" : row.status === "running" ? "جارٍ التنفيذ" : "—"; Layout.fillWidth: true }
+                                            Layout.maximumWidth: operationsPage.progressWidth; Layout.preferredWidth: operationsPage.progressWidth; Layout.minimumWidth: 0; spacing: 2
+                                            SubText { text: row.progress >= 0 ? Math.round(row.progress) + "٪" : row.status === "running" ? "جارٍ" : "—"; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
+                                            AppProgress { Layout.fillWidth: true; from: 0; to: 100; value: Math.max(0, row.progress); indeterminate: row.status === "running" && row.progress < 0; implicitHeight: 5 }
                                         }
                                         Item {
                                             id: stageColumn
                                             objectName: "queueStageColumn-" + row.id
-                                            visible: win.contentUnits >= 1100
-                                            Layout.preferredWidth: 408 * win.uiScale
+                                            Layout.maximumWidth: operationsPage.stagesWidth; Layout.preferredWidth: operationsPage.stagesWidth
                                             Layout.preferredHeight: stageFlow.implicitHeight
-                                        }
-                                        ColumnLayout {
-                                            id: taskHeading
-                                            objectName: "queueTaskHeading-" + row.id
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 0
-                                            spacing: win.rs(4)
-                                            LabelText { id: jobTitle; text: row.title; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; maximumLineCount: 2 }
-                                            SubText { text: "#" + String(row.position).padStart(3,"0") + "   ·   " + row.video_id; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
-                                        }
-                                        Flow {
-                                            id: stageFlow
-                                            objectName: "queueStages-" + row.id
-                                            // The same badge instances move with the responsive layout.
-                                            parent: win.contentUnits >= 1100 ? stageColumn : taskHeading
-                                            onParentChanged: { x = 0; y = 0 }
-                                            width: parent.width
-                                            Layout.fillWidth: true
-                                            Layout.preferredHeight: implicitHeight
-                                            layoutDirection: Qt.RightToLeft
-                                            spacing: win.rs(6)
-                                            Repeater {
-                                                model: row.steps
-                                                delegate: StageBadge {
-                                                    required property var modelData
-                                                    objectName: "queueStage-" + row.id + "-" + modelData.name
-                                                    theme: visualTheme
-                                                    step: modelData
+                                            Row {
+                                                id: stageFlow
+                                                objectName: "queueStages-" + row.id
+                                                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                                layoutDirection: Qt.RightToLeft
+                                                spacing: Math.round(3 * win.uiScale)
+                                                Repeater {
+                                                    model: row.steps
+                                                    delegate: StageBadge {
+                                                        required property var modelData
+                                                        objectName: "queueStage-" + row.id + "-" + modelData.name
+                                                        theme: visualTheme
+                                                        step: modelData
+                                                        compact: true
+                                                        mini: operationsPage.miniStages
+                                                    }
                                                 }
                                             }
                                         }
+                                        Item {
+                                            id: taskHeading
+                                            objectName: "queueTaskHeading-" + row.id
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                                            Layout.fillHeight: true
+                                            LabelText { id: jobTitle; objectName: "queueTitle-" + row.id; text: row.title; anchors.fill: parent; verticalAlignment: Text.AlignVCenter; maximumLineCount: 1; wrapMode: Text.NoWrap }
+                                        }
                                         AppCheck {
                                             objectName: "selectJob-" + row.id
-                                            Layout.preferredWidth: 40
+                                            implicitHeight: Math.round(28 * win.uiScale)
+                                            Layout.maximumWidth: operationsPage.selectionWidth; Layout.preferredWidth: operationsPage.selectionWidth
                                             checked: !!row && win.selectedQueueIds.indexOf(row.id) >= 0
                                             onClicked: win.setQueueSelected(row.id, checked)
                                             Accessible.name: "تحديد " + row.title
@@ -723,23 +820,13 @@ ApplicationWindow {
                                 }
                                 ColumnLayout {
                                     anchors.centerIn: parent; spacing: 14; visible: jobsList.count === 0
-                                    Rectangle {
-                                        Layout.alignment: Qt.AlignHCenter; width: 66; height: 76; radius: 12; color: visualTheme.inset
-                                        Column { anchors.centerIn: parent; spacing: 7; Repeater { model: 3; Rectangle { width: 30; height: 3; radius: 2; color: visualTheme.accent } } }
-                                    }
                                     LabelText { text: "مساحة عملك جاهزة"; font.pixelSize: win.fs(22); Layout.alignment: Qt.AlignHCenter }
-                                    SubText { text: "أضف فيديو أو قائمة تشغيل، أو اسحب ملفات TXT لتحويلها إلى Word."; Layout.alignment: Qt.AlignHCenter }
+                                    SubText { text: "أضف مصدرًا لبدء المعالجة"; Layout.alignment: Qt.AlignHCenter }
                                     AppButton { text: "إضافة المصدر الأول"; primary: true; Layout.alignment: Qt.AlignHCenter; onClicked: win.page = 1 }
                                 }
                                 SubText { anchors.centerIn: parent; visible: jobsList.count > 0 && win.queueSnapshot.filter(win.matches).length === 0; text: "لا توجد مهام مطابقة للبحث والتصفية" }
                             }
                         }
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        SubText { text: "Word (.docx)  /  TXT  /  JSON  /  MP3"; font.pixelSize: win.fs(12) }
-                        Item { Layout.fillWidth: true }
-                        SubText { text: "تنزيل واحد  ·  تفريغ متوازٍ  ·  مستند مستقل لكل مهمة"; font.pixelSize: win.fs(12) }
                     }
                 }
 
@@ -872,55 +959,67 @@ ApplicationWindow {
                     contentWidth: availableWidth
                     ColumnLayout {
                     width: workersPageScroll.availableWidth
-                    spacing: 12
-                    SubText { text: "كل عامل يعمل على مهمة واحدة. إيقاف الاستقبال يسمح للمهمة الحالية بالاكتمال."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                    spacing: win.rs(18)
+                    SubText { text: "حسابات ChatGPT وسعة الخدمات في مساحة واحدة. كل عامل يعالج مهمة واحدة في الوقت نفسه."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                     Box {
                         objectName: "chatgptAccountsPanel"
                         Layout.fillWidth: true
                         Layout.preferredHeight: accountPanelContent.implicitHeight + 2 * win.rs(12)
                         ColumnLayout {
                             id: accountPanelContent
-                            anchors.fill: parent; anchors.margins: win.rs(12); spacing: win.rs(7)
+                            anchors.fill: parent; anchors.margins: win.rs(12); spacing: win.rs(8)
+
                             RowLayout {
-                                Layout.fillWidth: true; spacing: win.rs(8)
+                                Layout.fillWidth: true; spacing: win.rs(10)
+                                AppButton {
+                                    objectName: "accountEngineRecoverButton"; text: "فحص المحرك"
+                                    enabled: !backend.accountBusy
+                                    onClicked: backend.recoverAccountEngine()
+                                    Accessible.name: "فحص المحرك والجلسات السابقة"
+                                }
+                                AppButton {
+                                    id: accountHelpButton; objectName: "accountHelpButton"
+                                    text: "حول الحسابات"; onClicked: accountHelpPopup.open()
+                                    Popup {
+                                        id: accountHelpPopup; objectName: "accountHelpPopup"; width: Math.min(420 * win.uiScale, win.width - 32 * win.uiScale); padding: 18 * win.uiScale
+                                        margins: 12 * win.uiScale
+                                        focus: true; modal: true
+                                        onOpened: accountHelpClose.forceActiveFocus()
+                                        onClosed: accountHelpButton.forceActiveFocus()
+                                        y: parent.height; closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                                        background: Rectangle { color: win.panel; border.color: win.line; radius: 10 }
+                                        contentItem: ColumnLayout {
+                                            spacing: 12 * win.uiScale
+                                            SubText {
+                                                Layout.fillWidth: true
+                                                text: "تُوزَّع المهام بحسب التفضيل والترتيب. تعرض الحصص حدود Codex المتاحة للاشتراك. الموافقة تتم في المتصفح، وتبقى كل محاولة مرتبطة بحساب واحد.\nتُعرض مواعيد التجدد وآخر قراءة بتوقيت الجهاز. افتح التفاصيل لقراءة رسائل الحصة والأخطاء كاملة."
+                                                wrapMode: Text.WordWrap; elide: Text.ElideNone
+                                            }
+                                            AppButton { id: accountHelpClose; objectName: "accountHelpCloseButton"; text: "إغلاق"; onClicked: accountHelpPopup.close(); Layout.alignment: Qt.AlignLeft }
+                                        }
+                                    }
+                                }
+                                SubText {
+                                    objectName: "accountEngineHealth"; text: backend.accountEngine.message || ""
+                                    Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                                }
+                                LabelText { text: "حسابات ChatGPT"; font.pixelSize: win.fs(22) }
+                                SubText { text: accountList.count + " حساب"; color: visualTheme.accent }
+                            }
+                            Flow {
+                                Layout.fillWidth: true; spacing: win.rs(8); layoutDirection: Qt.RightToLeft
                                 AppCheck {
-                                    objectName: "managedAccountsEnabled"; text: "استخدام حسابات ChatGPT المُدارة"
+                                    objectName: "managedAccountsEnabled"; text: "الحسابات المُدارة"
                                     checked: settings.accounts_enabled === true; palette.windowText: win.ink
                                     onClicked: { settings.accounts_enabled = checked; win.save() }
-                                    Accessible.name: text
+                                    Accessible.name: "استخدام حسابات ChatGPT المُدارة"
                                 }
-                                Item { Layout.fillWidth: true }
-                                LabelText { text: "إجمالي التزامن" }
+                                LabelText { text: "إجمالي التزامن"; height: usageInterval.height; verticalAlignment: Text.AlignVCenter }
                                 SpinBox {
                                     objectName: "accountConcurrency"; from: 1; to: 16; value: settings.accounts_max_concurrency || 5
                                     onValueModified: { settings.accounts_max_concurrency = value; win.save() }
                                     Accessible.name: "إجمالي مهام حسابات ChatGPT المتزامنة"
                                 }
-                            }
-                            SubText {
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
-                                text: "تُوزَّع المهام بحسب التفضيل والترتيب. تعرض الحصص حدود Codex المتاحة للاشتراك. الموافقة تتم في المتصفح، وتبقى كل محاولة مرتبطة بحساب واحد."
-                            }
-                            SubText {
-                                objectName: "accountEngineHealth"; text: backend.accountEngine.message || ""
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
-                            }
-                            AppButton {
-                                objectName: "accountEngineRecoverButton"; text: "فحص المحرك والجلسات السابقة"
-                                enabled: !backend.accountBusy
-                                onClicked: backend.recoverAccountEngine()
-                            }
-                            SubText {
-                                objectName: "accountMigrationNotice"; visible: backend.accountEngine.migrationRequired === true
-                                text: "أصبح تسجيل الحسابات داخل محرك ورق المدمج. أضف حساباتك وسجّل الدخول مجددًا؛ بيانات الدخول القديمة لا تُنسخ تلقائيًا."
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
-                            }
-                            AppButton {
-                                objectName: "accountMigrationDismissButton"; text: "فهمت"; visible: backend.accountEngine.migrationRequired === true
-                                enabled: !backend.accountBusy; onClicked: backend.acknowledgeAccountMigration()
-                            }
-                            Flow {
-                                Layout.fillWidth: true; spacing: win.rs(8)
                                 AppButton { objectName: "accountUsageRefreshAllButton"; text: "تحديث الحصص"; onClicked: backend.refreshAllAccountUsage(); Accessible.name: "تحديث حصص جميع حسابات ChatGPT" }
                                 AppCheck {
                                     objectName: "accountUsageAutoRefresh"; text: "تحديث الحصص تلقائيًا"; palette.windowText: win.ink
@@ -938,47 +1037,252 @@ ApplicationWindow {
                             }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: win.rs(8)
-                                LabelText { text: "اسم الحساب" }
+                                AppButton {
+                                    objectName: "addAccountButton"; text: "إضافة حساب"; enabled: accountAlias.text.trim().length > 0
+                                    onClicked: { backend.addAccount(accountAlias.text); accountAlias.clear() }
+                                }
                                 AppField {
                                     id: accountAlias; objectName: "accountAliasField"; Layout.fillWidth: true; maximumLength: 80
                                     placeholderText: "مثل: الحساب الأول"; Accessible.name: "اسم حساب ChatGPT الجديد"
                                     onAccepted: { if (text.trim()) { backend.addAccount(text); clear() } }
                                 }
+                                LabelText { text: "اسم الحساب" }
+                            }
+                            RowLayout {
+                                visible: backend.accountEngine.migrationRequired === true
+                                Layout.fillWidth: true; spacing: win.rs(10)
                                 AppButton {
-                                    objectName: "addAccountButton"; text: "إضافة حساب"; enabled: accountAlias.text.trim().length > 0
-                                    onClicked: { backend.addAccount(accountAlias.text); accountAlias.clear() }
+                                    objectName: "accountMigrationDismissButton"; text: "فهمت"; visible: backend.accountEngine.migrationRequired === true
+                                    enabled: !backend.accountBusy; onClicked: backend.acknowledgeAccountMigration()
+                                }
+                                SubText {
+                                    objectName: "accountMigrationNotice"; visible: backend.accountEngine.migrationRequired === true
+                                    text: "أصبح تسجيل الحسابات داخل محرك ورق المدمج. أضف حساباتك وسجّل الدخول مجددًا؛ بيانات الدخول القديمة لا تُنسخ تلقائيًا."
+                                    Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
                                 }
                             }
-                            PinList {
-                                id: accountList; objectName: "accountList"
-                                Layout.fillWidth: true; Layout.preferredHeight: count ? Math.min(win.rh(380), contentHeight) : win.rh(28)
-                                spacing: win.rs(5); clip: true; model: backend.accountsModel
-                                ScrollBar.vertical: AppScroll {}
-                                delegate: Box {
-                                    property var accountData: (typeof row !== "undefined" && row) ? row : ({id: "", alias: "", error: "", statusText: "", quotaText: ""})
-                                    objectName: "accountCard"; width: accountList.width
-                                    height: accountContent.implicitHeight + 2 * win.rs(9)
-                                    ColumnLayout {
-                                        id: accountContent; objectName: "accountContent"
-                                        anchors.fill: parent; anchors.margins: win.rs(9); spacing: win.rs(4)
-                                        RowLayout {
-                                            Layout.fillWidth: true; spacing: win.rs(8)
-                                            AppCheck {
-                                                text: "يستقبل مهامًا"; checked: accountData.enabled; enabled: !accountData.busy
-                                                palette.windowText: win.muted
-                                                onClicked: backend.setAccountEnabled(accountData.id, checked)
-                                                Accessible.name: "تفعيل الحساب " + accountData.alias
+
+                            ColumnLayout {
+                                id: accountTable
+                                objectName: "accountTable"
+                                Layout.fillWidth: true; spacing: 0
+                                readonly property real identityWidth: 210 * win.uiScale
+                                readonly property real actionsWidth: 132 * win.uiScale
+                                readonly property real viewportWidth: Math.max(1, width - identityWidth - actionsWidth)
+                                readonly property real middleWidth: Math.max(viewportWidth, 676 * win.uiScale)
+                                readonly property real unit: middleWidth / 676
+                                readonly property real horizontalOffset: accountTableScroller.contentX
+                                Rectangle {
+                                    objectName: "accountTableHeader"; Layout.fillWidth: true
+                                    implicitHeight: 48 * win.uiScale; color: visualTheme.inset
+                                    LabelText { x: 8; width: accountTable.actionsWidth - 16; height: parent.height; text: "الإجراءات"; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter }
+                                    Flickable {
+                                        id: accountTableScroller; objectName: "accountTableHorizontalScroll"
+                                        x: accountTable.actionsWidth; width: accountTable.viewportWidth; height: parent.height
+                                        contentWidth: accountTable.middleWidth; contentHeight: height; clip: true
+                                        flickableDirection: Flickable.HorizontalFlick; boundsBehavior: Flickable.StopAtBounds
+                                        onContentWidthChanged: contentX = Math.max(0, contentWidth - width)
+                                        onWidthChanged: contentX = Math.max(0, Math.min(contentX, contentWidth - width))
+                                        Row {
+                                            width: accountTable.middleWidth; height: parent.height; layoutDirection: Qt.RightToLeft
+                                            LabelText { width: 132 * accountTable.unit; height: parent.height; text: "الحالة"; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter }
+                                            LabelText { width: 72 * accountTable.unit; height: parent.height; text: "الاشتراك"; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter }
+                                            LabelText { width: 56 * accountTable.unit; height: parent.height; text: "النشطة"; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter }
+                                            LabelText { width: 156 * accountTable.unit; height: parent.height; text: "المتبقي · ٥ ساعات"; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter }
+                                            LabelText { width: 156 * accountTable.unit; height: parent.height; text: "المتبقي · أسبوعي"; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter }
+                                            LabelText { width: 104 * accountTable.unit; height: parent.height; text: "آخر قراءة ناجحة"; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
+                                        }
+                                    }
+                                    LabelText { x: parent.width - accountTable.identityWidth; width: accountTable.identityWidth - 14; height: parent.height; text: "الحساب · الأولوية"; verticalAlignment: Text.AlignVCenter }
+                                }
+                                ScrollBar {
+                                    id: accountHorizontalBar; objectName: "accountHorizontalScrollBar"; Layout.fillWidth: true
+                                    Layout.leftMargin: accountTable.actionsWidth; Layout.rightMargin: accountTable.identityWidth
+                                    Layout.preferredHeight: 18 * win.uiScale
+                                    orientation: Qt.Horizontal; policy: ScrollBar.AlwaysOn
+                                    size: accountTable.viewportWidth / accountTable.middleWidth
+                                    position: accountTableScroller.contentX / accountTable.middleWidth
+                                    active: true; visible: accountTable.middleWidth > accountTable.viewportWidth + 1
+                                    focusPolicy: Qt.StrongFocus; activeFocusOnTab: true
+                                    onPositionChanged: if (Math.abs(accountTableScroller.contentX - position * accountTable.middleWidth) > 0.5) accountTableScroller.contentX = position * accountTable.middleWidth
+                                    Keys.onPressed: function(event) {
+                                        var maximum = Math.max(0, accountTableScroller.contentWidth - accountTableScroller.width)
+                                        if (event.key === Qt.Key_Left) accountTableScroller.contentX = Math.max(0, accountTableScroller.contentX - 80 * win.uiScale)
+                                        else if (event.key === Qt.Key_Right) accountTableScroller.contentX = Math.min(maximum, accountTableScroller.contentX + 80 * win.uiScale)
+                                        else if (event.key === Qt.Key_Home) accountTableScroller.contentX = 0
+                                        else if (event.key === Qt.Key_End) accountTableScroller.contentX = maximum
+                                        else return
+                                        event.accepted = true
+                                    }
+                                    background: Rectangle { radius: 4; color: visualTheme.inset; border.color: accountHorizontalBar.activeFocus ? win.accent : win.line; border.width: accountHorizontalBar.activeFocus ? 2 : 1 }
+                                    padding: 3
+                                    contentItem: Rectangle { implicitHeight: 12 * win.uiScale; implicitWidth: 36 * win.uiScale; radius: 5; color: accountHorizontalBar.pressed || accountHorizontalBar.activeFocus ? win.accent : win.line }
+                                    Accessible.name: "تمرير أعمدة الحصص والحالة أفقيًا مع تثبيت الحساب والإجراءات"
+                                }
+                                PinList {
+                                    id: accountList; objectName: "accountList"
+                                    Layout.fillWidth: true; Layout.preferredHeight: count ? Math.min(448 * win.uiScale, Math.max(112 * win.uiScale, contentHeight)) : win.rh(100)
+                                    spacing: 0; clip: true; model: backend.accountsModel
+                                    ScrollBar.vertical: AppScroll {}
+                                    delegate: Rectangle {
+                                        id: accountRow
+                                        property var accountData: (typeof row !== "undefined" && row) ? row : ({id: "", alias: "", error: "", statusText: "", quotaText: ""})
+                                        property bool detailsOpen: false
+                                        property string menuAccountId: ""
+                                        readonly property real summaryHeight: (112 + (accountData.loggingIn ? 38 : 0) + (accountData.uncertain ? 38 : 0)) * win.uiScale
+                                        objectName: "accountCard"; width: accountList.width
+                                        height: summaryHeight + (detailsOpen ? accountContent.implicitHeight + 26 * win.uiScale : 0)
+                                        color: index % 2 === 0 ? win.panel : visualTheme.inset
+                                        onAccountDataChanged: {
+                                            if (accountActionsMenu.visible && menuAccountId !== accountData.id) accountActionsMenu.close()
+                                        }
+                                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
+                                        Item {
+                                            objectName: "accountIdentityCell"
+                                            x: parent.width - accountTable.identityWidth; width: accountTable.identityWidth; height: accountRow.summaryHeight
+                                            ColumnLayout {
+                                                anchors.fill: parent; anchors.margins: 8 * win.uiScale; spacing: 2 * win.uiScale
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    SubText { text: "#" + (index + 1) }
+                                                    Item { Layout.fillWidth: true }
+                                                    SubText { text: accountData.preferred ? "المفضّل ★" : ""; color: visualTheme.warning }
+                                                }
+                                                LabelText {
+                                                    objectName: "accountAliasLabel"; textFormat: Text.PlainText; text: accountData.alias
+                                                    font.pixelSize: win.fs(15); Layout.fillWidth: true; maximumLineCount: 1
+                                                    Accessible.name: accountData.alias
+                                                    ToolTip.visible: aliasHover.hovered; ToolTip.text: text
+                                                    HoverHandler { id: aliasHover }
+                                                }
+                                                SubText {
+                                                    textFormat: Text.PlainText; text: accountData.email || "—"; Layout.fillWidth: true
+                                                    horizontalAlignment: Text.AlignLeft; LayoutMirroring.enabled: false
+                                                    ToolTip.visible: emailHover.hovered; ToolTip.text: text
+                                                    HoverHandler { id: emailHover }
+                                                }
+                                                AppCheck {
+                                                    text: "يستقبل مهامًا"; checked: accountData.enabled; enabled: !accountData.busy
+                                                    palette.windowText: win.muted
+                                                    onClicked: backend.setAccountEnabled(accountData.id, checked)
+                                                    Accessible.name: "تفعيل الحساب " + accountData.alias
+                                                }
+                                                Item { Layout.fillHeight: true }
                                             }
-                                            LabelText { objectName: "accountAliasLabel"; textFormat: Text.PlainText; text: (accountData.preferred ? "المفضّل · " : "") + accountData.alias; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
-                                            SubText { text: "#" + (index + 1) }
                                         }
-                                        SubText {
-                                            objectName: "accountStatus"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
-                                            text: accountData.statusText + (accountData.inFlight ? " · يعالج " + accountData.inFlight + " مهمة" : "")
-                                                  + (accountData.subscription ? " · " + accountData.subscription : "") + (accountData.email ? " · " + accountData.email : "")
-                                            Accessible.name: text
+                                        Item {
+                                            objectName: "accountMiddleViewport"
+                                            x: accountTable.actionsWidth; width: accountTable.viewportWidth; height: accountRow.summaryHeight; clip: true
+                                            Row {
+                                                objectName: "accountMiddleColumns"; x: -accountTable.horizontalOffset
+                                                width: accountTable.middleWidth; height: parent.height; layoutDirection: Qt.RightToLeft
+                                                Item {
+                                                    width: 132 * accountTable.unit; height: parent.height
+                                                    ColumnLayout {
+                                                        anchors.fill: parent; anchors.margins: 8 * win.uiScale; spacing: 3 * win.uiScale
+                                                        SubText {
+                                                            objectName: "accountStatus"; textFormat: Text.PlainText
+                                                            text: accountData.statusText || "غير معروف"; Layout.fillWidth: true
+                                                            wrapMode: Text.WordWrap; maximumLineCount: 2; color: win.ink; Accessible.name: text
+                                                        }
+                                                        SubText {
+                                                            text: accountData.error ? "تنبيه · افتح التفاصيل" : accountData.cooldownText || ""
+                                                            visible: text.length > 0; color: visualTheme.warning
+                                                            Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2
+                                                        }
+                                                        Item { Layout.fillHeight: true }
+                                                    }
+                                                }
+                                                LabelText {
+                                                    width: 72 * accountTable.unit; height: parent.height; textFormat: Text.PlainText
+                                                    text: accountData.subscription || "—"; wrapMode: Text.WrapAnywhere
+                                                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                                                }
+                                                LabelText {
+                                                    objectName: "accountActiveCount"; width: 56 * accountTable.unit; height: parent.height
+                                                    text: typeof accountData.inFlight === "number" ? accountData.inFlight : "—"; font.pixelSize: win.fs(22)
+                                                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                                                }
+                                                AccountQuotaCell {
+                                                    objectName: "accountFiveHourQuotaCell"; theme: visualTheme; uiScale: win.uiScale
+                                                    width: 156 * accountTable.unit; height: parent.height
+                                                    label: "المتبقي · ٥ ساعات"; windowData: (accountData.usage || {}).fiveHour || ({})
+                                                    resetText: win.usageDate(windowData.resetsAt)
+                                                }
+                                                AccountQuotaCell {
+                                                    objectName: "accountWeeklyQuotaCell"; theme: visualTheme; uiScale: win.uiScale
+                                                    width: 156 * accountTable.unit; height: parent.height
+                                                    label: "المتبقي · أسبوعي"; windowData: (accountData.usage || {}).weekly || ({})
+                                                    resetText: win.usageDate(windowData.resetsAt)
+                                                }
+                                                SubText {
+                                                    width: 104 * accountTable.unit; height: parent.height; leftPadding: 8; rightPadding: 8
+                                                    text: win.usageDate((accountData.usage || {}).lastSuccessAt) + "\nتوقيت الجهاز"
+                                                    wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                                                }
+                                            }
                                         }
-                                        SubText { text: accountData.cooldownText || ""; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                        Rectangle {
+                                            objectName: "accountActionsCell"; width: accountTable.actionsWidth; height: accountRow.summaryHeight; color: accountRow.color
+                                            Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: win.line }
+                                            ColumnLayout {
+                                                anchors.fill: parent; anchors.margins: 8 * win.uiScale; spacing: 2 * win.uiScale
+                                                RowLayout {
+                                                    Layout.fillWidth: true; spacing: 4 * win.uiScale
+                                                    AppButton { objectName: "accountRefreshButton"; text: "فحص"; Layout.fillWidth: true; Layout.minimumWidth: 0; implicitWidth: 60 * win.uiScale; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.refreshAccount(accountData.id); Accessible.name: "فحص الحساب " + accountData.alias }
+                                                    AppButton {
+                                                        id: accountMoreButton; objectName: "accountMoreButton"; text: "⋯"; Layout.preferredWidth: 36 * win.uiScale; Layout.minimumWidth: 0
+                                                        onClicked: { accountRow.menuAccountId = accountData.id; accountActionsMenu.open() }
+                                                        Accessible.name: "المزيد من إجراءات " + accountData.alias
+                                                    }
+                                                }
+                                                AppButton { objectName: "accountUsageRefreshButton"; text: accountData.usageRefreshing ? "جارٍ التحديث…" : "تحديث الحصة"; Layout.fillWidth: true; enabled: accountData.usage && accountData.usage.canRefresh === true && !accountData.loggingIn && !accountData.busy; onClicked: backend.refreshAccountUsage(accountData.id); Accessible.name: "تحديث الحصة " + accountData.alias }
+                                                AppButton {
+                                                    objectName: "accountDetailsButton"; text: accountRow.detailsOpen ? "إخفاء التفاصيل" : "التفاصيل"
+                                                    Layout.fillWidth: true; implicitHeight: 20 * win.uiScale; font.pixelSize: win.fs(11)
+                                                    onClicked: accountRow.detailsOpen = !accountRow.detailsOpen
+                                                    Accessible.name: text + " " + accountData.alias
+                                                }
+                                                AppButton { objectName: "accountCancelLoginButton"; text: "إلغاء الدخول"; Layout.fillWidth: true; visible: accountData.loggingIn; onClicked: backend.cancelAccountLogin(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                                AppButton { text: "فحص الجلسة السابقة"; Layout.fillWidth: true; visible: accountData.uncertain; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.recheckAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                                Item { Layout.fillHeight: true }
+                                            }
+                                        }
+                                        Rectangle { x: parent.width - accountTable.identityWidth; width: 1; height: accountRow.summaryHeight; color: win.line }
+                                        Popup {
+                                            id: accountActionsMenu; objectName: "accountActionsMenu"
+                                            parent: accountMoreButton; y: accountMoreButton.height; width: Math.min(330 * win.uiScale, win.width - 32 * win.uiScale)
+                                            margins: 12 * win.uiScale
+                                            focus: true; modal: true
+                                            onOpened: {
+                                                if (accountLoginAction.enabled) accountLoginAction.forceActiveFocus()
+                                                else accountManageUsageAction.forceActiveFocus()
+                                            }
+                                            onClosed: if (accountRow.menuAccountId === accountData.id && accountMoreButton.visible) accountMoreButton.forceActiveFocus()
+                                            padding: 14 * win.uiScale; closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                                            background: Rectangle { color: win.panel; border.color: win.line; radius: 10 }
+                                            contentItem: ColumnLayout {
+                                                spacing: 10 * win.uiScale
+                                                LabelText { text: "إجراءات · " + accountData.alias; Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+                                                SubText { text: "إدارة الاستخدام تُفتح في المتصفح؛ اختر الحساب المطلوب فيه صراحةً. لا يسجّل ورق دخوله تلقائيًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                        Flow {
+                                            Layout.fillWidth: true; spacing: win.rs(6)
+                                            AppButton { id: accountLoginAction; objectName: "accountLoginButton"; text: "تسجيل / إعادة الدخول"; enabled: !accountData.busy && !accountData.inFlight && !backend.accountBusy; onClicked: { accountActionsMenu.close(); backend.loginAccount(accountData.id) } Accessible.name: text + " " + accountData.alias }
+                                            AppButton { id: accountManageUsageAction; objectName: "accountManageUsageButton"; text: "إدارة الاستخدام"; onClicked: { accountActionsMenu.close(); backend.manageAccountUsage() } Accessible.name: "إدارة الاستخدام في المتصفح؛ اختر حساب " + accountData.alias + " صراحةً" }
+                                            AppButton { objectName: "accountPreferButton"; text: "تفضيل"; enabled: !accountData.preferred && !accountData.busy; onClicked: { accountActionsMenu.close(); backend.preferAccount(accountData.id) } Accessible.name: "تفضيل " + accountData.alias }
+                                            AppButton { objectName: "accountUpButton"; text: "للأعلى"; enabled: index > 0 && !accountData.busy; onClicked: { accountActionsMenu.close(); backend.moveAccount(accountData.id, -1) } Accessible.name: "رفع أولوية " + accountData.alias }
+                                            AppButton { objectName: "accountDownButton"; text: "للأسفل"; enabled: index < accountList.count - 1 && !accountData.busy; onClicked: { accountActionsMenu.close(); backend.moveAccount(accountData.id, 1) } Accessible.name: "خفض أولوية " + accountData.alias }
+                                            AppButton { objectName: "accountRenameButton"; text: "تسمية"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { accountActionsMenu.close(); win.pendingAccount = accountData; accountRename.text = accountData.alias; renameAccountDialog.open() } Accessible.name: "تغيير اسم " + accountData.alias }
+                                            AppButton { objectName: "accountRemoveButton"; text: "حذف"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { accountActionsMenu.close(); win.pendingAccount = accountData; removeAccountDialog.open() } Accessible.name: "حذف " + accountData.alias }
+                                        }
+
+                                            }
+                                        }
+                                        ColumnLayout {
+                                            id: accountContent; objectName: "accountContent"
+                                            visible: accountRow.detailsOpen; x: 14 * win.uiScale; y: accountRow.summaryHeight + 10 * win.uiScale
+                                            width: parent.width - 28 * win.uiScale; spacing: 7 * win.uiScale
+                                            SubText { text: accountData.cooldownText || ""; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
                                         ColumnLayout {
                                             objectName: "accountUsagePanel"; Layout.fillWidth: true; spacing: win.rs(3)
                                             property var usage: accountData.usage || ({})
@@ -989,47 +1293,38 @@ ApplicationWindow {
                                             SubText { objectName: "accountUsageRefreshReason"; text: win.usageRefreshReason(parent.usage); visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
                                             SubText { objectName: "accountUsageBrowserNote"; text: "إدارة الاستخدام تُفتح في المتصفح؛ اختر الحساب المطلوب فيه صراحةً. لا يسجّل ورق دخوله تلقائيًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
                                         }
+
                                         SubText { objectName: "accountError"; text: accountData.error; visible: !!accountData.error; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; color: win.dark ? "#f4b880" : "#9a4409" }
-                                        Flow {
-                                            Layout.fillWidth: true; spacing: win.rs(6)
-                                            AppButton { objectName: "accountLoginButton"; text: "تسجيل / إعادة الدخول"; enabled: !accountData.busy && !accountData.inFlight && !backend.accountBusy; onClicked: backend.loginAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
-                                            AppButton { objectName: "accountCancelLoginButton"; text: "إلغاء الدخول"; visible: accountData.loggingIn; onClicked: backend.cancelAccountLogin(accountData.id); Accessible.name: text + " " + accountData.alias }
-                                            AppButton { objectName: "accountRefreshButton"; text: "فحص الحساب"; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.refreshAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
-                                            AppButton { objectName: "accountUsageRefreshButton"; text: accountData.usageRefreshing ? "جارٍ تحديث الحصة…" : "تحديث الحصة"; enabled: accountData.usage && accountData.usage.canRefresh === true && !accountData.loggingIn && !accountData.busy; onClicked: backend.refreshAccountUsage(accountData.id); Accessible.name: "تحديث الحصة " + accountData.alias }
-                                            AppButton { objectName: "accountManageUsageButton"; text: "إدارة الاستخدام"; onClicked: backend.manageAccountUsage(); Accessible.name: "إدارة الاستخدام في المتصفح؛ اختر حساب " + accountData.alias + " صراحةً" }
-                                            AppButton { text: "فحص الجلسة السابقة"; visible: accountData.uncertain; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.recheckAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
-                                            AppButton { objectName: "accountPreferButton"; text: "تفضيل"; enabled: !accountData.preferred && !accountData.busy; onClicked: backend.preferAccount(accountData.id); Accessible.name: "تفضيل " + accountData.alias }
-                                            AppButton { objectName: "accountUpButton"; text: "للأعلى"; enabled: index > 0 && !accountData.busy; onClicked: backend.moveAccount(accountData.id, -1); Accessible.name: "رفع أولوية " + accountData.alias }
-                                            AppButton { objectName: "accountDownButton"; text: "للأسفل"; enabled: index < accountList.count - 1 && !accountData.busy; onClicked: backend.moveAccount(accountData.id, 1); Accessible.name: "خفض أولوية " + accountData.alias }
-                                            AppButton { objectName: "accountRenameButton"; text: "تسمية"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { win.pendingAccount = accountData; accountRename.text = accountData.alias; renameAccountDialog.open() } Accessible.name: "تغيير اسم " + accountData.alias }
-                                            AppButton { objectName: "accountRemoveButton"; text: "حذف"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { win.pendingAccount = accountData; removeAccountDialog.open() } Accessible.name: "حذف " + accountData.alias }
-                                        }
+
                                         SubText {
                                             objectName: "accountDeviceCode"; textFormat: Text.PlainText
                                             visible: !!accountData.userCode; text: "رمز الجهاز: " + (accountData.userCode || "")
                                             Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
                                         }
+
+                                        }
                                     }
+                                    SubText { anchors.centerIn: parent; visible: accountList.count === 0; text: "أضف حسابًا ثم سجّل دخوله في المتصفح." }
                                 }
-                                SubText { anchors.centerIn: parent; visible: accountList.count === 0; text: "أضف حسابًا ثم سجّل دخوله في المتصفح." }
                             }
                         }
                     }
                     RowLayout {
-                        Layout.fillWidth: true
+                        Layout.fillWidth: true; spacing: win.rs(10)
                         AppButton { text: "إضافة عامل OpenCode"; onClicked: { var w = JSON.parse(JSON.stringify(settings.opencode_workers[0])); w.id = "oc" + Date.now(); w.name = "OpenCode " + (settings.opencode_workers.length + 1); w.provider = w.provider || "login"; settings.opencode_workers.push(w); save() } }
                         AppButton { objectName: "providersButton"; text: "المزودون"; onClicked: { providersDialog.open() } }
                         AppButton { text: "إضافة عامل Deepgram"; onClicked: { var w = JSON.parse(JSON.stringify(settings.deepgram_workers[0])); w.id = "dg" + Date.now(); w.name = "Deepgram " + (settings.deepgram_workers.length + 1); w.project = "proj-" + (settings.deepgram_workers.length + 1); settings.deepgram_workers.push(w); save() } }
                     }
                     ScrollView {
                         id: workersScroll
-                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; contentWidth: availableWidth
+                        Layout.fillWidth: true; Layout.preferredHeight: Math.ceil(3 / win.serviceColumns) * 430 * win.uiScale + (Math.ceil(3 / win.serviceColumns) - 1) * win.rs(12)
+                        clip: true; contentWidth: availableWidth
                         GridLayout {
                             width: workersScroll.availableWidth
                             columns: win.serviceColumns; columnSpacing: 12; rowSpacing: 12; layoutDirection: Qt.RightToLeft
-                            ServiceGroup { stage: "download"; heading: "تنزيل YouTube"; symbol: "download"; Layout.fillWidth: true; Layout.preferredWidth: 1; Layout.preferredHeight: win.serviceColumns === 3 ? Math.max(360, workersScroll.availableHeight - 4) : 380 }
-                            ServiceGroup { stage: "deepgram"; heading: "التفريغ الصوتي"; symbol: "audio"; Layout.fillWidth: true; Layout.preferredWidth: 1; Layout.preferredHeight: win.serviceColumns === 3 ? Math.max(360, workersScroll.availableHeight - 4) : 380 }
-                            ServiceGroup { stage: "opencode"; heading: "OpenCode / Word"; symbol: "document"; Layout.fillWidth: true; Layout.preferredWidth: 1; Layout.preferredHeight: win.serviceColumns === 3 ? Math.max(360, workersScroll.availableHeight - 4) : 380 }
+                            ServiceGroup { stage: "download"; heading: "تنزيل YouTube"; symbol: "download"; Layout.fillWidth: true; Layout.preferredWidth: 1; Layout.preferredHeight: 430 * win.uiScale }
+                            ServiceGroup { stage: "deepgram"; heading: "التفريغ الصوتي"; symbol: "audio"; Layout.fillWidth: true; Layout.preferredWidth: 1; Layout.preferredHeight: 430 * win.uiScale }
+                            ServiceGroup { stage: "opencode"; heading: "OpenCode / Word"; symbol: "document"; Layout.fillWidth: true; Layout.preferredWidth: 1; Layout.preferredHeight: 430 * win.uiScale }
                         }
                     }
                     Box {
@@ -1605,44 +1900,197 @@ ApplicationWindow {
     }
     AppDialog {
         id: jobDialog; objectName: "jobDialog"
-        anchors.centerIn: parent; width: Math.min(900, win.width - 80); height: Math.min(610, win.height - 48); modal: true
+        anchors.centerIn: parent; width: Math.min(1100 * win.uiScale, win.width - 48); height: Math.min(760 * win.uiScale, win.height - 48); modal: true
+        readonly property bool narrow: availableWidth / win.uiScale < 900
+        // Keep keyboard focus inside the visible portion of the scrollable body.
+        function revealFocusedItem() {
+            if (!jobDialog.opened || !win.activeFocusItem) return
+            var focused = win.activeFocusItem
+            var target = focused
+            var ancestor = focused
+            while (ancestor && ancestor !== jobBodyScroll) {
+                if (ancestor === logScroll) target = logScroll
+                if (ancestor === jobFolderCombo) target = jobFolderCombo
+                ancestor = ancestor.parent
+            }
+            if (ancestor !== jobBodyScroll) return
+            var viewport = jobBodyScroll.contentItem
+            var point = target.mapToItem(viewport, 0, 0)
+            var maximum = Math.max(0, viewport.contentHeight - viewport.height)
+            var next = viewport.contentY
+            if (point.y < 8) next += point.y - 8
+            else if (point.y + target.height > viewport.height - 8)
+                next += point.y + target.height - viewport.height + 8
+            viewport.contentY = Math.max(0, Math.min(maximum, next))
+        }
+        Connections {
+            target: win
+            function onActiveFocusItemChanged() { if (jobDialog.opened) Qt.callLater(jobDialog.revealFocusedItem) }
+        }
         title: "تفاصيل المهمة"
         standardButtons: Dialog.Close
-        onOpened: { standardButton(Dialog.Close).text = "إغلاق"; jobFolderCombo.currentIndex = Math.max(0, backend.folders.findIndex(function(f) { return f.id === selectedJob.folder_id })) }
+        onOpened: { standardButton(Dialog.Close).text = "إغلاق"; standardButton(Dialog.Close).objectName = "jobDialogCloseButton"; jobFolderCombo.currentIndex = Math.max(0, backend.folders.findIndex(function(f) { return f.id === selectedJob.folder_id })) }
         background: Rectangle { color: win.panel; radius: 10; border.color: win.line }
-        contentItem: WDialogBody {
-            bodySpacing: 14
-            LabelText { text: selectedJob.title || ""; font.pixelSize: win.fs(20); Layout.fillWidth: true }
-            SubText { text: (selectedJob.statusLabel || "") + "  ·  " + (selectedJob.stageLabel || ""); Layout.fillWidth: true }
-            SubText { text: selectedJob.retryAt ? "أُعيدت الجدولة تلقائيًا — المحاولة القادمة " + selectedJob.retryAt : ""; visible: !!selectedJob.retryAt; color: visualTheme.info; Layout.fillWidth: true }
-            SubText { text: selectedJob.template ? "قالب البرومبت: " + selectedJob.template : ""; visible: !!selectedJob.template; Layout.fillWidth: true }
-            GridLayout { columns: win.contentUnits < 850 ? 1 : 2;
-                Layout.fillWidth: true
-                AppCombo { id: jobFolderCombo; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.preferredWidth: 240; onActivated: { backend.assignJobFolder(selectedJob.id, currentValue || ""); selectedJob = backend.jobById(selectedJob.id) } }
-                LabelText { text: "مجلد المادة / الدرس" }
-                Item { Layout.fillWidth: true }
+        header: Rectangle {
+            color: visualTheme.inset; radius: 10
+            implicitHeight: jobHeading.implicitHeight + 28
+            ColumnLayout {
+                id: jobHeading
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: 14 }
+                spacing: 5
+                SubText { text: jobDialog.title; color: visualTheme.accent; Layout.fillWidth: true }
+                LabelText {
+                    objectName: "jobDialogTitle"; text: selectedJob.title || ""; textFormat: Text.PlainText
+                    font.pixelSize: win.fs(20); Layout.fillWidth: true; wrapMode: Text.Wrap; elide: Text.ElideNone
+                }
+                SubText {
+                    objectName: "jobDialogStatus"; text: (selectedJob.statusLabel || "") + "  ·  " + (selectedJob.stageLabel || "")
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                }
             }
-            SubText { text: selectedJob.error || ""; visible: !!selectedJob.error; color: visualTheme.warning; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-            AppProgress { Layout.fillWidth: true; from: 0; to: 100; value: selectedJob.progress || 0; indeterminate: selectedJob.status === "running" && selectedJob.progress < 0; visible: selectedJob.status === "running" }
-            GridLayout { columns: win.contentUnits < 850 ? 1 : 2;
-                AppButton { text: "إلغاء المهمة"; danger: true; enabled: selectedJob.status !== "completed"; onClicked: { backend.cancelJob(selectedJob.id); jobDialog.close() } }
-                AppButton { text: "إعادة المحاولة"; enabled: ["failed","blocked","uncertain","paused","cancelled"].indexOf(selectedJob.status) >= 0 || !!selectedJob.retryAt; onClicked: { retryWarning.open() } }
-                AppButton { text: "فتح المجلد"; onClicked: backend.openPath(selectedJob.folder) }
-                AppButton { text: "فتح Word"; enabled: !!selectedJob.document; primary: true; onClicked: backend.openPath(selectedJob.document) }
-            }
-            GridLayout { columns: win.contentUnits < 850 ? 1 : 2;
-                AppButton { text: "إعادة OpenCode بنسخة جديدة"; enabled: !!selectedJob.transcript && selectedJob.status !== "running"; onClicked: { backend.retry(selectedJob.id,"opencode",true); jobDialog.close() } }
-                AppButton { text: "إعادة التفريغ بنسخة جديدة"; enabled: !!selectedJob.audio && selectedJob.status !== "running"; onClicked: { paidRerun.open() } }
-                Item { Layout.fillWidth: true }
-            }
-            LabelText { text: "سجل التنفيذ"; Layout.alignment: Qt.AlignRight }
-            ScrollView {
-                id: logScroll
-                Layout.fillWidth: true; Layout.fillHeight: true
-                TextArea { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight;
-                    id: jobLog
-                    readOnly: true; selectByMouse: true; color: win.muted; wrapMode: TextEdit.Wrap; font.pixelSize: win.fs(12)
-                    background: Rectangle { color: win.bg; radius: 8 }
+        }
+        contentItem: ScrollView {
+            id: jobBodyScroll; objectName: "jobDialogBodyScroll"
+            clip: true; contentWidth: availableWidth
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical: AppScroll { policy: ScrollBar.AsNeeded }
+            ColumnLayout {
+                width: jobBodyScroll.availableWidth
+                height: Math.max(implicitHeight, jobBodyScroll.availableHeight)
+                spacing: 12
+                Rectangle {
+                    objectName: "jobDialogStepper"; Layout.fillWidth: true
+                    implicitHeight: jobStageRow.implicitHeight + 20
+                    color: visualTheme.inset; radius: 8; border.color: win.line
+                    RowLayout {
+                        id: jobStageRow
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 10 }
+                        layoutDirection: Qt.RightToLeft; spacing: 6
+                        Repeater {
+                            model: selectedJob.steps || []
+                            RowLayout {
+                                required property var modelData
+                                required property int index
+                                Layout.fillWidth: true; layoutDirection: Qt.RightToLeft; spacing: 6
+                                StageBadge { objectName: "jobDialogStage-" + modelData.name; theme: visualTheme; step: modelData; Layout.fillWidth: true }
+                                Rectangle { visible: index < (selectedJob.steps || []).length - 1; Layout.preferredWidth: 16 * win.uiScale; Layout.preferredHeight: 1; color: win.line }
+                            }
+                        }
+                    }
+                }
+                RowLayout {
+                    objectName: "jobDialogProgressRow"; visible: selectedJob.status === "running"
+                    Layout.fillWidth: true; layoutDirection: Qt.RightToLeft; spacing: 10
+                    SubText { text: selectedJob.stageLabel || ""; color: visualTheme.info }
+                    AppProgress {
+                        objectName: "jobDialogProgress"; Layout.fillWidth: true; from: 0; to: 100
+                        value: selectedJob.progress || 0
+                        indeterminate: selectedJob.status === "running" && (typeof selectedJob.progress !== "number" || !isFinite(selectedJob.progress) || selectedJob.progress < 0)
+                    }
+                    SubText {
+                        objectName: "jobDialogProgressLabel"; color: visualTheme.info
+                        text: typeof selectedJob.progress === "number" && isFinite(selectedJob.progress) && selectedJob.progress >= 0 ? Math.round(selectedJob.progress) + "٪" : "قيد التنفيذ"
+                    }
+                }
+                GridLayout {
+                    objectName: "jobDialogMetadata"; columns: jobDialog.availableWidth / win.uiScale >= 680 ? 3 : 1
+                    Layout.fillWidth: true; layoutDirection: Qt.RightToLeft; columnSpacing: 10; rowSpacing: 10
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.fillHeight: true; Layout.preferredWidth: 1
+                        implicitHeight: jobFolderMeta.implicitHeight + 24; color: visualTheme.inset; radius: 8; border.color: win.line
+                        ColumnLayout {
+                            id: jobFolderMeta; anchors { left: parent.left; right: parent.right; top: parent.top; margins: 12 } spacing: 8
+                            SubText { text: "مجلد المادة / الدرس"; Layout.fillWidth: true }
+                            AppCombo { id: jobFolderCombo; objectName: "jobDialogFolderCombo"; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.fillWidth: true; Layout.minimumWidth: 0; onActivated: { backend.assignJobFolder(selectedJob.id, currentValue || ""); selectedJob = backend.jobById(selectedJob.id) } }
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.fillHeight: true; Layout.preferredWidth: 1
+                        implicitHeight: jobTemplateMeta.implicitHeight + 24; color: visualTheme.inset; radius: 8; border.color: win.line
+                        ColumnLayout {
+                            id: jobTemplateMeta; anchors { left: parent.left; right: parent.right; top: parent.top; margins: 12 } spacing: 8
+                            SubText { text: "القالب المستخدم"; Layout.fillWidth: true }
+                            LabelText { objectName: "jobDialogTemplate"; text: selectedJob.template || "غير محدد"; textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.Wrap; elide: Text.ElideNone; font.pixelSize: win.fs(13) }
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.fillHeight: true; Layout.preferredWidth: 1
+                        implicitHeight: jobSourceMeta.implicitHeight + 24; color: visualTheme.inset; radius: 8; border.color: win.line
+                        ColumnLayout {
+                            id: jobSourceMeta; anchors { left: parent.left; right: parent.right; top: parent.top; margins: 12 } spacing: 8
+                            SubText { text: "المصدر"; Layout.fillWidth: true }
+                            LabelText { objectName: "jobDialogSource"; text: selectedJob.input_path || selectedJob.url || "غير متاح"; textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; elide: Text.ElideNone; font.pixelSize: win.fs(12) }
+                        }
+                    }
+                }
+                Rectangle {
+                    visible: !!selectedJob.retryAt || !!selectedJob.error
+                    Layout.fillWidth: true; implicitHeight: jobNotice.implicitHeight + 24
+                    color: visualTheme.inset; radius: 8; border.color: visualTheme.warning
+                    ColumnLayout {
+                        id: jobNotice; anchors { left: parent.left; right: parent.right; top: parent.top; margins: 12 } spacing: 8
+                        SubText {
+                            objectName: "jobDialogRetryNotice"; text: selectedJob.retryAt ? "أُعيدت الجدولة تلقائيًا — المحاولة القادمة " + selectedJob.retryAt : ""
+                            visible: !!selectedJob.retryAt; color: visualTheme.info; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; textFormat: Text.PlainText
+                        }
+                        LabelText {
+                            objectName: "jobDialogError"; text: selectedJob.error || ""; visible: !!selectedJob.error; color: visualTheme.warning
+                            font.pixelSize: win.fs(13); wrapMode: Text.WrapAnywhere; elide: Text.ElideNone; textFormat: Text.PlainText; Layout.fillWidth: true
+                        }
+                    }
+                }
+                GridLayout {
+                    objectName: "jobDialogWorkArea"; columns: jobDialog.narrow ? 1 : 2
+                    Layout.fillWidth: true; Layout.fillHeight: true; columnSpacing: 12; rowSpacing: 12
+                    Rectangle {
+                        objectName: "jobDialogLogPane"; Layout.fillWidth: true; Layout.fillHeight: true
+                        Layout.minimumHeight: 190 * win.uiScale; Layout.preferredWidth: 700 * win.uiScale
+                        color: win.bg; radius: 8; border.color: win.line
+                        ColumnLayout {
+                            anchors.fill: parent; anchors.margins: 12; spacing: 8
+                            LabelText { text: "سجل التنفيذ"; Layout.fillWidth: true; font.pixelSize: win.fs(14) }
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: win.line }
+                            ScrollView {
+                                id: logScroll; objectName: "jobDialogLogScroll"
+                                Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+                                contentWidth: availableWidth
+                                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                                // updateJobLog preserves a normalized scroll position.
+                                ScrollBar.vertical: AppScroll { readonly property real positionMaximum: 1.0 }
+                                TextArea {
+                                    id: jobLog; objectName: "jobDialogLog"
+                                    font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight
+                                    readOnly: true; selectByMouse: true; color: win.muted; wrapMode: TextEdit.Wrap; font.pixelSize: win.fs(12)
+                                    textFormat: TextEdit.PlainText; Accessible.name: "سجل تنفيذ المهمة"
+                                    background: Rectangle { color: win.bg }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        objectName: "jobDialogActionPane"; Layout.fillWidth: jobDialog.narrow; Layout.fillHeight: !jobDialog.narrow
+                        Layout.preferredWidth: 300 * win.uiScale; Layout.minimumWidth: jobDialog.narrow ? 0 : 300 * win.uiScale
+                        implicitHeight: jobActions.implicitHeight + 24
+                        color: visualTheme.inset; radius: 8; border.color: win.line
+                        ColumnLayout {
+                            id: jobActions; anchors { left: parent.left; right: parent.right; top: parent.top; margins: 12 } spacing: 10
+                            LabelText { text: "إجراءات المهمة"; Layout.fillWidth: true; font.pixelSize: win.fs(14) }
+                            SubText {
+                                objectName: "jobDialogOutputAvailability"
+                                text: "Word: " + (selectedJob.document ? "متاح" : "غير متاح") + " · التفريغ: " + (selectedJob.transcript ? "متاح" : "غير متاح") + " · الصوت: " + (selectedJob.audio ? "متاح" : "غير متاح")
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            }
+                            GridLayout {
+                                columns: jobDialog.narrow ? 2 : 1; Layout.fillWidth: true; layoutDirection: Qt.RightToLeft; columnSpacing: 8; rowSpacing: 8
+                                AppButton { objectName: "jobDialogOpenWord"; text: "فتح Word"; enabled: !!selectedJob.document; primary: true; Layout.fillWidth: true; Layout.minimumWidth: 0; onClicked: backend.openPath(selectedJob.document) }
+                                AppButton { objectName: "jobDialogOpenFolder"; text: "فتح المجلد"; Layout.fillWidth: true; Layout.minimumWidth: 0; onClicked: backend.openPath(selectedJob.folder) }
+                                AppButton { objectName: "jobDialogRetry"; text: "إعادة المحاولة"; enabled: ["failed","blocked","uncertain","paused","cancelled"].indexOf(selectedJob.status) >= 0 || !!selectedJob.retryAt; Layout.fillWidth: true; Layout.minimumWidth: 0; onClicked: { retryWarning.open() } }
+                                AppButton { objectName: "jobDialogCancel"; text: "إلغاء المهمة"; danger: true; enabled: selectedJob.status !== "completed"; Layout.fillWidth: true; Layout.minimumWidth: 0; onClicked: { backend.cancelJob(selectedJob.id); jobDialog.close() } }
+                                AppButton { objectName: "jobDialogNewWord"; text: "إعادة OpenCode بنسخة جديدة"; enabled: !!selectedJob.transcript && selectedJob.status !== "running"; Layout.fillWidth: true; Layout.minimumWidth: 0; onClicked: { backend.retry(selectedJob.id,"opencode",true); jobDialog.close() } }
+                                AppButton { objectName: "jobDialogNewTranscript"; text: "إعادة التفريغ بنسخة جديدة"; enabled: !!selectedJob.audio && selectedJob.status !== "running"; Layout.fillWidth: true; Layout.minimumWidth: 0; onClicked: { paidRerun.open() } }
+                            }
+                        }
+                    }
                 }
             }
         }

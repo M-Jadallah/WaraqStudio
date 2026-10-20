@@ -124,14 +124,13 @@ def main():
         def assert_stage_layout():
             job = bridge.jobById(jobs[0]["id"])
             flow = find("queueStages-" + job["id"])
-            wide = root.property("contentUnits") >= 1100
-            target = find(("queueStageColumn-" if wide else "queueTaskHeading-") + job["id"])
+            target = find("queueStageColumn-" + job["id"])
             assert flow.parentItem() == target
             assert flow.width() > 0 and flow.height() > 0
             badges = [find("queueStage-" + job["id"] + "-" + step["name"]) for step in job["steps"]]
             assert all(badge.isVisible() for badge in badges)
             for previous, badge in zip(badges, badges[1:]):
-                assert badge.y() > previous.y() or badge.x() < previous.x(), "Stage order must read RTL"
+                assert abs(badge.y() - previous.y()) < 1 and badge.x() < previous.x(), "Stages stay on one RTL line"
             row = find("queueRow-" + job["id"])
             for badge in badges:
                 point = badge.mapToItem(row, badge.boundingRect().bottomRight())
@@ -205,7 +204,7 @@ def main():
                     assert root.property("page") == page
                     assert root.property("dark") == (theme == "dark")
                     assert root.width() == width and root.height() == height, (width, height, root.width(), root.height())
-                    for name in ("runButton", "forceButton", f"nav{page}"):
+                    for name in ("runButton", "operationOptionsButton", f"nav{page}"):
                         control = find(name)
                         point = control.mapToScene(control.boundingRect().center())
                         if not (0 <= point.x() <= width and 0 <= point.y() <= height):
@@ -224,6 +223,26 @@ def main():
                     assert_bold_text()
                     if page == 0:
                         assert_stage_layout()
+                        # Compare real viewport density, rather than inferring it
+                        # from a configured row height or a screenshot.
+                        if width == 1380 and scale == 1.0 and not collapsed:
+                            view = find("jobsList")
+                            QMetaObject.invokeMethod(view, "forceLayout")
+                            QTest.qWait(15)
+                            visible_rows = []
+                            for job in bridge.jobs:
+                                try:
+                                    row = find("queueRow-" + job["id"])
+                                except AssertionError:
+                                    continue  # ListView only instantiates its viewport/cache.
+                                if not row.isVisible() or row.height() <= 0:
+                                    continue
+                                top = row.mapToItem(view, row.boundingRect().topLeft()).y()
+                                bottom = row.mapToItem(view, row.boundingRect().bottomRight()).y()
+                                if top >= -1 and bottom <= view.height() + 1:
+                                    visible_rows.append(job["id"])
+                            assert len(visible_rows) >= (15 if compact else 12), (theme, compact, len(visible_rows), view.height())
+                            print(f"Queue density {theme} compact={compact}: {len(visible_rows)} complete rows", flush=True)
                     cases += 1
 
         # Updates preserve the jobs/source/results/files offsets and keyboard focus.

@@ -1,4 +1,5 @@
 """Native, offline StageBadge state, palette, typography and SVG checks."""
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -38,6 +39,7 @@ ApplicationWindow {
     width: 850; height: 900; visible: true
     property bool darkMode: true
     property real uiScale: 1
+    property string badgeStyle: "full"
     Theme { id: visualTheme; dark: darkMode; scale: uiScale }
     color: visualTheme.panel
     ColumnLayout {
@@ -52,6 +54,8 @@ ApplicationWindow {
                     objectName: modelData.name + "-" + modelData.status
                     theme: visualTheme
                     step: modelData
+                    compact: badgeStyle !== "full"
+                    mini: badgeStyle === "mini"
                 }
             }
         }
@@ -68,8 +72,9 @@ ApplicationWindow {
     cases = 0
     for dark in (True, False):
         window.setProperty("darkMode", dark)
-        for scale in (.8, 1., 1.4):
+        for scale, style in itertools.product((.8, 1., 1.4), ("full", "compact", "mini")):
             window.setProperty("uiScale", scale)
+            window.setProperty("badgeStyle", style)
             QTest.qWait(80)
             for row in rows:
                 def locate(item, name):
@@ -99,7 +104,7 @@ ApplicationWindow {
                     if item.metaObject().indexOfProperty("source") >= 0:
                         assert (ROOT / "waraq/qml" / item.property("source").toString()).is_file(), (row, item.property("source"))
                 cases += 1
-            assert window.grabWindow().save(str(evidence / f"stage-states-{'dark' if dark else 'light'}-{round(scale*100)}.png"))
+            assert window.grabWindow().save(str(evidence / f"stage-states-{'dark' if dark else 'light'}-{round(scale*100)}-{style}.png"))
     window.close()
     failures = [message for message in messages if message.startswith("file:") or "error" in message.lower() or "failed" in message.lower()]
     assert not failures, failures

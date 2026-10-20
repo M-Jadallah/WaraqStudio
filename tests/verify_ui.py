@@ -104,7 +104,26 @@ def main():
         def click(name):
             if os.environ.get("CI"):
                 print("Native UI action:", name, flush=True)
+            options = root.findChild(QObject, "operationOptionsPopup")
+            in_options = name in ("autoStopBox", "forceButton", "quickInternetButton")
+            if in_options and not options.property("visible"):
+                click("operationOptionsButton")
+            elif not in_options and name != "operationOptionsButton" and options.property("visible"):
+                QMetaObject.invokeMethod(options, "close")
+                QTest.qWait(30)
             item = find(root.contentItem(), name)
+            if name.startswith("queueFilter-") and (item is None or not item.isVisible()):
+                combo = find(root.contentItem(), "queueFilterCombo")
+                assert combo is not None and combo.isVisible()
+                index = ("all", "running", "completed", "attention").index(name.removeprefix("queueFilter-"))
+                combo.forceActiveFocus()
+                QTest.keyClick(root, Qt.Key_Home)
+                for _ in range(index):
+                    QTest.keyClick(root, Qt.Key_Down)
+                QTest.keyClick(root, Qt.Key_Return)
+                QTest.qWait(60)
+                assert root.property("filter") == name.removeprefix("queueFilter-")
+                return
             assert item is not None, name
             assert item.isVisible(), "Refusing to click a hidden control: " + name
             p = item.mapToScene(item.boundingRect().center())
@@ -282,7 +301,7 @@ def main():
         assert any(p["id"] == "groq" for p in bridge.providers), "a provider in use must not be deleted"
         # Starting the queue asks about the override first, and both answers start it.
         click("nav0")
-        assert find(root.contentItem(), "forceButton") is not None
+        assert root.findChild(QObject, "forceButton") is not None
         click("runButton")
         assert find(root.contentItem(), "forceQuestion") is not None, "the force question must precede a start"
         assert not scheduler.running
