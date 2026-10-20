@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -44,6 +45,11 @@ class Store:
             CREATE TABLE IF NOT EXISTS runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
               created REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS execution_attempts (
+              id TEXT PRIMARY KEY, account_id TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL,
+              worker_id TEXT NOT NULL, model TEXT NOT NULL, session_id TEXT DEFAULT '',
+              instance_id TEXT DEFAULT '', workpath TEXT DEFAULT '',
+              started REAL NOT NULL, finished REAL DEFAULT 0, outcome TEXT DEFAULT 'running');
         ''')
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}
         if "queue_order" not in columns:
@@ -58,6 +64,93 @@ class Store:
         stage_columns = {r[1] for r in self.db.execute("PRAGMA table_info(stages)")}
         if "retries" not in stage_columns:
             self.db.execute("ALTER TABLE stages ADD COLUMN retries INTEGER DEFAULT 0")
+        self._migrate_accounts()
+
+    def _migrate_accounts(self):
+        """Archive the retired registry and preserve interrupted execution ownership.
+
+        Authentication is deliberately not imported: the new engine owns refresh
+        tokens and requires one initial login. SQLite's backup API includes WAL
+        contents, unlike copying the database file while it is open.
+        """
+        tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        legacy = tables.intersection({"chatgpt_accounts", "chatgpt_usage", "chatgpt_attempts"})
+        if not legacy:
+            return
+        backup = self.path.with_name(self.path.name + ".before-embedded-accounts.sqlite3")
+        if not backup.exists():
+            with sqlite3.connect(backup) as archive:
+                self.db.backup(archive)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            holds = self.state_get("execution_holds", {})
+            for job_id, held in self.state_get("chatgpt_session_holds", {}).items():
+                holds.setdefault(job_id, {**held, "legacy": True})
+            if "chatgpt_attempts" in legacy:
+                for row in self.db.execute("SELECT * FROM chatgpt_attempts").fetchall():
+                    attempt = dict(row)
+                    self.db.execute("INSERT OR IGNORE INTO execution_attempts "
+                                    "(id,account_id,job_id,worker_id,model,session_id,instance_id,workpath,started,finished,outcome) "
+                                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)", tuple(attempt.get(key, "") for key in
+                                    ("id", "account_id", "job_id", "worker_id", "model", "session_id", "instance_id", "workpath", "started", "finished", "outcome")))
+                    if attempt["outcome"] == "running":
+                        holds.setdefault(attempt["job_id"], {**{key: attempt.get(key, "") for key in
+                                         ("account_id", "session_id", "instance_id", "workpath")},
+                                         "attempt_id": attempt["id"], "legacy": True})
+            aliases = []
+            if "chatgpt_accounts" in legacy:
+                for row in self.db.execute("SELECT metadata FROM chatgpt_accounts"):
+                    metadata = json.loads(row[0])
+                    aliases.append(str(metadata.get("alias", ""))[:80])
+            if holds:
+                self.state_put("execution_holds", holds)
+            self.state_put("embedded_accounts_migration", {"version": 1, "aliases": aliases,
+                           "requires_login": bool(aliases), "archive": str(backup), "migrated_at": time.time()})
+            self.db.execute("DELETE FROM runtime_state WHERE key GLOB 'chatgpt_*'")
+            for table in sorted(legacy):
+                self.db.execute(f"DROP TABLE {table}")
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def begin_execution(self, attempt, job_id, worker_id, model, workpath):
+        """Persist ownership before allowing a model request to execute."""
+        with self.lock:
+            self.db.execute("INSERT INTO execution_attempts "
+                            "(id,account_id,job_id,worker_id,model,session_id,instance_id,workpath,started) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)",
+                            (attempt["attempt_id"], attempt.get("account_id", ""), job_id, worker_id, model,
+                             attempt.get("session_id", ""), attempt.get("runtime_instance_id", ""), str(workpath), time.time()))
+
+    def execution_session(self, attempt_id, session_id, instance_id):
+        with self.lock:
+            self.db.execute("UPDATE execution_attempts SET session_id=?,instance_id=? WHERE id=?",
+                            (session_id, instance_id, attempt_id))
+
+    def finish_execution(self, attempt_id, outcome):
+        with self.lock:
+            self.db.execute("UPDATE execution_attempts SET outcome=?,finished=? WHERE id=?",
+                            (outcome, time.time(), attempt_id))
+
+    def hold_execution(self, attempt_id):
+        with self.lock:
+            row = self.db.execute("SELECT * FROM execution_attempts WHERE id=?", (attempt_id,)).fetchone()
+            if not row:
+                raise ValueError("سجل المحاولة غير موجود؛ لا يمكن إغفال حالة التنفيذ.")
+            holds = self.state_get("execution_holds", {})
+            holds[row["job_id"]] = {**{key: row[key] for key in ("account_id", "session_id", "instance_id", "workpath")},
+                                     "attempt_id": attempt_id}
+            self.state_put("execution_holds", holds)
+            self.finish_execution(attempt_id, "uncertain")
+
+    def clear_execution_hold(self, job_id, expected):
+        with self.lock:
+            holds = self.state_get("execution_holds", {})
+            if holds.get(job_id) != expected:
+                raise ValueError("تغيّرت الجلسة أثناء الفحص؛ أعد الفحص.")
+            holds.pop(job_id)
+            self.state_put("execution_holds", holds)
 
     def event(self, job_id, message, level="info"):
         with self.lock:
@@ -66,6 +159,16 @@ class Store:
 
     def recover(self):
         with self.lock:
+            # Native account sessions may outlive Waraq. Preserve a replay hold
+            # before changing their interrupted attempts or stage statuses.
+            holds = self.state_get("execution_holds", {})
+            for attempt in self.db.execute("SELECT * FROM execution_attempts WHERE outcome='running'").fetchall():
+                holds.setdefault(attempt["job_id"], {**{key: attempt[key] for key in
+                                            ("account_id", "session_id", "instance_id", "workpath")},
+                                            "attempt_id": attempt["id"]})
+            if holds:
+                self.state_put("execution_holds", holds)
+            self.db.execute("UPDATE execution_attempts SET outcome='interrupted',finished=? WHERE outcome='running'", (time.time(),))
             # An interrupted paid request is not automatically submitted again.
             self.db.execute("UPDATE stages SET status=CASE WHEN name='deepgram' THEN 'uncertain' ELSE 'paused' END, "
                             "worker='', error='توقف التشغيل السابق؛ راجع النتيجة قبل الاستئناف' WHERE status='running'")
@@ -77,6 +180,8 @@ class Store:
             self.db.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)",
                             (keep_events,))
             self.db.execute("DELETE FROM cache WHERE created < ?", (time.time() - 86400,))
+            self.db.execute("DELETE FROM execution_attempts WHERE outcome NOT IN ('running','uncertain','interrupted') AND id NOT IN "
+                            "(SELECT id FROM execution_attempts ORDER BY started DESC LIMIT ?)", (keep_events,))
 
     def folders(self):
         with self.lock:
@@ -112,14 +217,16 @@ class Store:
                 raise ValueError("المهمة غير موجودة.")
 
     def add(self, items, config, batch="", input_path="", folder_id=""):
+        items = [item for item in items if item.get("selected", True) and item.get("available", True)]
         if not any(config[s + "_enabled"] for s in STAGES):
             raise ValueError("فعّل مرحلة واحدة على الأقل.")
-        if not input_path:
+        if any(not item.get("input_path", input_path) for item in items):
             if not config["download_enabled"]:
                 raise ValueError("مصدر YouTube يحتاج التنزيل؛ استورد الملفات المحلية لتجاوزه.")
             if config["opencode_enabled"] and not config["deepgram_enabled"]:
                 raise ValueError("إنشاء Word يحتاج تفريغًا. فعّل Deepgram أو استورد ملف TXT.")
         added = []
+        copied_folders = []
         batch = batch or uuid.uuid4().hex[:8]
         with self.lock:
             self.folder_name(folder_id)
@@ -127,27 +234,49 @@ class Store:
             try:
                 base = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM jobs").fetchone()[0]
                 for queue_order, item in enumerate(items, 1):
-                    if not item.get("selected", True) or not item.get("available", True):
-                        continue
                     ident = uuid.uuid4().hex[:12]
                     folder = str(Path(config["output_root"]) / ident)
+                    source_path = str(item.get("input_path", input_path))
+                    local_txt = source_path.lower().endswith(".txt")
+                    transcript = ""
+                    if local_txt:
+                        # Own the bytes before publishing a runnable job. The source
+                        # path is kept only for provenance, never for Word input.
+                        content = Path(source_path).read_bytes()
+                        if not content.decode("utf-8-sig").strip():
+                            raise ValueError("ملف التفريغ فارغ.")
+                        managed_folder = Path(folder)
+                        managed_folder.mkdir(parents=True, exist_ok=False)
+                        copied_folders.append(managed_folder)
+                        transcript = str(managed_folder / Path(source_path).name)
+                        Path(transcript).write_bytes(content)
                     self.db.execute("INSERT INTO jobs(id,video_id,title,url,position,batch,config,folder,created,input_path,duration,queue_order,seq,folder_id) "
                                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                     (ident, item["video_id"], item["title"], item.get("url", ""), item["position"],
-                                     batch, json.dumps(config, ensure_ascii=False), folder, time.time(), input_path,
+                                     batch, json.dumps(config, ensure_ascii=False), folder, time.time(), source_path,
                                      item.get("duration") or 0, queue_order, base + queue_order, folder_id))
-                    local_txt = input_path.lower().endswith(".txt")
                     for stage in STAGES:
-                        skip = not config[stage + "_enabled"] or (input_path and stage == "download") or (local_txt and stage == "deepgram")
+                        skip = not config[stage + "_enabled"] or (source_path and stage == "download") or (local_txt and stage == "deepgram")
                         self.db.execute("INSERT INTO stages(job_id,name,status,updated) VALUES(?,?,?,?)",
                                         (ident, stage, "skipped" if skip else "pending", time.time()))
-                    if input_path:
+                    if source_path:
                         field = "transcript" if local_txt else "audio"
-                        self.db.execute(f"UPDATE jobs SET {field}=? WHERE id=?", (input_path, ident))
+                        self.db.execute(f"UPDATE jobs SET {field}=? WHERE id=?", (transcript if local_txt else source_path, ident))
                     added.append(ident)
                 self.db.execute("COMMIT")
-            except BaseException:
+            except BaseException as exc:
                 self.db.execute("ROLLBACK")
+                output_root = Path(config["output_root"]).resolve()
+                for copied_folder in copied_folders:
+                    try:
+                        # Remove only new job directories directly under this
+                        # output root; never follow a replaced directory outside it.
+                        if copied_folder.resolve().parent != output_root:
+                            raise OSError("مسار تنظيف نسخة التفريغ خارج مجلد العمل.")
+                        shutil.rmtree(copied_folder)
+                    except OSError as cleanup_error:
+                        if hasattr(exc, "add_note"):
+                            exc.add_note("تعذر تنظيف نسخة التفريغ: " + str(cleanup_error))
                 raise
         return added
 
@@ -176,10 +305,46 @@ class Store:
 
     def claim(self, ident, stage, worker):
         with self.lock:
+            if stage == "opencode" and ident in self.state_get("execution_holds", {}):
+                # The durable replay guard also applies after changing provider
+                # or disabling managed mode, independently of account routing.
+                return False
             cur = self.db.execute("UPDATE stages SET status='running',worker=?,progress=-1,error='',attempts=attempts+1,updated=? "
                                   "WHERE job_id=? AND name=? AND status='pending' AND next_retry<=?",
                                   (worker, time.time(), ident, stage, time.time()))
             return cur.rowcount == 1
+
+    def delete_jobs(self, idents, busy_ids=()):
+        """Remove queue records only, atomically with claims.
+
+        Scheduler.delete_jobs is the public entry point for a live queue: it
+        supplies active jobs, including completed stages still publishing.
+        The running-stage check also protects direct Store callers.
+        """
+        idents = list(dict.fromkeys(str(ident) for ident in idents))
+        busy_ids = set(busy_ids)
+        result = {"deleted": [], "busy": [], "missing": []}
+        if not idents:
+            return result
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                busy_ids.update(self.state_get("execution_holds", {}))
+                for ident in idents:
+                    if not self.db.execute("SELECT 1 FROM jobs WHERE id=?", (ident,)).fetchone():
+                        result["missing"].append(ident)
+                    elif ident in busy_ids or self.db.execute(
+                            "SELECT 1 FROM stages WHERE job_id=? AND status='running' LIMIT 1", (ident,)).fetchone():
+                        result["busy"].append(ident)
+                    else:
+                        self.db.execute("DELETE FROM stages WHERE job_id=?", (ident,))
+                        self.db.execute("DELETE FROM jobs WHERE id=?", (ident,))
+                        result["deleted"].append(ident)
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return result
 
     def set_stage(self, ident, stage, status, error="", progress=-1, next_retry=0):
         with self.lock:
@@ -216,6 +381,8 @@ class Store:
 
     def retry(self, ident, stage, rerun=False):
         with self.lock:
+            if (stage == "opencode" or rerun) and ident in self.state_get("execution_holds", {}):
+                raise ValueError("تحقق من توقف جلسة ChatGPT السابقة من إدارة الحسابات قبل إعادة التنفيذ.")
             job = self.get(ident)
             if not job or any(s["status"] == "running" for s in job["stages"].values()):
                 raise ValueError("انتظر انتهاء المرحلة النشطة أو ألغِها أولًا.")

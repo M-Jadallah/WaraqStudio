@@ -16,7 +16,11 @@ ComboBox {
     palette.highlight: theme.accent
     palette.highlightedText: theme.accentInk
     background: Rectangle { radius: 6; color: control.theme.inset; border.width: control.activeFocus ? 2 : 1; border.color: control.activeFocus ? control.theme.accent : control.theme.line }
-    indicator: Text { x: control.width - width - 10; y: (control.height - height) / 2; text: "⌄"; color: control.theme.muted; font.pixelSize: 16 }
+    indicator: Item {
+        x: control.width - width - 10; y: (control.height - height) / 2; width: 12; height: 8
+        Rectangle { x: 1; y: 3; width: 7; height: 2; rotation: 45; color: control.theme.muted }
+        Rectangle { x: 5; y: 3; width: 7; height: 2; rotation: -45; color: control.theme.muted }
+    }
     contentItem: TextField {
         text: control.editable ? control.editText : control.displayText
         enabled: control.editable

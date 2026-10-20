@@ -13,6 +13,11 @@ ApplicationWindow {
     title: "ورق | Waraq Studio"
     property int page: 0
     property var settings: JSON.parse(backend.settingsJson)
+    readonly property string savedOutputRoot: JSON.parse(backend.settingsJson).output_root || ""
+    readonly property var queueSnapshot: JSON.parse(backend.jobsJson)
+    readonly property var appUpdateState: backend.appUpdate || ({status: "idle", version: "", progress: 0, message: "", hasToken: false})
+    readonly property var remoteState: backend.remoteAccess || ({enabled: false, port: 8765, urls: [], code: "", qr: "", clients: 0, error: ""})
+    readonly property var internetState: backend.internetAccess || ({registered: false, connected: false, busy: false, name: "", url: "", status: "متوقف", error: "", pairUrl: "", pendingPhones: [], phones: []})
     property bool dark: settings.theme !== "light"
     readonly property color bg: visualTheme.bg
     readonly property color panel: visualTheme.panel
@@ -33,11 +38,14 @@ ApplicationWindow {
     property string workerKind: ""
     property int workerIndex: 0
     property string filter: "all"
+    property var selectedQueueIds: []
     property string search: ""
     property string sourceSearch: ""
     property string fileKind: "all"
     property var pendingFile: ({})
     property var pendingProvider: ({})
+    property var pendingAccount: ({})
+    readonly property var accountLoginChoice: backend.accountLoginChoice || ({})
     property var lastForce: ({provider: "", model: "", variant: ""})
     property bool skipForceQuestion: false
     property var pageNames: ["مركز العمليات", "إضافة مصدر", "العمال والخدمات", "مكتبة النتائج", "الملفات", "الإعدادات"]
@@ -51,6 +59,94 @@ ApplicationWindow {
     function fs(n) { return visualTheme.fs(n) }
     function rh(n) { return Math.max(20, Math.round(n * uiScale * density)) }
     function rs(n) { return Math.max(2, Math.round(n * density)) }
+    function usageDate(value) {
+        return typeof value === "number" && isFinite(value) && value > 0
+            ? new Date(value * 1000).toLocaleString(Qt.locale(), "dd/MM/yyyy hh:mm") : "غير معروف"
+    }
+    function usageWindow(label, value) {
+        value = value || {}
+        var known = ["available", "stale"].indexOf(value.status) >= 0 && typeof value.remainingPercent === "number" && isFinite(value.remainingPercent)
+        return label + " · المتبقي: " + (known ? value.remainingPercent + "٪" : "غير معروف")
+            + (value.status === "stale" ? " (قراءة قديمة)" : "") + " · موعد التجدد (توقيت الجهاز): " + win.usageDate(value.resetsAt)
+    }
+    function usageMessage(usage, refreshing) {
+        usage = usage || {}
+        var messages = {unsupported: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+            unsupported_method: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+            signed_out: "سجّل الدخول لقراءة الحصة.", auth_required: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+            authentication_required: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+            network_error: "تعذّر الاتصال لقراءة الحصة. يمكنك إعادة المحاولة.",
+            rate_limited: "خدمة الحصص طلبت الانتظار قبل إعادة المحاولة.",
+            timeout: "انتهت مهلة قراءة الحصة. يمكنك إعادة المحاولة.",
+            invalid_response: "تعذّر تفسير بيانات الحصة.", not_fetched: "لم تُقرأ الحصة بعد.", not_checked: "لم تُقرأ الحصة بعد.",
+            token_sharing_unsupported: "قراءة الحصة غير مدعومة لتسجيل Sign in with ChatGPT الحالي.",
+            method_unsupported: "قراءة الحصة غير مدعومة لطريقة الدخول الحالية.",
+            native_version_unverified: "لم يُتحقق من دعم قراءة الحصة في إصدار OpenCode المثبّت.",
+            usage_available: "", usage_partial: "بعض نوافذ الحصة غير متاحة.",
+            windows_missing: "لم تُرجع الخدمة نوافذ الحصة.", usage_windows_unavailable: "نوافذ الحصة غير متاحة.",
+            usage_read_failed: "تعذّرت قراءة الحصة. أعد المحاولة لاحقًا.",
+            usage_unavailable: "الحصة غير متاحة حاليًا.",
+            usage_cancelled: "أُلغي تحديث الحصة.", cancelled: "أُلغي تحديث الحصة.",
+            usage_refresh_deferred: "تحديث الحصة مؤجّل حتى يصبح الحساب متاحًا.",
+            account_not_ready: "الحساب غير جاهز لقراءة الحصة.",
+            usage_runtime_unsupported: "إصدار OpenCode الحالي لا يدعم قراءة الحصة.",
+            legacy_supported: "طريقة الدخول تدعم قراءة الحصة.",
+            response_too_large: "تعذّر قبول استجابة خدمة الحصص.",
+            unauthorized: "يلزم تجديد تسجيل الدخول لقراءة الحصة.",
+            endpoint_unavailable: "قراءة الحصة غير مدعومة حاليًا لدى الخدمة.",
+            throttled: "خدمة الحصص طلبت الانتظار قبل إعادة المحاولة.",
+            http_error: "تعذّرت قراءة الحصة من الخدمة.",
+            connection_failed: "تعذّر الاتصال بخدمة الحصص.",
+            binding_invalid: "تغيّر تسجيل الحساب؛ يلزم التحقق من الدخول.",
+            runtime_changed: "تغيّرت جلسة OpenCode؛ أعد تحديث الحصة.",
+            identity_unavailable: "تعذّر التحقق من هوية الحساب لقراءة الحصة.",
+            expired_pending_idle: "انتهت صلاحية الدخول؛ يُؤجّل تجديده حتى اكتمال مهام الحساب.",
+            binding_changed: "تغيّرت هوية الحساب؛ أعد تحديث الحصة.",
+            native_unavailable: "OpenCode غير متاح لقراءة الحصة.",
+            maintenance_unreserved: "تحديث الحصة مؤجّل حتى يصبح الحساب متاحًا.",
+            runtime_unavailable: "جلسة OpenCode غير متاحة لقراءة الحصة.",
+            account_busy: "تحديث الحصة مؤجّل حتى اكتمال مهام الحساب.",
+            activity_unverified: "يلزم التحقق من توقف جلسة الحساب السابقة.",
+            native_refreshed: "جُدّد الدخول؛ يمكن تحديث الحصة.",
+            refresh_unavailable: "تعذّر تجديد الدخول لقراءة الحصة.",
+            runtime_pending_idle: "تحديث الحصة مؤجّل حتى اكتمال مهام الحساب."}
+        var message = messages[usage.messageCode] || (usage.status === "unsupported" ? messages.unsupported
+            : usage.status === "available" ? "" : "الحصة غير معروفة حاليًا؛ أعد المحاولة لاحقًا.")
+        return (refreshing ? "جارٍ تحديث الحصة… " : "") + (usage.stale ? "قراءة قديمة. " : "") + message
+    }
+    function usageRefreshReason(usage) {
+        usage = usage || {}
+        var reasons = {refreshing: "تحديث الحصة جارٍ بالفعل.",
+            managed_accounts_disabled: "فعّل استخدام حسابات ChatGPT المُدارة لتحديث الحصة.",
+            account_not_ready: "الحساب غير جاهز؛ تحقق من تسجيل الدخول وحالة الجلسة.",
+            usage_unsupported: "لا تدعم طريقة الدخول أو نسخة OpenCode الحالية قراءة الحصة.",
+            usage_closed: "أُوقف تحديث الحصص أثناء إغلاق التطبيق.", usage_unavailable: "تحديث الحصة غير متاح حاليًا."}
+        return usage.refreshBlockReason === "refresh_wait" ? "يمكن إعادة التحديث بعد " + (usage.refreshWaitSeconds || 0) + " ثانية."
+            : reasons[usage.refreshBlockReason] || ""
+    }
+    function transcriptTemplateId() { return backend.templates.length > 0 ? (templateBox.currentValue || "") : "" }
+    function chooseSourceOutputFolder() {
+        var path = backend.choosePath("folder")
+        if (!path) return
+        var templateId = win.transcriptTemplateId()
+        var folderId = sourceFolderCombo.currentValue || ""
+        var updated = JSON.parse(backend.settingsJson)
+        updated.output_root = path
+        if (backend.saveSettings(JSON.stringify(updated))) {
+            // Saving defaults republishes the template model; keep the user's
+            // chosen template and subject when the ComboBoxes settle.
+            Qt.callLater(function() {
+                templateBox.currentIndex = Math.max(0, backend.templates.findIndex(function(t) { return t.id === templateId }))
+                sourceFolderCombo.currentIndex = Math.max(0, backend.folders.findIndex(function(f) { return f.id === folderId }))
+            })
+        }
+    }
+    function hasLocalTranscript(urls) {
+        for (var i = 0; i < urls.length; i++) {
+            if (/^file:\/\/.*\.txt$/i.test(urls[i].toString())) return true
+        }
+        return false
+    }
     color: bg
     palette.window: panel
     palette.windowText: ink
@@ -68,9 +164,34 @@ ApplicationWindow {
         return (filter === "all" || job.status === filter || (filter === "attention" && ["blocked", "failed", "uncertain"].indexOf(job.status) >= 0))
             && (search.length === 0 || job.title.toLowerCase().indexOf(search.toLowerCase()) >= 0)
     }
+    function visibleQueueIds() {
+        return win.queueSnapshot.filter(function(job) { return win.matches(job) }).map(function(job) { return job.id })
+    }
+    function visibleQueueSelectionCount() {
+        return win.visibleQueueIds().filter(function(id) { return win.selectedQueueIds.indexOf(id) >= 0 }).length
+    }
+    function setQueueSelected(id, selected) {
+        var next = win.selectedQueueIds.filter(function(value) { return value !== id })
+        if (selected) next.push(id)
+        win.selectedQueueIds = next
+    }
+    function selectVisibleQueue(selected) {
+        var visibleIds = win.visibleQueueIds()
+        var next = win.selectedQueueIds.filter(function(id) { return visibleIds.indexOf(id) < 0 })
+        win.selectedQueueIds = selected ? next.concat(visibleIds) : next
+    }
+    function reconcileQueueSelection() {
+        var existing = win.queueSnapshot.map(function(job) { return job.id })
+        var next = win.selectedQueueIds.filter(function(id) { return existing.indexOf(id) >= 0 })
+        if (next.length !== win.selectedQueueIds.length) win.selectedQueueIds = next
+    }
+    function deleteQueueSelection() {
+        backend.deleteJobs(win.selectedQueueIds.slice())
+        win.reconcileQueueSelection()
+    }
     function attentionGroups() {
         var groups = {}
-        backend.jobs.forEach(function(job) {
+        win.queueSnapshot.forEach(function(job) {
             if (["failed", "blocked", "uncertain"].indexOf(job.status) < 0 || !win.matches(job)) return
             var key = job.current + ":" + job.status
             if (!groups[key]) groups[key] = {stage: job.current, status: job.status,
@@ -95,8 +216,10 @@ ApplicationWindow {
         if (w.stage === "deepgram") return (w.role === "backup" ? "احتياطي · " : "أساسي · ") +
             (w.hasKey ? "المفتاح محفوظ في مخزن الاعتماد" : "لا مفتاح محفوظ لهذا العامل")
         var parts = [w.providerLabel, w.modelResolved]
+        if (w.accountName) parts.push("الحساب: " + w.accountName)
+        if (w.accountStatus) parts.push(({running: "قيد التنفيذ", waiting: "بانتظار حساب متاح", cooldown: "بانتظار تجدد الحد"})[w.accountStatus] || w.accountStatus)
         if ((w.variant || "").length > 0) parts.push("تفكير " + w.variant)
-        parts.push(!w.keyEnv ? "تسجيل دخول OpenCode" : (w.hasKey ? "المفتاح محفوظ" : "لا مفتاح محفوظ"))
+        parts.push(!w.keyEnv ? "حسابات ChatGPT في ورق" : (w.hasKey ? "المفتاح محفوظ" : "لا مفتاح محفوظ"))
         return parts.join("  ·  ")
     }
     function providerName(id) {
@@ -251,6 +374,7 @@ ApplicationWindow {
                 win.updateJobLog()
             }
         }
+        function onJobsChanged() { win.reconcileQueueSelection() }
     }
     Connections {
         target: win
@@ -376,6 +500,28 @@ ApplicationWindow {
                             SubText { text: win.pageDescriptions[win.page]; Layout.fillWidth: true }
                         }
                     }
+                    // Reconnect the already paired phone without leaving the main page.
+                    ActionRow {
+                        AppButton {
+                            id: quickInternetButton; objectName: "quickInternetButton"
+                            readonly property bool active: win.internetState.enabled === true || win.internetState.connected
+                            text: active ? "إيقاف اتصال الإنترنت" : (win.internetState.registered ? "تفعيل اتصال الإنترنت" : "إعداد ربط الهاتف")
+                            primary: !active
+                            enabled: !win.internetState.busy
+                            Accessible.name: text
+                            onClicked: {
+                                if (active) backend.stopInternet()
+                                else if (win.internetState.registered) backend.startInternet()
+                                else win.page = 5
+                            }
+                        }
+                        LabelText {
+                            objectName: "quickInternetStatus"
+                            text: "ربط الهاتف: " + win.internetState.status + (win.internetState.name ? " · " + win.internetState.name : "") + (win.internetState.error ? " · " + win.internetState.error : "")
+                            color: win.internetState.error ? (win.dark ? "#ffba82" : "#9a4409") : (win.internetState.connected ? (win.dark ? "#61ddbb" : "#08765b") : win.muted)
+                            width: Math.max(160, parent.width - quickInternetButton.width - 12)
+                        }
+                    }
                     ActionRow {
                         AppButton { objectName: "runButton"; text: backend.running ? "إيقاف بعد المهام الحالية" : "تشغيل الطابور"; primary: !backend.running; onClicked: win.runClicked() }
                         AppButton { objectName: "forceButton"; text: "فرض إعداد على عمال OpenCode"; onClicked: win.openForceDialog(false) }
@@ -389,6 +535,7 @@ ApplicationWindow {
             StackLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.minimumWidth: 0
                 Layout.margins: 16
                 currentIndex: win.page
 
@@ -397,7 +544,7 @@ ApplicationWindow {
                     spacing: 12
                     GridLayout {
                         Layout.fillWidth: true
-                        columns: win.contentUnits < 850 ? 2 : 4
+                        columns: 4
                         columnSpacing: 10; rowSpacing: 8
                         Repeater {
                             model: [
@@ -409,7 +556,7 @@ ApplicationWindow {
                             delegate: Box {
                                 required property var modelData
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: Math.round(76 * win.uiScale)
+                                Layout.preferredHeight: Math.round(72 * win.uiScale)
                                 ColumnLayout {
                                     anchors.fill: parent; anchors.margins: 12; spacing: 3
                                     SubText { text: modelData.label; Layout.alignment: Qt.AlignRight }
@@ -423,7 +570,7 @@ ApplicationWindow {
                         AppButton { text: "إضافة مصدر"; gold: true; onClicked: win.page = 1 }
                         AppButton { text: "تقرير Excel"; onClicked: backend.exportReport() }
                         Item { Layout.fillWidth: true }
-                        AppField { Layout.preferredWidth: Math.min(240, win.width * 0.2); placeholderText: "بحث في المهام"; horizontalAlignment: Text.AlignRight; onTextChanged: win.search = text; Accessible.name: "بحث في المهام" }
+                        AppField { objectName: "queueSearch"; Layout.preferredWidth: Math.min(240, win.width * 0.2); Layout.minimumWidth: 0; placeholderText: "بحث في المهام"; horizontalAlignment: Text.AlignRight; onTextChanged: win.search = text; Accessible.name: "بحث في المهام" }
                         LabelText { text: "طابور المعالجة"; font.pixelSize: win.fs(18); font.weight: Font.DemiBold }
                     }
                     RowLayout {
@@ -433,6 +580,7 @@ ApplicationWindow {
                             model: [{id:"attention",label:"تحتاج إجراء"},{id:"completed",label:"مكتملة"},{id:"running",label:"نشطة"},{id:"all",label:"الكل"}]
                             delegate: AppButton {
                                 required property var modelData
+                                objectName: "queueFilter-" + modelData.id
                                 text: modelData.label; primary: win.filter === modelData.id
                                 implicitHeight: 30
                                 onClicked: win.filter = modelData.id
@@ -454,6 +602,26 @@ ApplicationWindow {
                             }
                         }
                     }
+                    ColumnLayout {
+                        Layout.fillWidth: true; spacing: win.rs(4)
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: win.rs(10)
+                            AppButton { objectName: "deleteSelectedJobsButton"; text: "حذف المحدد"; danger: true; enabled: win.selectedQueueIds.length > 0; onClicked: win.deleteQueueSelection() }
+                            LabelText { objectName: "selectedJobsCount"; text: "المحدد: " + win.selectedQueueIds.length }
+                            Item { Layout.fillWidth: true }
+                            AppCheck {
+                                objectName: "selectAllJobsBox"
+                                text: "تحديد الكل في العرض"
+                                palette.windowText: win.ink
+                                enabled: win.visibleQueueIds().length > 0
+                                tristate: true
+                                checkState: win.visibleQueueIds().length > 0 && win.visibleQueueSelectionCount() === win.visibleQueueIds().length ? Qt.Checked : win.visibleQueueSelectionCount() > 0 ? Qt.PartiallyChecked : Qt.Unchecked
+                                nextCheckState: function() { return checkState === Qt.Checked ? Qt.Unchecked : Qt.Checked }
+                                onClicked: win.selectVisibleQueue(checkState === Qt.Checked)
+                            }
+                        }
+                        SubText { text: "الحذف يزيل السجلات فقط؛ تبقى الملفات محفوظة. يشمل المحدد خارج الفلتر أيضًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                    }
                     Box {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -465,7 +633,8 @@ ApplicationWindow {
                                 SubText { text: "الحالة"; Layout.preferredWidth: 140 * win.uiScale }
                                 SubText { text: "التقدم"; Layout.preferredWidth: 90 * win.uiScale }
                                 SubText { text: "مراحل المعالجة"; Layout.preferredWidth: 170 * win.uiScale; visible: win.contentUnits >= 850 }
-                                SubText { text: "الفيديو / الملف"; Layout.fillWidth: true }
+                                SubText { text: "الفيديو / الملف"; Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                SubText { text: "تحديد"; Layout.preferredWidth: 40; font.pixelSize: win.fs(11) }
                             }
                             Rectangle { Layout.fillWidth: true; height: 1; color: win.line }
                             PinList {
@@ -474,12 +643,13 @@ ApplicationWindow {
                                 Layout.fillWidth: true; Layout.fillHeight: true
                                 clip: true
                                 model: backend.jobsModel
-                                ScrollBar.vertical: AppScroll {}
+                                ScrollBar.vertical: AppScroll { objectName: "queueScrollBar" }
                                 delegate: Rectangle {
+                                    objectName: "queueRow-" + row.id
                                     width: jobsList.width
                                     height: win.matches(row) ? Math.max(win.rh(settings.ui_compact ? 56 : 64), jobTitle.implicitHeight + win.fs(12) + 22) : 0
                                     visible: height > 0
-                                    color: rowMouse.containsMouse ? visualTheme.hover : (index % 2 === 0 ? win.panel : visualTheme.inset)
+                                    color: row && win.selectedQueueIds.indexOf(row.id) >= 0 ? visualTheme.hover : rowMouse.containsMouse ? visualTheme.hover : (index % 2 === 0 ? win.panel : visualTheme.inset)
                                     MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: win.openJob(row.id); cursorShape: Qt.PointingHandCursor }
                                     RowLayout {
                                         anchors.fill: parent; anchors.leftMargin: win.rs(12); anchors.rightMargin: win.rs(12); spacing: win.rs(10)
@@ -501,6 +671,7 @@ ApplicationWindow {
                                                 model: row.steps.slice().reverse()
                                                 delegate: Rectangle {
                                                     required property var modelData
+                                                    objectName: "queueStage-" + row.id + "-" + modelData.name
                                                     Layout.fillWidth: true; height: Math.max(18, win.rh(26)); radius: 5
                                                     color: modelData.status === "completed" ? (visualTheme.inset) : (visualTheme.inset)
                                                     border.color: modelData.status === "running" ? visualTheme.accent : "transparent"
@@ -510,8 +681,16 @@ ApplicationWindow {
                                         }
                                         ColumnLayout {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             LabelText { id: jobTitle; text: row.title; Layout.fillWidth: true; font.weight: Font.DemiBold; wrapMode: Text.WrapAnywhere; maximumLineCount: 2 }
                                             SubText { text: win.contentUnits < 850 ? row.steps.map(function(step) { return step.label }).join(" · ") : "#" + String(row.position).padStart(3,"0") + "   ·   " + row.video_id; Layout.fillWidth: true; font.pixelSize: win.fs(11) }
+                                        }
+                                        AppCheck {
+                                            objectName: "selectJob-" + row.id
+                                            Layout.preferredWidth: 40
+                                            checked: !!row && win.selectedQueueIds.indexOf(row.id) >= 0
+                                            onClicked: win.setQueueSelected(row.id, checked)
+                                            Accessible.name: "تحديد " + row.title
                                         }
                                     }
                                     Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
@@ -523,10 +702,10 @@ ApplicationWindow {
                                         Column { anchors.centerIn: parent; spacing: 7; Repeater { model: 3; Rectangle { width: 30; height: 3; radius: 2; color: visualTheme.accent } } }
                                     }
                                     LabelText { text: "مساحة عملك جاهزة"; font.pixelSize: win.fs(22); Layout.alignment: Qt.AlignHCenter }
-                                    SubText { text: "أضف فيديو أو قائمة تشغيل، وحدد الدروس التي تريد تحويلها إلى Word."; Layout.alignment: Qt.AlignHCenter }
+                                    SubText { text: "أضف فيديو أو قائمة تشغيل، أو اسحب ملفات TXT لتحويلها إلى Word."; Layout.alignment: Qt.AlignHCenter }
                                     AppButton { text: "إضافة المصدر الأول"; primary: true; Layout.alignment: Qt.AlignHCenter; onClicked: win.page = 1 }
                                 }
-                                SubText { anchors.centerIn: parent; visible: jobsList.count > 0 && backend.jobs.filter(win.matches).length === 0; text: "لا توجد مهام مطابقة للبحث والتصفية" }
+                                SubText { anchors.centerIn: parent; visible: jobsList.count > 0 && win.queueSnapshot.filter(win.matches).length === 0; text: "لا توجد مهام مطابقة للبحث والتصفية" }
                             }
                         }
                     }
@@ -538,96 +717,280 @@ ApplicationWindow {
                     }
                 }
 
-                // Source selection: both tabs preserve the same live selection.
+                // Source selection
                 ScrollView {
-                    id: sourcePage; objectName: "sourcePage"
-                    clip: true; contentWidth: availableWidth
-                    GridLayout {
-                        width: sourcePage.availableWidth
-                        columns: win.contentUnits >= 850 ? 2 : 1
-                        layoutDirection: Qt.RightToLeft; columnSpacing: 16; rowSpacing: 16
+                    id: sourceScroll
+                    objectName: "sourceScroll"
+                    Layout.minimumWidth: 0
+                    clip: true
+                    contentWidth: availableWidth
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    Flow {
+                        layoutDirection: Qt.RightToLeft; spacing: 16
+                        id: sourcePage
+                        width: sourceScroll.availableWidth
+
                         Box {
-                            Layout.alignment: Qt.AlignTop
-                            Layout.fillWidth: true
-                            Layout.preferredWidth: win.contentUnits >= 850 ? 330 * win.uiScale : sourcePage.availableWidth
-                            Layout.maximumWidth: win.contentUnits >= 850 ? 390 * win.uiScale : sourcePage.availableWidth
-                            Layout.preferredHeight: optionsColumn.implicitHeight + 32
+                            id: sourceOptionsPanel
+                            width: win.contentUnits >= 850 ? 400 : sourcePage.width
+                            height: sourceImportContent.implicitHeight + 2 * win.rs(14)
                             ColumnLayout {
-                                id: optionsColumn
-                                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                                anchors.margins: 16; spacing: 12
-                                LabelText { text: "مصدر جديد"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                id: sourceImportContent
+                                anchors.fill: parent; anchors.margins: win.rs(14); spacing: win.rs(8)
+                                LabelText { text: "إعدادات الناتج"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                SubText { text: "اختر القالب ومجلد الناتج قبل إضافة التفريغات أو فيديوهات YouTube."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                GridLayout {
+                                    Layout.fillWidth: true
+                                    columns: 2
+                                    columnSpacing: win.rs(8); rowSpacing: win.rs(6)
+                                    LabelText { text: "قالب البرومبت"; Layout.row: 0; Layout.column: 0 }
+                                    AppCombo { id: templateBox; objectName: "templateBox"; model: backend.templates; textRole: "name"; valueRole: "id"; Layout.row: 0; Layout.column: 1; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200; Accessible.name: "قالب البرومبت" }
+                                    LabelText { text: "مجلد المادة / الدرس"; Layout.row: parent.columns === 2 ? 1 : 0; Layout.column: parent.columns === 2 ? 0 : 2 }
+                                    RowLayout {
+                                        Layout.row: parent.columns === 2 ? 1 : 0; Layout.column: parent.columns === 2 ? 1 : 3
+                                        Layout.fillWidth: true; Layout.minimumWidth: 80; spacing: win.rs(8)
+                                        AppCombo { id: sourceFolderCombo; objectName: "sourceFolderCombo"; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200; Accessible.name: "مجلد المادة أو الدرس" }
+                                        AppButton { text: "مجلد جديد"; implicitHeight: win.rh(36); onClicked: folderDialog.open() }
+                                    }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: win.rs(8)
+                                    AppButton { objectName: "sourceOutputFolderButton"; text: "اختيار المجلد"; implicitHeight: win.rh(36); onClicked: win.chooseSourceOutputFolder() }
+                                    AppField { objectName: "sourceOutputFolderPath"; Layout.fillWidth: true; Layout.minimumWidth: 80; text: win.savedOutputRoot; readOnly: true; selectByMouse: true; Accessible.name: "مسار مجلد النتائج الافتراضي" }
+                                    LabelText { text: "مجلد النتائج الافتراضي"; font.pixelSize: win.fs(13) }
+                                }
                                 RowLayout {
                                     Layout.fillWidth: true
                                     AppButton { objectName: "sourceYoutubeTab"; text: "YouTube"; primary: win.sourceTab === 0; Layout.fillWidth: true; onClicked: win.sourceTab = 0 }
                                     AppButton { objectName: "sourceLocalTab"; text: "TXT / صوت"; primary: win.sourceTab === 1; Layout.fillWidth: true; onClicked: win.sourceTab = 1 }
                                 }
-                                LabelText { text: "رابط فيديو أو قائمة تشغيل"; visible: win.sourceTab === 0; Layout.fillWidth: true }
-                                AppField { id: urlField; horizontalAlignment: Text.AlignLeft; objectName: "urlField"; visible: win.sourceTab === 0; Layout.fillWidth: true; placeholderText: "https://www.youtube.com/…"; Accessible.name: "رابط YouTube"; onAccepted: if (!backend.busy) backend.discover(text, forceRefresh.checked) }
-                                AppButton { objectName: "discoverButton"; visible: win.sourceTab === 0; text: backend.busy ? "جارٍ القراءة…" : "قراءة المصدر"; primary: true; Layout.fillWidth: true; enabled: !backend.busy && urlField.text.length > 0; onClicked: backend.discover(urlField.text, forceRefresh.checked) }
-                                AppCheck { id: forceRefresh; visible: win.sourceTab === 0; text: "تحديث المعلومات المحفوظة"; Layout.fillWidth: true }
-                                SubText { visible: win.sourceTab === 1; text: "اختر ملفات صوت أو تفريغات TXT من جهازك. يحدد نوع الملف مرحلة البداية."; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                                AppButton { objectName: "importLocalButton"; visible: win.sourceTab === 1; text: "استيراد صوت أو TXT"; Layout.fillWidth: true; onClicked: backend.importLocal(sourceFolderCombo.currentValue || "") }
-                                AppButton { text: "إلغاء القراءة"; visible: backend.busy; Layout.fillWidth: true; onClicked: backend.cancelDiscovery() }
-                                Rule {}
-                                LabelText { text: "خيارات الإخراج"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
-                                LabelText { text: "مجلد المادة / الدرس"; Layout.fillWidth: true }
-                                AppCombo { id: sourceFolderCombo; objectName: "sourceFolderCombo"; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.fillWidth: true; Accessible.name: "مجلد المادة أو الدرس" }
-                                AppButton { text: "مجلد جديد"; onClicked: folderDialog.open() }
-                                LabelText { text: "قالب البرومبت"; visible: templateBox.visible; Layout.fillWidth: true }
-                                AppCombo { id: templateBox; objectName: "templateBox"; visible: backend.templates.length > 0; model: backend.templates; textRole: "name"; valueRole: "id"; Layout.fillWidth: true; Accessible.name: "قالب البرومبت" }
-                                LabelText { text: "مراحل المعالجة"; Layout.fillWidth: true }
-                                AppCombo { id: preset; model: ["الدورة الكاملة حتى Word", "تنزيل وتفريغ فقط", "تنزيل فقط", "القالب المخصص من الإعدادات"]; Layout.fillWidth: true }
-                                AppButton { objectName: "enqueueButton"; text: "إضافة إلى الطابور"; gold: true; Layout.fillWidth: true; enabled: backend.hasSourceSelection; onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex], backend.templates.length > 0 ? templateBox.currentValue : "", sourceFolderCombo.currentValue || ""); win.page = 0 } }
+                                LabelText { visible: win.sourceTab === 1; text: "تفريغات جاهزة إلى Word"; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                                ActionRow {
+                                    visible: win.sourceTab === 1
+                                    AppButton { objectName: "importTranscriptsButton"; text: "إضافة ملفات TXT"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscripts(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
+                                    AppButton { objectName: "importTranscriptFolderButton"; text: "إضافة مجلد تفريغات"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscriptFolder(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
+                                    AppButton { text: "إدارة القوالب"; implicitHeight: win.rh(36); onClicked: win.openTemplates() }
+                                }
+                                SubText { visible: win.sourceTab === 1; text: "يمكنك أيضًا إفلات ملفات TXT في التطبيق. تُنتج Word بالقالب والمجلد المحددين أعلاه، دون تنزيل أو تفريغ صوتي. مسار النتائج هو الافتراضي للمهام الجديدة؛ مجلد المادة ينظّم نسخ المكتبة."; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: win.line }
+                                LabelText { visible: win.sourceTab === 0; text: "رابط YouTube"; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                                ColumnLayout {
+                                    visible: win.sourceTab === 0; Layout.fillWidth: true; spacing: 10
+                                    AppButton { objectName: "discoverButton"; text: backend.busy ? "جارٍ القراءة…" : "قراءة المصدر"; primary: true; enabled: !backend.busy && urlField.text.length > 0; onClicked: backend.discover(urlField.text, forceRefresh.checked) }
+                                    AppField { id: urlField; objectName: "urlField"; Layout.fillWidth: true; Layout.minimumWidth: 0; placeholderText: "https://www.youtube.com/playlist?list=…"; Accessible.name: "رابط YouTube"; onAccepted: if (!backend.busy) backend.discover(text, forceRefresh.checked) }
+                                }
+                                ActionRow {
+                                    AppButton { visible: win.sourceTab === 1; objectName: "importLocalButton"; text: "استيراد صوت"; implicitHeight: win.rh(36); onClicked: backend.importLocal(sourceFolderCombo.currentValue || "", win.transcriptTemplateId()) }
+                                    AppButton { text: "إلغاء القراءة"; visible: backend.busy; implicitHeight: 32; onClicked: backend.cancelDiscovery() }
+                                    AppCheck { visible: win.sourceTab === 0; id: forceRefresh; text: "تحديث المعلومات المحفوظة"; palette.windowText: win.muted }
+                                }
                             }
                         }
                         ColumnLayout {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: Math.max(420 * win.uiScale, sourcePage.availableHeight - 4)
+                            width: win.contentUnits >= 850 ? Math.max(0, sourcePage.width - sourceOptionsPanel.width - 16) : sourcePage.width
+                            height: Math.max(480 * win.uiScale, sourceScroll.availableHeight - 4)
                             spacing: 12
-                    ActionRow {
-                        AppButton { text: "تطبيق النطاق"; onClicked: backend.selectRange(rangeField.text) }
-                        AppField { id: rangeField; width: 140; placeholderText: "1-10,15"; Accessible.name: "نطاق الفيديوهات" }
-                        AppButton { text: "إلغاء التحديد"; onClicked: backend.selectRange("none") }
-                        AppButton { text: "تحديد الكل"; onClicked: backend.selectRange("all") }
-
-                        LabelText { text: backend.sourceTitle || "الفيديوهات المختارة"; width: 230; font.pixelSize: win.fs(18) }
-                    }
-                    AppField { Layout.fillWidth: true; placeholderText: "بحث في أسماء فيديوهات القائمة"; horizontalAlignment: Text.AlignRight; onTextChanged: win.sourceSearch = text; Accessible.name: "بحث في القائمة" }
-                    Box {
-                        Layout.fillWidth: true; Layout.fillHeight: true
-                        PinList {
-                            id: sourceList; objectName: "sourceList"
-                            anchors.fill: parent; anchors.margins: win.rs(8); clip: true
-                            model: backend.sourceModel
-                            ScrollBar.vertical: AppScroll {}
-                            delegate: Item {
-                                width: sourceList.width; height: win.sourceSearch === "" || row.title.indexOf(win.sourceSearch) >= 0 ? Math.max(win.rh(54), 48 * win.uiScale) : 0
-                                visible: height > 0
-                                RowLayout {
-                                    anchors.fill: parent; anchors.leftMargin: win.rs(8); anchors.rightMargin: win.rs(8); spacing: win.rs(8)
-                                    AppButton { text: "↓"; Accessible.name: "نقل للأسفل"; implicitWidth: 32; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: index < sourceList.count - 1; onClicked: backend.moveSource(index, 1) }
-                                    AppButton { text: "↑"; Accessible.name: "نقل للأعلى"; implicitWidth: 32; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: index > 0; onClicked: backend.moveSource(index, -1) }
-                                    SubText { text: row.available ? (row.duration ? Math.round(row.duration / 60) + " دقيقة" : "") : "غير متاح"; Layout.preferredWidth: 60 }
-                                    LabelText { text: row.title; Layout.fillWidth: true }
-                                    SubText { text: "#" + row.position }
-                                    AppCheck { checked: row.selected; enabled: row.available; onClicked: backend.selectSource(index, checked); Accessible.name: "تحديد " + row.title }
-                                }
-                                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
-                            }
-                            SubText { anchors.centerIn: parent; text: backend.busy ? "تُقرأ المعلومات مع مراعاة فواصل طلبات YouTube…" : "ستظهر قائمة الفيديوهات هنا"; visible: sourceList.count === 0 }
+                        ActionRow {
+                            AppButton { text: "تطبيق النطاق"; onClicked: backend.selectRange(rangeField.text) }
+                            AppField { id: rangeField; width: 140; placeholderText: "1-10,15"; Accessible.name: "نطاق الفيديوهات" }
+                            AppButton { text: "إلغاء التحديد"; onClicked: backend.selectRange("none") }
+                            AppButton { text: "تحديد الكل"; onClicked: backend.selectRange("all") }
+                            LabelText { text: backend.sourceTitle || "الفيديوهات المختارة"; width: Math.min(280, parent.width); font.pixelSize: win.fs(18) }
                         }
-                    }
+                        AppField { Layout.fillWidth: true; placeholderText: "بحث في أسماء فيديوهات القائمة"; horizontalAlignment: Text.AlignRight; onTextChanged: win.sourceSearch = text; Accessible.name: "بحث في القائمة" }
+                        Box {
+                            Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: win.rh(160)
+                            PinList {
+                                id: sourceList
+                                objectName: "sourceList"
+                                anchors.fill: parent; anchors.margins: win.rs(8); clip: true
+                                model: backend.sourceModel
+                                ScrollBar.vertical: AppScroll {}
+                                delegate: Item {
+                                    width: sourceList.width; height: win.sourceSearch === "" || row.title.indexOf(win.sourceSearch) >= 0 ? win.rh(54) : 0
+                                    visible: height > 0
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.leftMargin: win.rs(8); anchors.rightMargin: win.rs(8); spacing: win.rs(8)
+                                        AppButton { text: "للأسفل"; implicitWidth: 60; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: index < sourceList.count - 1; onClicked: backend.moveSource(index, 1) }
+                                        AppButton { text: "للأعلى"; implicitWidth: 60; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: index > 0; onClicked: backend.moveSource(index, -1) }
+                                        SubText { text: row.available ? (row.duration ? Math.round(row.duration / 60) + " دقيقة" : "") : "غير متاح"; Layout.preferredWidth: 85 }
+                                        LabelText { text: row.title; Layout.fillWidth: true }
+                                        SubText { text: "#" + row.position }
+                                        AppCheck { checked: row.selected; enabled: row.available; onClicked: backend.selectSource(index, checked); Accessible.name: "تحديد " + row.title }
+                                    }
+                                    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
+                                }
+                                SubText { anchors.centerIn: parent; text: backend.busy ? "تُقرأ المعلومات مع مراعاة فواصل طلبات YouTube…" : "ستظهر قائمة الفيديوهات هنا"; visible: sourceList.count === 0 }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: win.rs(8)
+                            LabelText { text: "مراحل معالجة الفيديو / الصوت" }
+                            AppCombo { id: preset; objectName: "sourcePreset"; model: ["الدورة الكاملة حتى Word", "تنزيل وتفريغ فقط", "تنزيل فقط", "القالب المخصص من الإعدادات"]; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 230; Accessible.name: "مراحل المعالجة" }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            AppButton { objectName: "enqueueSourceButton"; text: "إضافة إلى الطابور"; gold: true; enabled: backend.hasSourceSelection; onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex], backend.templates.length > 0 ? templateBox.currentValue : "", sourceFolderCombo.currentValue || ""); win.page = 0 } }
+                            Item { Layout.fillWidth: true }
+                        }
                         }
                     }
                 }
 
-                // Workers: individual actions remain attached to the original row id.
-                ColumnLayout {
-                    id: workersPage
+                // Workers
+                ScrollView {
+                    id: workersPageScroll
+                    objectName: "workersPageScroll"
+                    clip: true
+                    contentWidth: availableWidth
+                    ColumnLayout {
+                    width: workersPageScroll.availableWidth
                     spacing: 12
-                    SubText { text: "كل عامل يعالج مهمة واحدة. إيقاف الاستقبال يترك المهمة الحالية تكتمل."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
-                    ActionRow {
+                    SubText { text: "كل عامل يعمل على مهمة واحدة. إيقاف الاستقبال يسمح للمهمة الحالية بالاكتمال."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                    Box {
+                        objectName: "chatgptAccountsPanel"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: accountPanelContent.implicitHeight + 2 * win.rs(12)
+                        ColumnLayout {
+                            id: accountPanelContent
+                            anchors.fill: parent; anchors.margins: win.rs(12); spacing: win.rs(7)
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: win.rs(8)
+                                AppCheck {
+                                    objectName: "managedAccountsEnabled"; text: "استخدام حسابات ChatGPT المُدارة"
+                                    checked: settings.accounts_enabled === true; palette.windowText: win.ink
+                                    onClicked: { settings.accounts_enabled = checked; win.save() }
+                                    Accessible.name: text
+                                }
+                                Item { Layout.fillWidth: true }
+                                LabelText { text: "إجمالي التزامن" }
+                                SpinBox {
+                                    objectName: "accountConcurrency"; from: 1; to: 16; value: settings.accounts_max_concurrency || 5
+                                    onValueModified: { settings.accounts_max_concurrency = value; win.save() }
+                                    Accessible.name: "إجمالي مهام حسابات ChatGPT المتزامنة"
+                                }
+                            }
+                            SubText {
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                                text: "تُوزَّع المهام بحسب التفضيل والترتيب. تعرض الحصص حدود Codex المتاحة للاشتراك. الموافقة تتم في المتصفح، وتبقى كل محاولة مرتبطة بحساب واحد."
+                            }
+                            SubText {
+                                objectName: "accountEngineHealth"; text: backend.accountEngine.message || ""
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            }
+                            AppButton {
+                                objectName: "accountEngineRecoverButton"; text: "فحص المحرك والجلسات السابقة"
+                                enabled: !backend.accountBusy
+                                onClicked: backend.recoverAccountEngine()
+                            }
+                            SubText {
+                                objectName: "accountMigrationNotice"; visible: backend.accountEngine.migrationRequired === true
+                                text: "أصبح تسجيل الحسابات داخل محرك ورق المدمج. أضف حساباتك وسجّل الدخول مجددًا؛ بيانات الدخول القديمة لا تُنسخ تلقائيًا."
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            }
+                            AppButton {
+                                objectName: "accountMigrationDismissButton"; text: "فهمت"; visible: backend.accountEngine.migrationRequired === true
+                                enabled: !backend.accountBusy; onClicked: backend.acknowledgeAccountMigration()
+                            }
+                            Flow {
+                                Layout.fillWidth: true; spacing: win.rs(8)
+                                AppButton { objectName: "accountUsageRefreshAllButton"; text: "تحديث الحصص"; onClicked: backend.refreshAllAccountUsage(); Accessible.name: "تحديث حصص جميع حسابات ChatGPT" }
+                                AppCheck {
+                                    objectName: "accountUsageAutoRefresh"; text: "تحديث الحصص تلقائيًا"; palette.windowText: win.ink
+                                    checked: settings.accounts_auto_refresh !== false
+                                    onClicked: { settings.accounts_auto_refresh = checked; win.save() }
+                                    Accessible.name: text
+                                }
+                                LabelText { text: "الفاصل بالثواني"; height: usageInterval.height; verticalAlignment: Text.AlignVCenter }
+                                SpinBox {
+                                    id: usageInterval; objectName: "accountUsageRefreshInterval"; from: 60; to: 1800; stepSize: 30
+                                    value: settings.accounts_refresh_seconds || 300
+                                    onValueModified: { settings.accounts_refresh_seconds = value; win.save() }
+                                    Accessible.name: "الفاصل بين تحديثات حصص ChatGPT بالثواني"
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: win.rs(8)
+                                LabelText { text: "اسم الحساب" }
+                                AppField {
+                                    id: accountAlias; objectName: "accountAliasField"; Layout.fillWidth: true; maximumLength: 80
+                                    placeholderText: "مثل: الحساب الأول"; Accessible.name: "اسم حساب ChatGPT الجديد"
+                                    onAccepted: { if (text.trim()) { backend.addAccount(text); clear() } }
+                                }
+                                AppButton {
+                                    objectName: "addAccountButton"; text: "إضافة حساب"; enabled: accountAlias.text.trim().length > 0
+                                    onClicked: { backend.addAccount(accountAlias.text); accountAlias.clear() }
+                                }
+                            }
+                            PinList {
+                                id: accountList; objectName: "accountList"
+                                Layout.fillWidth: true; Layout.preferredHeight: count ? Math.min(win.rh(380), contentHeight) : win.rh(28)
+                                spacing: win.rs(5); clip: true; model: backend.accountsModel
+                                ScrollBar.vertical: AppScroll {}
+                                delegate: Box {
+                                    property var accountData: (typeof row !== "undefined" && row) ? row : ({id: "", alias: "", error: "", statusText: "", quotaText: ""})
+                                    objectName: "accountCard"; width: accountList.width
+                                    height: accountContent.implicitHeight + 2 * win.rs(9)
+                                    ColumnLayout {
+                                        id: accountContent; objectName: "accountContent"
+                                        anchors.fill: parent; anchors.margins: win.rs(9); spacing: win.rs(4)
+                                        RowLayout {
+                                            Layout.fillWidth: true; spacing: win.rs(8)
+                                            AppCheck {
+                                                text: "يستقبل مهامًا"; checked: accountData.enabled; enabled: !accountData.busy
+                                                palette.windowText: win.muted
+                                                onClicked: backend.setAccountEnabled(accountData.id, checked)
+                                                Accessible.name: "تفعيل الحساب " + accountData.alias
+                                            }
+                                            LabelText { objectName: "accountAliasLabel"; textFormat: Text.PlainText; text: (accountData.preferred ? "المفضّل · " : "") + accountData.alias; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                            SubText { text: "#" + (index + 1) }
+                                        }
+                                        SubText {
+                                            objectName: "accountStatus"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                                            text: accountData.statusText + (accountData.inFlight ? " · يعالج " + accountData.inFlight + " مهمة" : "")
+                                                  + (accountData.subscription ? " · " + accountData.subscription : "") + (accountData.email ? " · " + accountData.email : "")
+                                            Accessible.name: text
+                                        }
+                                        SubText { text: accountData.cooldownText || ""; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                        ColumnLayout {
+                                            objectName: "accountUsagePanel"; Layout.fillWidth: true; spacing: win.rs(3)
+                                            property var usage: accountData.usage || ({})
+                                            SubText { objectName: "accountUsageFiveHour"; textFormat: Text.PlainText; text: win.usageWindow("خمس ساعات", parent.usage.fiveHour); Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageWeekly"; textFormat: Text.PlainText; text: win.usageWindow("أسبوعية", parent.usage.weekly); Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageUpdated"; text: "آخر قراءة ناجحة (توقيت الجهاز): " + win.usageDate(parent.usage.lastSuccessAt); Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageMessage"; text: win.usageMessage(parent.usage, accountData.usageRefreshing); visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageRefreshReason"; text: win.usageRefreshReason(parent.usage); visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; Accessible.name: accountData.alias + " " + text }
+                                            SubText { objectName: "accountUsageBrowserNote"; text: "إدارة الاستخدام تُفتح في المتصفح؛ اختر الحساب المطلوب فيه صراحةً. لا يسجّل ورق دخوله تلقائيًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                                        }
+                                        SubText { objectName: "accountError"; text: accountData.error; visible: !!accountData.error; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; color: win.dark ? "#f4b880" : "#9a4409" }
+                                        Flow {
+                                            Layout.fillWidth: true; spacing: win.rs(6)
+                                            AppButton { objectName: "accountLoginButton"; text: "تسجيل / إعادة الدخول"; enabled: !accountData.busy && !accountData.inFlight && !backend.accountBusy; onClicked: backend.loginAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { objectName: "accountCancelLoginButton"; text: "إلغاء الدخول"; visible: accountData.loggingIn; onClicked: backend.cancelAccountLogin(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { objectName: "accountRefreshButton"; text: "فحص الحساب"; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.refreshAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { objectName: "accountUsageRefreshButton"; text: accountData.usageRefreshing ? "جارٍ تحديث الحصة…" : "تحديث الحصة"; enabled: accountData.usage && accountData.usage.canRefresh === true && !accountData.loggingIn && !accountData.busy; onClicked: backend.refreshAccountUsage(accountData.id); Accessible.name: "تحديث الحصة " + accountData.alias }
+                                            AppButton { objectName: "accountManageUsageButton"; text: "إدارة الاستخدام"; onClicked: backend.manageAccountUsage(); Accessible.name: "إدارة الاستخدام في المتصفح؛ اختر حساب " + accountData.alias + " صراحةً" }
+                                            AppButton { text: "فحص الجلسة السابقة"; visible: accountData.uncertain; enabled: !accountData.busy && !accountData.inFlight; onClicked: backend.recheckAccount(accountData.id); Accessible.name: text + " " + accountData.alias }
+                                            AppButton { objectName: "accountPreferButton"; text: "تفضيل"; enabled: !accountData.preferred && !accountData.busy; onClicked: backend.preferAccount(accountData.id); Accessible.name: "تفضيل " + accountData.alias }
+                                            AppButton { objectName: "accountUpButton"; text: "للأعلى"; enabled: index > 0 && !accountData.busy; onClicked: backend.moveAccount(accountData.id, -1); Accessible.name: "رفع أولوية " + accountData.alias }
+                                            AppButton { objectName: "accountDownButton"; text: "للأسفل"; enabled: index < accountList.count - 1 && !accountData.busy; onClicked: backend.moveAccount(accountData.id, 1); Accessible.name: "خفض أولوية " + accountData.alias }
+                                            AppButton { objectName: "accountRenameButton"; text: "تسمية"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { win.pendingAccount = accountData; accountRename.text = accountData.alias; renameAccountDialog.open() } Accessible.name: "تغيير اسم " + accountData.alias }
+                                            AppButton { objectName: "accountRemoveButton"; text: "حذف"; enabled: !accountData.busy && !accountData.inFlight; onClicked: { win.pendingAccount = accountData; removeAccountDialog.open() } Accessible.name: "حذف " + accountData.alias }
+                                        }
+                                        SubText {
+                                            objectName: "accountDeviceCode"; textFormat: Text.PlainText
+                                            visible: !!accountData.userCode; text: "رمز الجهاز: " + (accountData.userCode || "")
+                                            Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                                        }
+                                    }
+                                }
+                                SubText { anchors.centerIn: parent; visible: accountList.count === 0; text: "أضف حسابًا ثم سجّل دخوله في المتصفح." }
+                            }
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
                         AppButton { text: "إضافة عامل OpenCode"; onClicked: { var w = JSON.parse(JSON.stringify(settings.opencode_workers[0])); w.id = "oc" + Date.now(); w.name = "OpenCode " + (settings.opencode_workers.length + 1); w.provider = w.provider || "login"; settings.opencode_workers.push(w); save() } }
                         AppButton { objectName: "providersButton"; text: "المزودون"; onClicked: { providersDialog.open() } }
                         AppButton { text: "إضافة عامل Deepgram"; onClicked: { var w = JSON.parse(JSON.stringify(settings.deepgram_workers[0])); w.id = "dg" + Date.now(); w.name = "Deepgram " + (settings.deepgram_workers.length + 1); w.project = "proj-" + (settings.deepgram_workers.length + 1); settings.deepgram_workers.push(w); save() } }
@@ -647,6 +1010,7 @@ ApplicationWindow {
                         Layout.fillWidth: true; Layout.preferredHeight: workerHelp.implicitHeight + 24
                         SubText { id: workerHelp; anchors.fill: parent; anchors.margins: 12; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; text: "مفاتيح Deepgram و OpenRouter محفوظة في Windows Credential Manager، مفتاح مستقل لكل عامل. عمال Deepgram ذوو معرّف المشروع نفسه يتقاسمون حد التزامن؛ اجعل المعرّف مطابقًا لمشروع المفتاح. عامل OpenCode بمزود غير «تسجيل الدخول» يعمل في مجلد بيانات مستقل فلا تتعارض العمليات المتوازية." }
                     }
+                }
                 }
 
                 // Library
@@ -786,6 +1150,7 @@ ApplicationWindow {
 
                 // Settings
                 ColumnLayout {
+                    Layout.minimumWidth: 0
                     spacing: 12
                     ActionRow {
                         AppButton { text: "حفظ الإعدادات"; primary: true; onClicked: { settings.prompt = promptField.text; save() } }
@@ -809,10 +1174,11 @@ ApplicationWindow {
                         }
                     }
                     ScrollView {
+                        id: settingsScroll; objectName: "settingsScroll"
                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                         contentWidth: availableWidth
                         ColumnLayout {
-                            width: parent.width; spacing: 12
+                            width: settingsScroll.availableWidth; spacing: 12
                     Box {
                         visible: win.settingsTab === 0; Layout.fillWidth: true; implicitHeight: uiScaleColumn.implicitHeight + 28
                         ColumnLayout {
@@ -844,6 +1210,124 @@ ApplicationWindow {
                         }
                     }
                             Box {
+                                objectName: "remoteAccessCard"; visible: win.settingsTab === 0
+                                Layout.fillWidth: true; Layout.minimumWidth: 0
+                                implicitHeight: remoteColumn.implicitHeight + 28
+                                ColumnLayout {
+                                    id: remoteColumn; anchors.fill: parent; anchors.margins: 14; spacing: win.rs(10)
+                                    LabelText { text: "الوصول من الهاتف · Wi-Fi"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                    SubText { text: "تحكّم في هذه النسخة من متصفح هاتفك على شبكة Wi-Fi نفسها. أبقِ ورق مفتوحًا والكمبيوتر مستيقظًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    Flow {
+                                        Layout.fillWidth: true; Layout.preferredHeight: childrenRect.height; spacing: win.rs(8)
+                                        AppButton { objectName: "startRemoteButton"; text: "تفعيل الوصول من الهاتف"; primary: true; visible: !win.remoteState.enabled; onClicked: backend.startRemote(remotePort.value) }
+                                        AppButton { objectName: "stopRemoteButton"; text: "إيقاف الوصول وقطع الاتصالات"; visible: win.remoteState.enabled; onClicked: backend.stopRemote() }
+                                        AppButton { objectName: "renewRemoteCodeButton"; text: "تجديد الرمز وقطع الاتصالات"; visible: win.remoteState.enabled; onClicked: backend.renewRemoteCode() }
+                                        AppButton { text: "تحديث عناوين الشبكة"; visible: win.remoteState.enabled; onClicked: backend.refreshRemoteAddresses() }
+                                    }
+                                    RowLayout {
+                                        visible: !win.remoteState.enabled; Layout.fillWidth: true
+                                        Item { Layout.fillWidth: true }
+                                        SpinBox { id: remotePort; objectName: "remotePort"; from: 1024; to: 65535; value: 8765; editable: true; Accessible.name: "منفذ الوصول من الهاتف" }
+                                        LabelText { text: "المنفذ" }
+                                    }
+                                    LabelText { text: win.remoteState.error || ""; visible: text.length > 0; color: win.dark ? "#ffba82" : "#9a4409"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    RowLayout {
+                                        visible: win.remoteState.enabled; Layout.fillWidth: true; spacing: 16
+                                        Rectangle {
+                                            visible: win.remoteState.qr.length > 0; color: "white"; radius: 8
+                                            Layout.preferredWidth: 140; Layout.preferredHeight: 140
+                                            Image { objectName: "remoteQr"; anchors.fill: parent; anchors.margins: 4; source: win.remoteState.qr; sourceSize.width: 240; sourceSize.height: 240; fillMode: Image.PreserveAspectFit; Accessible.name: "رمز QR لفتح لوحة الهاتف" }
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: 6
+                                            LabelText { text: "امسح QR أو اكتب أحد الروابط في متصفح الهاتف، ثم أدخل رمز الدخول:"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            LabelText { objectName: "remotePairCode"; text: win.remoteState.code; font.pixelSize: win.fs(28); font.letterSpacing: 4; font.bold: true; Layout.fillWidth: true; Accessible.name: "رمز الدخول " + text }
+                                            SubText { text: "صالح حتى " + (win.remoteState.codeExpires || "") + " · الأجهزة المتصلة: " + win.remoteState.clients; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            Repeater {
+                                                model: win.remoteState.urls
+                                                delegate: RowLayout {
+                                                    required property string modelData
+                                                    Layout.fillWidth: true
+                                                    AppButton { text: "نسخ"; onClicked: backend.copyText(modelData) }
+                                                    TextField { text: modelData; readOnly: true; selectByMouse: true; Layout.fillWidth: true; Layout.minimumWidth: 0; horizontalAlignment: TextInput.AlignLeft; color: win.ink; Accessible.name: "رابط لوحة الهاتف" }
+                                                }
+                                            }
+                                            SubText { visible: win.remoteState.urls.length === 0; text: "لم يُعثر على عنوان شبكة محلية. اتصل بشبكة Wi-Fi ثم اضغط تحديث عناوين الشبكة."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                        }
+                                    }
+                                    SubText { visible: win.remoteState.enabled; text: "إذا طلب جدار حماية Windows إذنًا، اسمح لورق على الشبكات الخاصة فقط. إن لم يفتح الرابط، تحقق من أن الجهازين خارج شبكة الضيوف ومن تعطيل عزل الأجهزة في الراوتر. الاتصال HTTP مخصص لشبكتك الموثوقة؛ لا تفتح المنفذ على الإنترنت."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                }
+                            }
+                            Box {
+                                objectName: "internetAccessCard"; visible: win.settingsTab === 0
+                                Layout.fillWidth: true; Layout.minimumWidth: 0
+                                implicitHeight: internetColumn.implicitHeight + 28
+                                ColumnLayout {
+                                    id: internetColumn; anchors.fill: parent; anchors.margins: 14; spacing: win.rs(10)
+                                    LabelText { text: "الوصول من الهاتف · الإنترنت"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                    SubText { text: "اربط هذه النسخة ببوابتك على VPS، ثم اقترن بالهاتف. كل جهاز له هوية وصلاحيات مستقلة، والتنفيذ يبقى على هذا الكمبيوتر."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    SubText { objectName: "internetOnePhonePolicy"; text: "هاتف واحد لكل جهاز. لتبديل الهاتف، ألغِ ربط الهاتف الحالي أولًا، ثم أنشئ رابط اقتران جديدًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { objectName: "internetStatus"; text: win.internetState.status + (win.internetState.name ? " · " + win.internetState.name : ""); color: win.internetState.connected ? (win.dark ? "#61ddbb" : "#08765b") : win.ink; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { objectName: "internetError"; text: win.internetState.error || ""; visible: text.length > 0; color: win.dark ? "#ffba82" : "#9a4409"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    GridLayout {
+                                        visible: !win.internetState.registered; columns: 2; Layout.fillWidth: true; columnSpacing: 12; rowSpacing: 8
+                                        AppField { id: internetGateway; objectName: "internetGateway"; Layout.fillWidth: true; Layout.minimumWidth: 0; text: win.internetState.url || "https://waraqstudio.jadallah.work"; placeholderText: "https://waraqstudio.jadallah.work"; Accessible.name: "عنوان بوابة ورق على الإنترنت" }
+                                        LabelText { text: "عنوان البوابة" }
+                                        AppField { id: internetDeviceName; objectName: "internetDeviceName"; Layout.fillWidth: true; Layout.minimumWidth: 0; placeholderText: "كمبيوتر المنزل"; maximumLength: 120; Accessible.name: "اسم هذا الجهاز" }
+                                        LabelText { text: "اسم الجهاز" }
+                                        AppField { id: internetEnrollment; objectName: "internetEnrollment"; Layout.fillWidth: true; Layout.minimumWidth: 0; echoMode: TextInput.Password; placeholderText: "رمز تسجيل أحادي الاستخدام"; maximumLength: 256; Accessible.name: "رمز تسجيل الجهاز الصادر من الخادم" }
+                                        LabelText { text: "رمز التسجيل" }
+                                    }
+                                    Flow {
+                                        Layout.fillWidth: true; Layout.preferredHeight: childrenRect.height; spacing: win.rs(8)
+                                        AppButton { objectName: "registerInternetButton"; text: win.internetState.busy ? "جارٍ التسجيل…" : "تسجيل هذا الجهاز"; primary: true; visible: !win.internetState.registered; enabled: !win.internetState.busy && internetGateway.text.trim().length > 0 && internetDeviceName.text.trim().length > 0 && internetEnrollment.text.length > 0; onClicked: { backend.registerInternet(internetGateway.text.trim(), internetEnrollment.text, internetDeviceName.text.trim()); internetEnrollment.text = "" } }
+                                        AppButton { objectName: "startInternetButton"; text: "تفعيل اتصال الإنترنت"; primary: true; visible: win.internetState.registered && !win.internetState.connected; enabled: !win.internetState.busy; onClicked: backend.startInternet() }
+                                        AppButton { objectName: "stopInternetButton"; text: "إيقاف اتصال الإنترنت"; visible: win.internetState.registered; onClicked: backend.stopInternet() }
+                                        AppButton { objectName: "pairInternetButton"; text: "ربط هاتف جديد"; primary: true; visible: win.internetState.connected; onClicked: backend.createInternetPair() }
+                                        AppButton { objectName: "refreshInternetPhonesButton"; text: "تحديث الهواتف المقترنة"; visible: win.internetState.connected; onClicked: backend.refreshInternetPhones() }
+                                        AppButton { objectName: "forgetInternetButton"; text: "إلغاء تسجيل هذا الجهاز"; visible: win.internetState.registered; enabled: win.internetState.connected; onClicked: forgetInternetDialog.open() }
+                                    }
+                                    SubText { visible: win.internetState.registered; text: win.internetState.url + "\nمعرّف هذه النسخة: " + (win.internetState.deviceId || ""); Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
+                                    RowLayout {
+                                        visible: win.internetState.pairUrl.length > 0 && win.internetState.connected; Layout.fillWidth: true; spacing: 16
+                                        Rectangle {
+                                            color: "white"; radius: 8; Layout.preferredWidth: 160; Layout.preferredHeight: 160
+                                            Image { objectName: "internetQr"; anchors.fill: parent; anchors.margins: 4; source: backend.internetQr; sourceSize.width: 320; sourceSize.height: 320; fillMode: Image.PreserveAspectFit; Accessible.name: "رمز QR لاقتران الهاتف بهذا الكمبيوتر عبر الإنترنت" }
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                                            LabelText { text: "امسح QR بهاتفك، ثم راجع اسم الجهاز ورمز المطابقة قبل الموافقة على طلب الربط أدناه."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            AppButton { text: "نسخ رابط الاقتران"; onClicked: backend.copyText(win.internetState.pairUrl) }
+                                            SubText { text: "الرابط مؤقت وأحادي الاستخدام. لا تشاركه مع هاتف غير مقصود."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                        }
+                                    }
+                                    Repeater {
+                                        model: win.internetState.pendingPhones || []
+                                        delegate: ColumnLayout {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            LabelText { text: "طلب اقتران: " + modelData.phone_name + " · رمز المطابقة: " + modelData.match_code; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                AppButton { text: "رفض"; onClicked: backend.rejectInternetPhone(modelData.claim_id) }
+                                                AppButton { objectName: "approveInternetPhoneButton"; text: "موافقة على ربط هذا الهاتف"; primary: true; onClicked: backend.approveInternetPhone(modelData.claim_id) }
+                                                Item { Layout.fillWidth: true }
+                                            }
+                                        }
+                                    }
+                                    Repeater {
+                                        model: win.internetState.phones || []
+                                        delegate: RowLayout {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            AppButton { text: "إلغاء الربط"; enabled: win.internetState.connected; onClicked: backend.revokeInternetPhone(modelData.id) }
+                                            LabelText { text: modelData.name || "هاتف مقترن"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                        }
+                                    }
+                                    SubText { text: "يتطلب بوابة منشورة على دومين HTTPS. يتوقف التحكم عند إغلاق ورق أو نوم الكمبيوتر؛ يبقى الطابور يعمل عند انقطاع الإنترنت. الاتصال معطّل عند كل تشغيل حتى تفعّله."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                }
+                            }
+                            Box {
                                 visible: win.settingsTab === 1; Layout.fillWidth: true; implicitHeight: storageColumn.implicitHeight + 40
                                 ColumnLayout {
                                     id: storageColumn; objectName: "pathsPanel"; anchors.fill: parent; anchors.margins: 14; spacing: 10
@@ -858,6 +1342,33 @@ ApplicationWindow {
                                             LabelText { text: modelData.label; Layout.preferredWidth: 185 }
                                         }
                                     }
+                                }
+                            }
+                            Box {
+                                objectName: "appUpdateCard"
+                                visible: win.settingsTab === 1; Layout.fillWidth: true; Layout.minimumWidth: 0; implicitHeight: appUpdateColumn.implicitHeight + 28
+                                ColumnLayout {
+                                    id: appUpdateColumn; anchors.fill: parent; anchors.margins: 14; spacing: win.rs(8)
+                                    LabelText { text: "تحديث ورق"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                    SubText { text: "الإصدار الحالي: " + backend.version + (win.appUpdateState.version ? "  ·  أحدث إصدار: " + win.appUpdateState.version : ""); Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { objectName: "appUpdateMessage"; text: win.appUpdateState.message || "افحص توفر إصدار جديد من GitHub."; color: win.appUpdateState.status === "error" ? (win.dark ? "#ffba82" : "#9a4409") : win.ink; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    AppProgress { objectName: "appUpdateProgress"; visible: win.appUpdateState.status === "downloading"; Layout.fillWidth: true; from: 0; to: 100; value: win.appUpdateState.progress || 0; Accessible.name: "تقدم تنزيل تحديث ورق" }
+                                    Flow {
+                                        Layout.fillWidth: true; Layout.preferredHeight: childrenRect.height; spacing: win.rs(8)
+                                        AppButton { objectName: "checkAppUpdateButton"; text: win.appUpdateState.status === "checking" ? "جارٍ الفحص…" : "فحص التحديث"; enabled: ["checking", "downloading"].indexOf(win.appUpdateState.status) < 0; onClicked: backend.checkAppUpdate() }
+                                        AppButton { objectName: "downloadAppUpdateButton"; text: "تنزيل الإصدار الجديد"; primary: true; visible: win.appUpdateState.status === "available"; onClicked: backend.downloadAppUpdate() }
+                                        AppButton { objectName: "cancelAppUpdateButton"; text: "إلغاء التنزيل"; visible: win.appUpdateState.status === "downloading"; onClicked: backend.cancelAppUpdate() }
+                                        AppButton { objectName: "installAppUpdateButton"; text: "تثبيت التحديث وإغلاق التطبيق"; primary: true; visible: win.appUpdateState.status === "downloaded"; onClicked: backend.installAppUpdate() }
+                                    }
+                                    SubText { text: "ينزّل التطبيق الإصدار مباشرة ويتحقق منه، ثم يفتح المثبّت ويغلق ورق. تُحفظ بياناتك وإعداداتك."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { text: "رمز GitHub للمستودع الخاص (اختياري)"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: win.rs(8)
+                                        AppButton { objectName: "saveUpdateTokenButton"; text: "حفظ الرمز"; enabled: updateTokenField.text.trim().length > 0 && ["checking", "downloading"].indexOf(win.appUpdateState.status) < 0; onClicked: { backend.saveUpdateToken(updateTokenField.text.trim()); updateTokenField.text = "" } }
+                                        AppButton { objectName: "removeUpdateTokenButton"; text: "إزالة الرمز"; visible: win.appUpdateState.hasToken === true; enabled: ["checking", "downloading"].indexOf(win.appUpdateState.status) < 0; onClicked: { backend.saveUpdateToken(""); updateTokenField.text = "" } }
+                                        AppField { id: updateTokenField; objectName: "updateTokenField"; Layout.fillWidth: true; Layout.minimumWidth: 0; echoMode: TextInput.Password; placeholderText: "GitHub token"; Accessible.name: "رمز GitHub لقراءة المستودع الخاص" }
+                                    }
+                                    SubText { objectName: "updateTokenStatus"; text: win.appUpdateState.hasToken ? "الرمز محفوظ في مخزن اعتماد Windows." : "لا يوجد رمز محفوظ. استخدم رمزًا يملك صلاحية Contents: read للمستودع الخاص."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                                 }
                             }
                             Box {
@@ -964,9 +1475,9 @@ ApplicationWindow {
                     ColumnLayout {
                         visible: railOpen; spacing: 0
                         Text { text: "وَرَق"; color: visualTheme.railInk; font.family: "Segoe UI"; font.pixelSize: win.fs(28); font.weight: Font.Bold; Layout.alignment: Qt.AlignRight }
-                        Text { text: "WARAQ STUDIO"; color: visualTheme.railActive; font.pixelSize: win.fs(10); font.letterSpacing: 2; Layout.alignment: Qt.AlignRight }
+                        Text { font.family: "Segoe UI"; text: "WARAQ STUDIO"; color: visualTheme.railActive; font.pixelSize: win.fs(10); font.letterSpacing: 2; Layout.alignment: Qt.AlignRight }
                     }
-                    Text { visible: !railOpen; text: "و"; color: visualTheme.railActive; font.pixelSize: win.fs(24); font.weight: Font.Bold }
+                    Text { font.family: "Segoe UI"; visible: !railOpen; text: "و"; color: visualTheme.railActive; font.pixelSize: win.fs(24); font.weight: Font.Bold }
                 }
                 Repeater {
                     model: win.pageNames
@@ -985,6 +1496,7 @@ ApplicationWindow {
                         contentItem: RowLayout {
                             spacing: 10
                             Text {
+                                font.family: "Segoe UI"
                                 Layout.fillWidth: true; visible: railOpen
                                 text: modelData; font.pixelSize: win.fs(14); font.weight: win.page === index ? Font.DemiBold : Font.Normal
                                 color: win.page === index ? visualTheme.railSelectedInk : visualTheme.railInk
@@ -996,8 +1508,38 @@ ApplicationWindow {
                 }
                 Item { Layout.fillHeight: true }
                 Rectangle { Layout.fillWidth: true; height: 1; color: visualTheme.line; visible: railOpen }
-                Text { visible: railOpen; text: "سير عملك، تحت سيطرتك"; color: visualTheme.railMuted; font.pixelSize: win.fs(12); Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight; Layout.topMargin: 10 }
-                Text { visible: railOpen; text: "نسخة محلية  ·  " + backend.version; color: visualTheme.railMuted; font.pixelSize: win.fs(11); Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 4 }
+                Text { font.family: "Segoe UI"; visible: railOpen; text: "سير عملك، تحت سيطرتك"; color: visualTheme.railMuted; font.pixelSize: win.fs(12); Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight; Layout.topMargin: 10 }
+                Text { font.family: "Segoe UI"; visible: railOpen; text: "نسخة محلية  ·  " + backend.version; color: visualTheme.railMuted; font.pixelSize: win.fs(11); Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 4 }
+            }
+        }
+    }
+
+    DropArea {
+        id: transcriptDropArea
+        objectName: "transcriptDropArea"
+        anchors.fill: parent
+        z: 100
+        onEntered: function(drag) { drag.accepted = drag.hasUrls && win.hasLocalTranscript(drag.urls) }
+        onDropped: function(drop) {
+            if (!drop.hasUrls || !win.hasLocalTranscript(drop.urls)) { drop.accepted = false; return }
+            var urls = []
+            for (var i = 0; i < drop.urls.length; i++) urls.push(drop.urls[i].toString())
+            var added = backend.importDroppedTranscripts(urls, win.transcriptTemplateId(), sourceFolderCombo.currentValue || "")
+            if (added > 0) { drop.accept(Qt.CopyAction); win.page = 0 }
+            else drop.accepted = false
+        }
+        Rectangle {
+            objectName: "transcriptDropOverlay"
+            anchors.fill: parent; anchors.margins: win.rs(16)
+            visible: transcriptDropArea.containsDrag
+            radius: 16
+            color: win.dark ? "#ec152a31" : "#ece7faf4"
+            border.color: win.accent; border.width: 3
+            ColumnLayout {
+                anchors.centerIn: parent; width: Math.min(660, parent.width - 80); spacing: win.rs(16)
+                LabelText { text: "أفلت تفريغات TXT لإضافتها إلى الطابور"; font.pixelSize: win.fs(24); Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
+                SubText { text: "تُنسخ الملفات تلقائيًا إلى مجلد العمل لإنتاج Word عبر OpenCode. يُستخدم القالب ومجلد الدرس المحددان في صفحة إضافة مصدر، وتُتجاهل الملفات الأخرى."; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
+                SubText { objectName: "transcriptDropOptions"; text: "القالب: " + templateBox.currentText + "  ·  المادة: " + sourceFolderCombo.currentText + "\nمجلد النتائج: " + win.savedOutputRoot; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WrapAnywhere }
             }
         }
     }
@@ -1005,13 +1547,21 @@ ApplicationWindow {
     Rectangle {
         visible: win.toastText.length > 0
         z: 20
-        anchors.top: parent.top; anchors.topMargin: 100; anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 20; anchors.horizontalCenter: parent.horizontalCenter
         width: Math.min(850, win.width - 100); height: toastLabel.implicitHeight + 36
         radius: 10; color: visualTheme.panel; border.color: win.toastError ? visualTheme.warning : visualTheme.success
-        Text { id: toastLabel; anchors.fill: parent; anchors.margins: 18; color: win.ink; text: win.toastText; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight; font.pixelSize: win.fs(14) }
+        Text { font.family: "Segoe UI"; id: toastLabel; anchors.fill: parent; anchors.margins: 18; color: win.ink; text: win.toastText; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight; font.pixelSize: win.fs(14) }
         TapHandler { onTapped: win.toastText = "" }
     }
 
+    AppDialog {
+        id: forgetInternetDialog; objectName: "forgetInternetDialog"
+        anchors.centerIn: parent; width: Math.min(520, win.width - 80); modal: true
+        title: "إلغاء تسجيل هذا الجهاز"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        contentItem: LabelText { text: "سيُلغى اعتماد الإنترنت لهذا الكمبيوتر واقترانات هواتفه على البوابة. تستمر مهام ورق المحلية، وستحتاج إلى رمز تسجيل جديد لإعادة ربطه. هل تريد المتابعة؟"; wrapMode: Text.WordWrap; padding: 14 }
+        onAccepted: backend.forgetInternetDevice()
+    }
     AppDialog {
         id: folderDialog; objectName: "folderDialog"
         anchors.centerIn: parent; width: Math.min(460, win.width - 48); modal: true; title: "مجلد مادة أو درس"
@@ -1071,7 +1621,9 @@ ApplicationWindow {
     AppDialog {
         id: retryWarning; objectName: "retryWarning"; anchors.centerIn: parent; width: Math.min(500, win.width - 48); modal: true; title: "إعادة المحاولة"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "إعادة المحاولة"; standardButton(Dialog.Cancel).text = "إلغاء" }
-        Label { width: parent.width; wrapMode: Text.WordWrap; text: selectedJob.status === "uncertain" ? "الطلب السابق لدى Deepgram قد يكون اكتمل. إعادة الإرسال قد تسبب تكلفة إضافية. هل تريد المحاولة؟"
+        Label { width: parent.width; wrapMode: Text.WordWrap; text: selectedJob.status === "uncertain" && selectedJob.current === "opencode"
+                ? "جلسة ChatGPT السابقة لم يُتحقق من توقفها. افتح صفحة العمال واضغط «فحص الجلسة السابقة» للحساب؛ بعد تأكيد توقفها يمكنك إعادة المحاولة."
+                : selectedJob.status === "uncertain" ? "الطلب السابق لدى Deepgram قد يكون اكتمل. إعادة الإرسال قد تسبب تكلفة إضافية. هل تريد المحاولة؟"
                 : (selectedJob.current === "download" && selectedJob.status === "blocked") ? "توقف التنزيل لأن YouTube رفض الوصول أو لنقص المساحة. أصلح السبب أولًا (الكوكيز أو المساحة) ثم أعد المحاولة؛ سيُرفع التوقف الآلي عن خدمة التنزيل ويُعاد العمل دون المساس بالإيقاف اليدوي."
                 : (selectedJob.status === "pending" && selectedJob.retryAt) ? "المهمة مجدولة تلقائيًا حتى المحاولة القادمة. الإعادة اليدوية تعيدها إلى الطابور لكنها لا تتجاوز تهدئة تقييد YouTube."
                 : "ستُستأنف المرحلة باستخدام الملفات المكتملة المحفوظة." }
@@ -1081,7 +1633,9 @@ ApplicationWindow {
         id: bulkRetry; objectName: "bulkRetry"; anchors.centerIn: parent; width: Math.min(530, win.width - 48); modal: true; title: "إعادة محاولة جماعية"; standardButtons: Dialog.Ok | Dialog.Cancel
         onOpened: { standardButton(Dialog.Ok).text = "إعادة " + (bulkGroup.ids || []).length + " مهمة"; standardButton(Dialog.Cancel).text = "إلغاء" }
         Label { width: parent.width; wrapMode: Text.WordWrap
-            text: bulkGroup.status === "uncertain"
+            text: bulkGroup.status === "uncertain" && bulkGroup.stage === "opencode"
+                ? "تحتاج جلسات ChatGPT غير المؤكدة إلى إثبات توقفها أولًا من «فحص الجلسة السابقة» في صفحة العمال. ستُعاد فقط المهام التي تأكد توقف جلساتها."
+                : bulkGroup.status === "uncertain"
                 ? "نتائج " + (bulkGroup.ids || []).length + " طلب تفريغ غير مؤكدة. قد تكون اكتملت لدى Deepgram، وإعادة إرسالها قد تسبب تكلفة إضافية لكل مهمة. هل تريد إعادة المحاولة للجميع؟"
                 : "ستُعاد " + (bulkGroup.ids || []).length + " مهمة من مجموعة «" + (bulkGroup.label || "") + "» إلى الطابور باستخدام الملفات المكتملة المحفوظة."
         }
@@ -1092,6 +1646,57 @@ ApplicationWindow {
         onOpened: { standardButton(Dialog.Ok).text = "تفريغ جديد"; standardButton(Dialog.Cancel).text = "إلغاء" }
         Label { width: parent.width; wrapMode: Text.WordWrap; text: "سيُرسل الصوت مجددًا إلى Deepgram وقد تنتج تكلفة جديدة. ستبقى النسخة السابقة محفوظة." }
         onAccepted: { backend.retry(selectedJob.id, "deepgram", true); jobDialog.close() }
+    }
+    AppDialog {
+        id: accountLoginMethodDialog; objectName: "accountLoginMethodDialog"; anchors.centerIn: parent
+        width: Math.min(win.width - 40, 620 * win.uiScale); height: Math.min(win.height - 60, 540 * win.uiScale)
+        modal: true; title: "اختر طريقة تسجيل الدخول"; standardButtons: Dialog.Cancel
+        visible: !!win.accountLoginChoice.accountId
+        onOpened: { standardButton(Dialog.Cancel).text = "إلغاء"; standardButton(Dialog.Cancel).objectName = "accountLoginChoiceCancelButton" }
+        onRejected: backend.cancelAccountLoginChoice()
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: ScrollView {
+            id: accountLoginMethodScroll; clip: true; contentWidth: availableWidth
+            ColumnLayout {
+                width: accountLoginMethodScroll.availableWidth; spacing: win.rs(12)
+                LabelText { objectName: "accountLoginChoiceAlias"; textFormat: Text.PlainText; text: win.accountLoginChoice.alias || ""; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                SubText { text: "لن يتغير تسجيل الحساب الحالي حتى تختار طريقة. أكمل التفويض بنفسك في المتصفح واختر الحساب المطلوب صراحةً."; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                SubText { objectName: "accountLoginChoiceLoading"; visible: win.accountLoginChoice.loading === true; text: "جارٍ قراءة طرق الدخول المتاحة في OpenCode…"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                SubText { objectName: "accountLoginChoiceError"; text: win.accountLoginChoice.error || ""; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+                Repeater {
+                    model: win.accountLoginChoice.methods || []
+                    ColumnLayout {
+                        required property var modelData
+                        Layout.fillWidth: true; spacing: win.rs(4)
+                        AppButton { objectName: "accountLoginMethodButton"; text: modelData.label; Layout.fillWidth: true; onClicked: backend.chooseAccountLoginMethod(win.accountLoginChoice.accountId, modelData.id); Accessible.name: "تسجيل " + (win.accountLoginChoice.alias || "") + " بواسطة " + text }
+                        SubText {
+                            objectName: "accountLoginMethodExplanation"; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            text: "أكمل تفويض الحساب في المتصفح. يعرض ورق الحصص التي يعيدها محرك الحسابات المدمج فقط."
+                        }
+                    }
+                }
+                AppButton { objectName: "accountLoginChoiceRetryButton"; text: "إعادة قراءة طرق الدخول"; visible: !!win.accountLoginChoice.error; onClicked: backend.loginAccount(win.accountLoginChoice.accountId) }
+            }
+        }
+    }
+    AppDialog {
+        id: renameAccountDialog; objectName: "renameAccountDialog"; anchors.centerIn: parent; width: 450 * win.uiScale; modal: true
+        title: "تغيير اسم الحساب"; standardButtons: Dialog.Save | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Save).text = "حفظ"; standardButton(Dialog.Save).objectName = "accountRenameSaveButton"; standardButton(Dialog.Cancel).text = "إلغاء"; accountRename.forceActiveFocus() }
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: ColumnLayout {
+            LabelText { text: "اسم الحساب"; Layout.alignment: Qt.AlignRight }
+            AppField { id: accountRename; objectName: "accountRenameField"; Layout.fillWidth: true; maximumLength: 80; Accessible.name: "اسم الحساب الجديد" }
+        }
+        onAccepted: backend.renameAccount(win.pendingAccount.id, accountRename.text)
+    }
+    AppDialog {
+        id: removeAccountDialog; objectName: "removeAccountDialog"; anchors.centerIn: parent; width: 480 * win.uiScale; implicitHeight: 230 * win.uiScale; modal: true
+        title: "حذف حساب ChatGPT"; standardButtons: Dialog.Ok | Dialog.Cancel
+        onOpened: { standardButton(Dialog.Ok).text = "حذف الحساب"; standardButton(Dialog.Ok).objectName = "accountRemoveConfirmButton"; standardButton(Dialog.Cancel).text = "إلغاء"; standardButton(Dialog.Cancel).objectName = "accountRemoveCancelButton" }
+        background: Rectangle { color: win.panel; radius: 12; border.color: win.line }
+        contentItem: Label { wrapMode: Text.WordWrap; text: "سيُحذف تسجيل دخول «" + (win.pendingAccount.alias || "") + "» من ورق. يمكنك إضافته وتسجيل دخوله لاحقًا. هل تريد حذفه؟" }
+        onAccepted: backend.removeAccount(win.pendingAccount.id)
     }
     AppDialog {
         id: workerDialog; objectName: "workerDialog"; anchors.centerIn: parent; width: Math.min(620, win.width - 48); height: Math.min(workerKind === "deepgram" ? 650 : 610, win.height - 48); modal: true
@@ -1124,7 +1729,7 @@ ApplicationWindow {
                 text: backend.catalogBusy ? "جارٍ تحميل النماذج المتاحة…"
                       : (backend.catalogErrors[workerKind] || (workerKind === "deepgram"
                           ? "نماذج التفريغ ولغاتها من Deepgram. يمكن كتابة معرّف نموذج مخصص."
-                          : "النماذج من OpenCode المثبّت محليًا. يمكن كتابة معرّف نموذج مخصص."))
+                          : "النماذج من محرك ورق المضمّن. يمكن كتابة معرّف نموذج مخصص."))
             }
             GridLayout { layoutDirection: Qt.RightToLeft; columns: win.contentUnits < 850 ? 1 : 2;
                 visible: workerKind !== "deepgram"
@@ -1135,7 +1740,7 @@ ApplicationWindow {
                 visible: workerKind !== "deepgram"
                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                 text: workerProvider.currentValue === "login"
-                      ? "يستخدم تسجيل الدخول المحفوظ داخل OpenCode (اشتراك ChatGPT وغيره) دون مفتاح، وفي مجلد بيانات OpenCode المشترك."
+                      ? "يستخدم حسابات الاشتراك المحفوظة داخل محرك ورق المدمج دون مفتاح API. سجّل الدخول من لوحة الحسابات."
                       : "يُشغَّل بمفتاح هذا العامل، وفي مجلد بيانات مستقل حتى لا تتعارض العمليات المتوازية. المعرّف المرسل: " + win.resolvedModel(workerProvider.currentValue, workerModel.editText)
             }
             GridLayout { columns: win.contentUnits < 850 ? 1 : 2;

@@ -5,18 +5,23 @@ No remote providers, OS credentials, user databases, or real output paths.
 """
 import itertools
 import json
+import os
 import sys
+import time
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QObject, QMetaObject, Q_ARG, QPoint, Qt, QUrl, qInstallMessageHandler
+from PySide6.QtCore import QObject, QMetaObject, Q_ARG, QPoint, Qt, QUrl, QCoreApplication, QEvent, qInstallMessageHandler
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import waraq.bridge as bridge_module
+from waraq.embedded_accounts import EmbeddedAccountService
+from scheduler_test_support import SchedulerHarness
+from qt_test_support import dispose_bridge
 from waraq.bridge import Bridge
 from waraq.config import Config
 from waraq.scheduler import Scheduler
@@ -24,6 +29,8 @@ from waraq.store import Store
 
 
 def main():
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen" and os.environ.get("WINDIR"):
+        os.environ.setdefault("QT_QPA_FONTDIR", str(Path(os.environ["WINDIR"]) / "Fonts"))
     QQuickStyle.setStyle("Basic")
     app = QApplication([])
     messages = []
@@ -34,13 +41,15 @@ def main():
     if evidence:
         evidence.mkdir(parents=True, exist_ok=True)
     bridge_module.deepgram_models = lambda: [{"id": "nova-3-general", "languages": ["ar", "en"]}]
-    bridge_module.opencode_models = lambda *args: ["openai/gpt-6-astra", "openai/gpt-6-sol"]
-    with tempfile.TemporaryDirectory(prefix="waraq-redesign-", ignore_cleanup_errors=True) as temp:
+    EmbeddedAccountService.models = lambda *args: ["openai/gpt-6-astra", "openai/gpt-6-sol"]
+    with tempfile.TemporaryDirectory(prefix="waraq-redesign-", ignore_cleanup_errors=True) as temp, SchedulerHarness() as harness:
         home = Path(temp)
         config, store = Config(home), Store(home / "tasks.db")
         config.migration_note = ""
         keys = type("Keys", (), {"get": lambda *args: "", "set": lambda *args: None})()
         scheduler = Scheduler(store, config, keys)
+        scheduler.tick = lambda: None
+        scheduler.accounts.request_refresh = lambda *args, **kwargs: False
         folder = store.create_folder("الفقه وأصوله")
         store.add([{"title": f"الدرس {i:02d} — شرح أبواب العبادات ومقاصدها وآداب طالب العلم", "video_id": f"demo{i}", "url": "https://example.invalid/demo", "position": i, "duration": 1800 + i * 60} for i in range(1, 65)], config.snapshot(), folder_id=folder)
         jobs = store.jobs()
@@ -57,6 +66,7 @@ def main():
                 store.set_stage(job["id"], "deepgram", "completed")
                 store.set_stage(job["id"], "opencode", "completed")
         bridge = Bridge(store, config, keys, scheduler)
+        bridge._account_usage_timer.stop()
         bridge._accept_source(json.dumps({"title": "سلسلة دروس الفقه", "items": [{"video_id": f"source{i}", "position": i, "title": f"الدرس {i} — عنوان عربي طويل لاختبار التفاف النص وعدم تداخل الأزرار", "url": "https://example.invalid/source", "duration": 1200, "available": True, "selected": i % 2 == 0} for i in range(1, 45)]}, ensure_ascii=False))
         # Seed a real temporary library scan rather than a second presentation model.
         library = Path(config.data["library_root"]) / "الفقه وأصوله" / "التفريغات"
@@ -180,7 +190,7 @@ def main():
                 assert focus.hasActiveFocus(), name
 
         # Every modal fits the minimum window and keeps its actions reachable.
-        dialogs = ("folderDialog", "jobDialog", "retryWarning", "bulkRetry", "paidRerun", "workerDialog", "forceDialog", "providersDialog", "deleteProviderDialog", "deleteFileDialog", "advancedDialog", "templatesDialog")
+        dialogs = ("folderDialog", "jobDialog", "retryWarning", "bulkRetry", "paidRerun", "workerDialog", "forceDialog", "providersDialog", "deleteProviderDialog", "deleteFileDialog", "advancedDialog", "templatesDialog", "renameAccountDialog", "removeAccountDialog", "forgetInternetDialog")
         root.setWidth(1060); root.setHeight(720)
         modal_cases = 0
         for theme, scale in itertools.product(("dark", "light"), (1.0, 1.4)):
@@ -189,6 +199,7 @@ def main():
                 find("runButton").forceActiveFocus()
                 root.setProperty("selectedJob", bridge.jobById(jobs[1]["id"]))
                 root.setProperty("bulkGroup", {"stage": "deepgram", "status": "uncertain", "label": "نتائج غير مؤكدة", "ids": [jobs[1]["id"]]})
+                root.setProperty("pendingAccount", {"id": "demo", "alias": "حساب تجريبي"})
                 root.setProperty("pendingProvider", {"id": "demo", "name": "مزود اختباري"})
                 root.setProperty("pendingFile", {"path": str(home / "demo.txt"), "name": "ملف اختباري طويل الاسم.txt"})
                 if name == "workerDialog":
@@ -207,6 +218,11 @@ def main():
                         point = action.mapToScene(action.boundingRect().center())
                         assert popup.property("y") <= point.y() <= popup.property("y") + popup.property("height"), action_name
                 if name == "workerDialog":
+                    deadline = time.monotonic() + 5
+                    while bridge.catalogBusy and time.monotonic() < deadline:
+                        QTest.qWait(30)
+                    assert not bridge.catalogBusy, "Synthetic model catalog did not settle"
+                    QTest.qWait(50)
                     model = find("workerModelBox")
                     model.setProperty("editText", "nova-custom-draft")
                     tune(theme="light" if theme == "dark" else "dark")
@@ -222,8 +238,10 @@ def main():
                 assert find("runButton").hasActiveFocus(), name
                 modal_cases += 1
 
-        root.close(); scheduler.shutdown(); bridge.timer.stop()
-        engine.deleteLater(); app.processEvents(); store.db.close()
+        root.close(); harness.shutdown_and_join()
+        engine.deleteLater()
+        QCoreApplication.sendPostedEvents(engine, QEvent.Type.DeferredDelete)
+        dispose_bridge(bridge); app.processEvents(); store.db.close()
     failures = [m for m in messages if m.startswith("file:") or any(term in m.lower() for term in ("error", "unable", "cannot", "binding loop", "failed to load", "invalid property", "overridden", "recursive rearrange", "only supports"))]
     if evidence:
         (evidence / "qml-messages.json").write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")

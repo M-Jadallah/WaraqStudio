@@ -21,7 +21,12 @@ CheckBox {
         color: control.checked ? control.theme.accent : control.theme.inset
         border.color: control.activeFocus ? control.theme.accent : control.theme.line
         border.width: control.activeFocus ? 2 : 1
-        Text { anchors.centerIn: parent; text: "✓"; visible: control.checked; color: control.theme.accentInk; font.pixelSize: 14; font.bold: true }
+        Item {
+            anchors.centerIn: parent; width: 12; height: 10; visible: control.checked
+            Rectangle { x: 1; y: 5; width: 5; height: 2; rotation: 45; color: control.theme.accentInk; visible: control.checkState !== Qt.PartiallyChecked }
+            Rectangle { x: 4; y: 4; width: 9; height: 2; rotation: -45; color: control.theme.accentInk; visible: control.checkState !== Qt.PartiallyChecked }
+            Rectangle { anchors.centerIn: parent; width: 8; height: 2; color: control.theme.accentInk; visible: control.checkState === Qt.PartiallyChecked }
+        }
     }
     contentItem: Text {
         text: control.text; font: control.font; color: control.theme.ink

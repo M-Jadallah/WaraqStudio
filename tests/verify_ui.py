@@ -1,14 +1,19 @@
 """Native Qt interaction checks; synthetic entries exist only in a temp test database."""
-import json
 import faulthandler
+import json
 import os
+import socket
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QObject, QPoint, QPointF, QUrl, qInstallMessageHandler, QMetaObject, Q_ARG
+from waraq.embedded_accounts import EmbeddedAccountService
+from PySide6.QtCore import QObject, QPoint, QPointF, QUrl, QMimeData, qInstallMessageHandler, QMetaObject, Q_ARG
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -21,6 +26,7 @@ from waraq.bridge import Bridge
 from waraq.config import Config
 from waraq.scheduler import Scheduler
 from waraq.store import Store
+from scheduler_test_support import SchedulerHarness
 
 
 def main():
@@ -35,7 +41,7 @@ def main():
     app = QApplication([])
     messages = []
     qInstallMessageHandler(lambda kind, ctx, text: messages.append(text))
-    with tempfile.TemporaryDirectory(prefix="waraq-ui-", ignore_cleanup_errors=True) as temp:
+    with tempfile.TemporaryDirectory(prefix="waraq-ui-", ignore_cleanup_errors=True) as temp, SchedulerHarness() as harness:
         home = Path(temp)
         store, config = Store(home / "test.db"), Config(home)
         keys = type("Keys", (), {"get": lambda s, w: "", "set": lambda s,w,v: None})()
@@ -43,14 +49,16 @@ def main():
             {"id": "nova-3-general", "languages": ["ar", "ar-JO", "en"]},
             {"id": "whisper-large", "languages": ["ar", "en"]},
         ]
-        bridge_module.opencode_models = lambda executable, context="": [
+        EmbeddedAccountService.models = lambda self: [
             "openai/gpt-6-astra", "openai/gpt-6-sol", "opencode/big-pickle"
         ]
         scheduler = Scheduler(store, config, keys)
         # UI acceptance checks start/pause wiring, never real external work.
         # Dispatch behavior is covered separately by the engine/service tests.
         scheduler.tick = lambda: None
+        scheduler.accounts.request_refresh = lambda *args, **kwargs: False
         bridge = Bridge(store, config, keys, scheduler)
+        bridge._account_usage_timer.stop()
         engine = QQmlApplicationEngine()
         engine.rootContext().setContextProperty("backend", bridge)
         engine.load(QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1] / "waraq/qml/Main.qml")))
@@ -82,6 +90,8 @@ def main():
                         bottom = content.property("y") + label.property("y") + label.property("height")
                         assert bottom <= card.property("height") + 1, (name, bottom, card.property("height"))
         def click(name):
+            if os.environ.get("CI"):
+                print("Native UI action:", name, flush=True)
             item = find(root.contentItem(), name)
             assert item is not None, name
             assert item.isVisible(), "Refusing to click a hidden control: " + name
@@ -93,6 +103,27 @@ def main():
             assert root.property("page") == index
             if index == 5:
                 assert find(root.contentItem(), "youtubeUpdateButton") is not None
+        # LAN controls operate the same Bridge and remain opt-in every launch.
+        assert not bridge.remoteAccess["enabled"]
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            remote_port = probe.getsockname()[1]
+        find(root.contentItem(), "remotePort").setProperty("value", remote_port)
+        click("startRemoteButton")
+        assert bridge.remoteAccess["enabled"] and bridge.remoteAccess["port"] == remote_port
+        assert len(bridge.remoteAccess["code"]) == 8
+        if bridge.remoteAccess["urls"]:
+            assert find(root.contentItem(), "remoteQr").property("source").toString().startswith("data:image/svg+xml,")
+        # A paired device is revoked immediately when the desktop rotates its code.
+        token = bridge.remote.pair(bridge.remoteAccess["code"], "127.0.0.1")
+        assert bridge.remote.authorize(token)
+        click("renewRemoteCodeButton")
+        assert not bridge.remote.authorize(token)
+        if len(sys.argv) > 1:
+            QTest.qWait(150)
+            root.grabWindow().save(str(Path(sys.argv[1]) / "remote-access-desktop.png"))
+        click("stopRemoteButton")
+        assert not bridge.remoteAccess["enabled"]
         click("nav1")
         assert find(root.contentItem(), "sourceFolderCombo") is not None
         assert bridge.createFolder("مادة اختبار")
@@ -376,22 +407,334 @@ def main():
             click("providersButton")
             QTest.qWait(200)
             root.grabWindow().save(str(evidence / "providers-dialog.png"))
+            QTest.keyClick(root, Qt.Key_Escape)
+            QTest.qWait(80)
+        # Local TXT imports use the same selected template and subject folder,
+        # skip both upstream services, and own their input copy immediately.
+        root.setProperty("toastText", "")
+        click("nav1")
+        assert root.property("page") == 1
+        template_box = find(root.contentItem(), "templateBox")
+        folder_box = find(root.contentItem(), "sourceFolderCombo")
+        template_box.setProperty("currentIndex", 1)
+        folder_box.setProperty("currentIndex", 1)
+        QTest.qWait(80)
+        selected_folder = folder_box.property("currentValue")
+        assert selected_folder and template_box.property("currentValue") == "tplx"
+        original_defaults = config.snapshot()
+        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=""):
+            click("sourceOutputFolderButton")
+        assert config.snapshot() == original_defaults
+        selected_output = home / "نتائج Word المختارة"
+        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=str(selected_output)):
+            click("sourceOutputFolderButton")
+        QTest.qWait(80)
+        assert config.snapshot()["output_root"] == str(selected_output)
+        assert template_box.property("currentValue") == "tplx"
+        assert folder_box.property("currentValue") == selected_folder
+        assert find(root.contentItem(), "sourceOutputFolderPath").property("text") == str(selected_output)
+        root.setProperty("toastText", "")
+        imports = home / "inputs with spaces"
+        imports.mkdir()
+        single = imports / "تفريغ واحد.txt"
+        single.write_text("تفريغ جاهز لإنشاء Word", encoding="utf-8")
+
+        def assert_imported(before, sources):
+            new_jobs = store.jobs()[before:]
+            assert len(new_jobs) == len(sources), (new_jobs, sources, messages[-5:])
+            assert len({j["batch"] for j in new_jobs}) == 1
+            assert [j["position"] for j in new_jobs] == list(range(1, len(sources) + 1))
+            assert [j["queue_order"] for j in new_jobs] == list(range(1, len(sources) + 1))
+            for job, source_file in zip(new_jobs, sources):
+                assert job["folder_id"] == selected_folder
+                assert job["config"]["template_name"] == "خطب"
+                assert job["config"]["prompt"].startswith("استخدم مهارة عربية للخطب")
+                managed = Path(job["transcript"])
+                assert managed.parent == Path(job["folder"])
+                assert Path(job["folder"]).parent == selected_output
+                assert job["config"]["output_root"] == str(selected_output)
+                assert managed != source_file and managed.read_bytes() == source_file.read_bytes()
+                assert job["stages"]["download"]["status"] == "skipped"
+                assert job["stages"]["deepgram"]["status"] == "skipped"
+                assert job["stages"]["opencode"]["status"] == "pending"
+            assert root.property("page") == 0
+            return new_jobs
+
+        before = len(store.jobs())
+        with patch.object(bridge_module.QFileDialog, "getOpenFileNames", return_value=([str(single)], "")):
+            click("sourceLocalTab")
+            click("importTranscriptsButton")
+        new_jobs = assert_imported(before, [single])
+        single.unlink()
+        assert Path(new_jobs[0]["transcript"]).read_text(encoding="utf-8").startswith("تفريغ جاهز")
+
+        first, second = imports / "درس 2.txt", imports / "درس 10.TXT"
+        first.write_text("درس ثانٍ", encoding="utf-8-sig")
+        second.write_text("درس عاشر", encoding="utf-8")
+        root.setProperty("toastText", "")
+        click("nav1")
+        assert root.property("page") == 1
+        before = len(store.jobs())
+        with patch.object(bridge_module.QFileDialog, "getOpenFileNames", return_value=([str(first), str(second)], "")):
+            click("sourceLocalTab")
+            click("importTranscriptsButton")
+        assert_imported(before, [first, second])
+        (imports / "ignore.mp3").write_bytes(b"audio")
+        nested = imports / "nested"
+        nested.mkdir()
+        (nested / "ignored.txt").write_text("ليس من هذا المجلد", encoding="utf-8")
+        root.setProperty("toastText", "")
+        click("nav1")
+        assert root.property("page") == 1
+        before = len(store.jobs())
+        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=str(imports)):
+            click("sourceLocalTab")
+            click("importTranscriptFolderButton")
+        assert_imported(before, [first, second])
+
+        # Deliver native Qt drag events on the workers page: global dropping
+        # must work even when the source picker page is hidden.
+        click("nav2")
+        before = len(store.jobs())
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(first)), QUrl.fromLocalFile(str(second))])
+        point = QPoint(600, 350)
+        enter = QDragEnterEvent(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(root, enter)
+        QTest.qWait(80)
+        assert enter.isAccepted(), "native TXT drag was not accepted"
+        overlay = find(root.contentItem(), "transcriptDropOverlay")
+        assert overlay is not None and overlay.isVisible()
+        drop_options = find(root.contentItem(), "transcriptDropOptions").property("text")
+        assert "خطب" in drop_options and str(selected_output) in drop_options
+        if len(sys.argv) > 1:
+            root.grabWindow().save(str(Path(sys.argv[1]) / "txt-drop-overlay.png"))
+        drop = QDropEvent(QPointF(point), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(root, drop)
+        QTest.qWait(80)
+        assert drop.isAccepted(), "native TXT drop was not accepted"
+        assert_imported(before, [first, second])
+        assert not overlay.isVisible()
+        before = len(store.jobs())
+        invalid_mime = QMimeData()
+        invalid_mime.setUrls([QUrl.fromLocalFile(str(imports / "ignore.mp3"))])
+        invalid_enter = QDragEnterEvent(point, Qt.CopyAction, invalid_mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(root, invalid_enter)
+        assert not invalid_enter.isAccepted() and len(store.jobs()) == before
+
+        # The new controls remain visible within the minimum window at 140%.
+        root.setProperty("toastText", "")
+        click("nav1")
+        assert root.property("page") == 1
+        tuned = config.snapshot()
+        tuned["ui_scale"] = 1.4
+        assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
+        QTest.qWait(150)
+        rail_origin = rail.mapToScene(QPointF(0, 0))
+        assert rail_origin.x() >= 0 and rail_origin.x() + rail.width() <= root.width() + 1
+        def assert_in_window(name):
+            control = find(root.contentItem(), name)
+            assert control is not None and control.isVisible()
+            origin = control.mapToScene(QPointF(0, 0))
+            assert origin.x() >= 0 and origin.x() + control.width() <= root.width() + 1, (name, origin)
+            assert origin.y() >= 0 and origin.y() + control.height() <= root.height() + 1, (name, origin)
+        click("sourceLocalTab")
+        for name in ("templateBox", "sourceFolderCombo", "sourceOutputFolderButton", "sourceOutputFolderPath",
+                     "importTranscriptsButton", "importTranscriptFolderButton"):
+            assert_in_window(name)
+        if len(sys.argv) > 1:
+            root.setProperty("toastText", "")
+            QTest.qWait(60)
+            root.grabWindow().save(str(Path(sys.argv[1]) / "txt-import-140.png"))
+        source_scroll = find(root.contentItem(), "sourceScroll")
+        assert source_scroll is not None
+        flick = source_scroll.property("contentItem")
+        assert flick.property("contentHeight") > flick.property("height")
+        flick.setProperty("contentY", flick.property("contentHeight") - flick.property("height"))
+        QTest.qWait(100)
+        for name in ("sourcePreset", "enqueueSourceButton"):
+            assert_in_window(name)
+        source_view = find(root.contentItem(), "sourceList")
+        assert source_view is not None and source_view.height() >= 100
+        if len(sys.argv) > 1:
+            root.grabWindow().save(str(Path(sys.argv[1]) / "txt-import-options-140.png"))
+        # Queue selection follows stable IDs and selects only filtered results.
+        root.setProperty("toastText", "")
+        click("nav0")
+        root.setProperty("filter", "all")
+        queue_inputs = [{"video_id": f"selection-{i}", "title": f"اختبار تحديد {i}", "position": i,
+                         "url": "https://www.youtube.com/watch?v=selection"} for i in (1, 2)]
+        pending_id, running_id = store.add(queue_inputs, config.snapshot())
+        local_input = home / "اختبار تحديد TXT.txt"
+        local_input.write_text("نص اختبار التحديد", encoding="utf-8")
+        local_id = store.add([{"video_id": "selection-txt", "title": local_input.stem, "position": 3,
+                               "url": ""}], config.snapshot(), input_path=str(local_input))[0]
+        managed_input = Path(store.get(local_id)["transcript"])
+        assert store.claim(running_id, "download", "busy-test")
+        bridge.refresh()
+        find(root.contentItem(), "queueSearch").setProperty("text", "اختبار تحديد")
+        jobs_view.setProperty("contentY", 0)
+        QTest.qWait(150)
+        def selection():
+            value = root.property("selectedQueueIds")
+            return value.toVariant() if hasattr(value, "toVariant") else value
+        assert not find(root.contentItem(), "deleteSelectedJobsButton").property("enabled")
+        for stage in ("download", "deepgram", "opencode"):
+            assert find(root.contentItem(), "queueStage-" + pending_id + "-" + stage) is not None
+        # Filtering changes delegate heights asynchronously. Position against
+        # the settled layout and verify the click is inside the clipped list;
+        # estimated contentHeight + a fixed sleep can leave the last checkbox
+        # below the viewport on slower Windows runners.
+        deadline = time.monotonic() + 3
+        while True:
+            QMetaObject.invokeMethod(jobs_view, "forceLayout")
+            QMetaObject.invokeMethod(jobs_view, "positionViewAtIndex", Q_ARG("int", len(bridge.jobs) - 1), Q_ARG("int", 1))
+            QTest.qWait(100)
+            checkbox = find(root.contentItem(), "selectJob-" + local_id)
+            center = checkbox.mapToScene(checkbox.boundingRect().center()) if checkbox is not None else QPointF(-1, -1)
+            view_origin = jobs_view.mapToScene(QPointF(0, 0))
+            if (view_origin.x() < center.x() < view_origin.x() + jobs_view.width()
+                    and view_origin.y() < center.y() < view_origin.y() + jobs_view.height()
+                    and 0 < center.y() < root.height()):
+                break
+            assert time.monotonic() < deadline, (center, view_origin, jobs_view.height())
+        assert find(root.contentItem(), "queueStage-" + local_id + "-opencode") is not None
+        assert find(root.contentItem(), "queueStage-" + local_id + "-download") is None
+        assert find(root.contentItem(), "queueStage-" + local_id + "-deepgram") is None
+        click("selectJob-" + local_id)
+        assert selection() == [local_id], (selection(), find(root.contentItem(), "selectJob-" + local_id).mapToScene(QPointF(0, 0)), jobs_view.property("height"), messages[-8:])
+        if len(sys.argv) > 1:
+            root.grabWindow().save(str(Path(sys.argv[1]) / "queue-txt-word-only-140.png"))
+        click("selectAllJobsBox")
+        assert set(selection()) == {pending_id, running_id, local_id}
+        click("selectAllJobsBox")
+        assert selection() == []
+        click("queueFilter-running")
+        click("selectAllJobsBox")
+        assert selection() == [running_id]
+        click("queueFilter-all")
+        click("selectAllJobsBox")
+        assert set(selection()) == {pending_id, running_id, local_id}
+        assert find(root.contentItem(), "selectedJobsCount").property("text") == "المحدد: 3"
+        for name in ("deleteSelectedJobsButton", "selectAllJobsBox", "selectedJobsCount"):
+            assert_in_window(name)
+        if len(sys.argv) > 1:
+            root.grabWindow().save(str(Path(sys.argv[1]) / "queue-selection-140.png"))
+        click("deleteSelectedJobsButton")
+        assert store.get(pending_id) is None and store.get(local_id) is None
+        assert store.get(running_id) is not None and selection() == [running_id]
+        assert managed_input.is_file() and local_input.is_file()
+        assert root.property("toastError") and root.property("toastText")
+        store.set_stage(running_id, "download", "failed", "اختبار انتهاء المهمة المشغولة")
+        bridge.refresh()
+        root.setProperty("toastText", "")
+        click("deleteSelectedJobsButton")
+        assert store.get(running_id) is None and selection() == []
+        assert not find(root.contentItem(), "deleteSelectedJobsButton").property("enabled")
+        find(root.contentItem(), "queueSearch").setProperty("text", "")
+        # The update card uses mocked GitHub services and an in-memory token.
+        root.setProperty("toastText", "")
+        click("nav5")
+        settings_scroll = find(root.contentItem(), "settingsScroll")
+        settings_flick = settings_scroll.property("contentItem")
+        root.setProperty("settingsTab", 1)
+        QTest.qWait(80)
+        def reveal_update_control(name):
+            item = find(root.contentItem(), name)
+            origin = item.mapToScene(QPointF(0, 0))
+            scroll_origin = settings_scroll.mapToScene(QPointF(0, 0))
+            new_y = settings_flick.property("contentY") + origin.y() - scroll_origin.y() - 12
+            maximum = max(0, settings_flick.property("contentHeight") - settings_flick.property("height"))
+            settings_flick.setProperty("contentY", max(0, min(maximum, new_y)))
+            QTest.qWait(80)
+            assert_in_window(name)
+        def wait_update(status):
+            deadline = time.time() + 3
+            while bridge.appUpdate["status"] != status and time.time() < deadline:
+                QTest.qWait(25)
+            assert bridge.appUpdate["status"] == status, bridge.appUpdate
+            QTest.qWait(50)
+        credentials = {}
+        release = {"available": True, "version": "99.0.0", "name": "fake-setup.exe"}
+        installer = home / "fake-update.exe"
+        installer.write_bytes(b"fake installer - never launched")
+        download_finish = threading.Event()
+        def fake_download(home_path, latest, cancel, progress, token):
+            assert token == "ui-update-token"
+            progress(37)
+            while not download_finish.wait(0.01):
+                if cancel.is_set():
+                    raise bridge_module.app_update.UpdateCancelled("أُلغي التنزيل الاختباري.")
+            progress(100)
+            return installer
+        with patch.object(keys, "get", side_effect=lambda key: credentials.get(key, "")), \
+                patch.object(keys, "set", side_effect=lambda key, value: credentials.update({key: value})), \
+                patch.object(keys, "delete", side_effect=lambda key: credentials.pop(key, None), create=True), \
+                patch.object(bridge_module.app_update, "check_latest", return_value=release), \
+                patch.object(bridge_module.app_update, "download_installer", side_effect=fake_download):
+            token_field = find(root.contentItem(), "updateTokenField")
+            token_field.setProperty("text", "ui-update-token")
+            assert token_field.property("displayText") != "ui-update-token"
+            reveal_update_control("saveUpdateTokenButton")
+            click("saveUpdateTokenButton")
+            assert bridge.appUpdate["hasToken"] and token_field.property("text") == ""
+            root.setProperty("toastText", "")
+            reveal_update_control("checkAppUpdateButton")
+            click("checkAppUpdateButton")
+            wait_update("available")
+            reveal_update_control("downloadAppUpdateButton")
+            click("downloadAppUpdateButton")
+            wait_update("downloading")
+            deadline = time.time() + 2
+            while bridge.appUpdate["progress"] != 37 and time.time() < deadline:
+                QTest.qWait(25)
+            assert find(root.contentItem(), "appUpdateProgress").property("value") == 37
+            assert not find(root.contentItem(), "checkAppUpdateButton").property("enabled")
+            reveal_update_control("cancelAppUpdateButton")
+            if len(sys.argv) > 1:
+                reveal_update_control("appUpdateMessage")
+                root.grabWindow().save(str(Path(sys.argv[1]) / "app-update-progress-140.png"))
+            click("cancelAppUpdateButton")
+            wait_update("available")
+            reveal_update_control("downloadAppUpdateButton")
+            click("downloadAppUpdateButton")
+            download_finish.set()
+            wait_update("downloaded")
+            assert find(root.contentItem(), "installAppUpdateButton").isVisible()
+            reveal_update_control("installAppUpdateButton")
+            reveal_update_control("removeUpdateTokenButton")
+            click("removeUpdateTokenButton")
+            assert not bridge.appUpdate["hasToken"] and credentials == {}
+            root.setProperty("toastText", "")
+            with patch.object(bridge_module.app_update, "check_latest", side_effect=bridge_module.app_update.UpdateError("رفض GitHub الرمز. راجع صلاحيات المستودع.")):
+                reveal_update_control("checkAppUpdateButton")
+                click("checkAppUpdateButton")
+                wait_update("error")
+            assert "رفض GitHub" in find(root.contentItem(), "appUpdateMessage").property("text")
+            assert find(root.contentItem(), "checkAppUpdateButton").property("enabled")
+            if len(sys.argv) > 1:
+                reveal_update_control("appUpdateMessage")
+                root.grabWindow().save(str(Path(sys.argv[1]) / "app-update-error-140.png"))
         root.close()
-        scheduler.shutdown()
-        if scheduler.thread is not None:
-            scheduler.thread.join(timeout=3)
-            assert not scheduler.thread.is_alive(), "UI test scheduler did not stop"
         bridge.timer.stop()
+        harness.shutdown_and_join()
         engine.deleteLater()
         app.processEvents()
-        store.db.close()
+        with store.lock:
+            store.db.close()
     failures = [m for m in messages if any(s in m for s in ("Error", "Unable", "Cannot", "ReferenceError", "binding loop"))]
     assert not failures, failures
     print("Native UI passed: 6 pages, range selection, reorder, enqueue, templates, auto-stop toggle, worker toggles, "
           "provider override, library organise/list/delete, stage pause, automatic-block re-check, scroll pinning, "
-          "collapsible rail, UI scale, themes, 1060x720, no QML errors.")
-    faulthandler.cancel_dump_traceback_later()
+          "collapsible rail, UI scale, themes, single/multi/folder TXT import, native TXT drag/drop, "
+          "managed input copies, selected templates/folders, filtered queue selection/deletion, busy-job protection, "
+          "TXT Word-only stages, update progress/cancel/error/token controls, LAN start/QR/pair/revoke/stop, 1060x720, no QML errors.")
 
 
 if __name__ == "__main__":
-    main()
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(90, repeat=True)
+    try:
+        main()
+    finally:
+        faulthandler.cancel_dump_traceback_later()

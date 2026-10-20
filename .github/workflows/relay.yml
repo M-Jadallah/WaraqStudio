@@ -1,0 +1,31 @@
+name: Relay deployment acceptance
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    name: Docker Compose and PostgreSQL acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout the calling commit
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Verify Docker and Compose
+        run: |
+          docker version
+          docker compose version
+
+      - name: Test the production relay containers
+        # The stdlib-only runner owns its project, credentials and cleanup.
+        run: python tests/verify_relay_deployment.py

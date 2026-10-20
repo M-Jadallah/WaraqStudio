@@ -1,0 +1,122 @@
+/**
+ * `codex-refresh` tool — manually refresh OAuth tokens for all accounts.
+ * Extracted from `index.ts` per RC-1 Phase 2.
+ */
+
+import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
+import { loadAccounts } from "../storage.js";
+import { formatUiHeader, formatUiItem, paintUiText } from "../ui/format.js";
+import {
+	buildRefreshInputs,
+	refreshAndPersistAccount,
+} from "./refresh-account.js";
+import { sanitizeToolErrorMessage, withToolErrorEnvelope } from "./output.js";
+import type { ToolContext } from "./index.js";
+
+export function createCodexRefreshTool(ctx: ToolContext): ToolDefinition {
+	const {
+		resolveUiRuntime,
+		formatCommandAccountLabel,
+		resolveMaskEmail,
+		getStatusMarker,
+		reloadCachedAccountManager,
+	} = ctx;
+	const definition = tool({
+		description:
+			"Manually refresh OAuth tokens for all accounts to verify they're still valid.",
+		args: {
+			includeDisabled: tool.schema
+				.boolean()
+				.optional()
+				.describe(
+					"Also refresh the retained credentials of disabled accounts. " +
+						"Refreshing is not re-enable — the account stays disabled until re-enabled with codex-enable.",
+				),
+		},
+		async execute({ includeDisabled }: { includeDisabled?: boolean } = {}) {
+			const ui = resolveUiRuntime();
+			const maskEmail = resolveMaskEmail();
+			const storage = await loadAccounts();
+			if (!storage || storage.accounts.length === 0) {
+				if (ui.v2Enabled) {
+					return [
+						...formatUiHeader(ui, "Refresh accounts"),
+						"",
+						formatUiItem(ui, "No accounts configured.", "warning"),
+						formatUiItem(ui, "Run: opencode auth login", "accent"),
+					].join("\n");
+				}
+				return "No Codex accounts configured. Run: opencode auth login";
+			}
+
+			const results: string[] = ui.v2Enabled
+				? []
+				: [`Refreshing ${storage.accounts.length} account(s):`, ""];
+
+			let refreshedCount = 0;
+			let failedCount = 0;
+			let skippedCount = 0;
+			const inputs = buildRefreshInputs(storage.accounts);
+
+			for (let i = 0; i < inputs.length; i++) {
+				const input = inputs[i];
+				const account = storage.accounts[i];
+				if (!input || !account) continue;
+				const label = formatCommandAccountLabel(account, i, {
+					maskEmail,
+					peerAccounts: storage.accounts,
+				});
+				const outcome = await refreshAndPersistAccount(input, {
+					includeDisabled: includeDisabled === true,
+				});
+
+				if (outcome.status === "refreshed") {
+					results.push(
+						account.enabled === false
+							? `  ${getStatusMarker(ui, "ok")} ${label}: Refreshed (still disabled — re-enable with \`codex-enable\`)`
+							: `  ${getStatusMarker(ui, "ok")} ${label}: Refreshed`,
+					);
+					refreshedCount++;
+				} else if (outcome.status === "skipped") {
+					results.push(
+						`  ${getStatusMarker(ui, "warning")} ${label}: Skipped (disabled)`,
+					);
+					skippedCount++;
+				} else {
+					// Mask + truncate upstream refresh failures — they can carry
+					// credential-shaped fragments or account-identifying text.
+					results.push(
+						`  ${getStatusMarker(ui, "error")} ${label}: Failed - ${sanitizeToolErrorMessage(outcome.error)}`,
+					);
+					failedCount++;
+				}
+			}
+
+			await reloadCachedAccountManager();
+			results.push("");
+			if (skippedCount > 0) {
+				results.push(
+					`Summary: ${refreshedCount} refreshed, ${failedCount} failed, ${skippedCount} skipped`,
+				);
+				if (includeDisabled !== true) {
+					results.push(
+						`Hint: ${skippedCount} disabled account(s) were not refreshed. Re-run with includeDisabled=true to validate their retained credentials.`,
+					);
+				}
+			} else {
+				results.push(
+					`Summary: ${refreshedCount} refreshed, ${failedCount} failed`,
+				);
+			}
+			if (ui.v2Enabled) {
+				return [
+					...formatUiHeader(ui, "Refresh accounts"),
+					"",
+					...results.map((line) => paintUiText(ui, line, "normal")),
+				].join("\n");
+			}
+			return results.join("\n");
+		},
+	});
+	return withToolErrorEnvelope("codex-refresh", definition);
+}

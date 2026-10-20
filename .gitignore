@@ -23,3 +23,8 @@ node_modules/
 coverage/
 env-report.json
 output/
+.env
+.env.*
+!.env.example
+internet-device.json
+internet-requests.json

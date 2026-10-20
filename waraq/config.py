@@ -19,12 +19,12 @@ DEFAULT_PROMPT = '''استخدم مهارة arabic-lesson-formatter-sequential �
 تحقق من تنسيق المستند واتجاه العربية قبل إنهاء المهمة.'''
 
 
-# Built-in OpenCode providers. "login" uses the credentials OpenCode already holds
-# (subscription or any provider logged in there); every other provider is fed a key
+# Built-in OpenCode providers. "login" uses Waraq's embedded account engine;
+# every other provider is fed a key
 # from the OS store and runs in its own data directory so parallel workers cannot
 # contend over OpenCode's shared database. Users add their own providers in settings.
 BUILTIN_PROVIDERS = [
-    {"id": "login", "name": "تسجيل دخول OpenCode", "key_env": "", "isolated": False},
+    {"id": "login", "name": "حسابات ChatGPT في ورق", "key_env": "", "isolated": False},
     {"id": "openrouter", "name": "OpenRouter", "key_env": "OPENROUTER_API_KEY", "isolated": True},
     {"id": "openai", "name": "OpenAI (مفتاح API)", "key_env": "OPENAI_API_KEY", "isolated": True},
     {"id": "anthropic", "name": "Anthropic", "key_env": "ANTHROPIC_API_KEY", "isolated": True},
@@ -119,6 +119,8 @@ def defaults(home: Path):
         "auto_retry_attempts": 3, "opencode_limit_retries": 5,
         "opencode_data_root": str(home / "opencode-workers"),
         "opencode_providers": [],
+        "accounts_enabled": True, "accounts_max_concurrency": 5,
+        "accounts_auto_refresh": True, "accounts_refresh_seconds": 300,
         "library_root": str(home / "library"),
         "library_auto": True, "library_copy_audio": False,
         "theme": "dark", "ui_scale": 1.0, "ui_rail_collapsed": False, "ui_compact": True,
@@ -141,6 +143,13 @@ class Secrets:
         if value.strip():
             keyring.set_password(self.namespace, worker_id, value.strip())
 
+    def delete(self, worker_id):
+        import keyring
+        try:
+            keyring.delete_password(self.namespace, worker_id)
+        except keyring.errors.PasswordDeleteError:
+            pass
+
 
 class Config:
     def __init__(self, home: Path):
@@ -154,8 +163,25 @@ class Config:
             # Existing users keep their current retry policy when this key first appears.
             if "youtube_retry_attempts" not in saved:
                 self.data["youtube_retry_attempts"] = saved.get("auto_retry_attempts", self.data["youtube_retry_attempts"])
+        self.migrate_accounts()
         self.migrate()
         self.migrate_backups()
+
+    def migrate_accounts(self):
+        """One-way settings migration; the retired implementation cannot be selected."""
+        mapping = {"chatgpt_account_concurrency": "accounts_max_concurrency",
+                   "chatgpt_usage_auto_refresh": "accounts_auto_refresh",
+                   "chatgpt_usage_refresh_seconds": "accounts_refresh_seconds"}
+        changed = "chatgpt_accounts_enabled" in self.data
+        for old, new in mapping.items():
+            if old in self.data:
+                self.data[new] = self.data.pop(old)
+                changed = True
+        self.data.pop("chatgpt_accounts_enabled", None)
+        if changed:
+            self.data["accounts_enabled"] = True
+            self.save({})
+            self.migration_note = "استُبدل نظام الحسابات بمحرك ورق المضمّن؛ سجّل الدخول مرة واحدة لكل حساب."
 
     def migrate_backups(self):
         """Reserve two existing Deepgram slots for distinct fallback attempts."""
@@ -247,6 +273,8 @@ class Config:
     def save(self, data):
         merged = self.snapshot()
         merged.update(data)
+        for key in ("chatgpt_accounts_enabled", "chatgpt_account_concurrency", "chatgpt_usage_auto_refresh", "chatgpt_usage_refresh_seconds"):
+            merged.pop(key, None)
         self.validate(merged)
         atomic_json(self.path, merged)
         self.data = merged
@@ -260,7 +288,8 @@ class Config:
         for key, label in (("opencode_data_root", "بيانات عمال OpenCode"), ("library_root", "مكتبة الملفات")):
             if not Path(d[key]).is_absolute():
                 raise ValueError(f"اختر مسار {label} مسارًا مطلقًا.")
-        for k in ("library_auto", "library_copy_audio", "ui_rail_collapsed", "ui_compact"):
+        for k in ("library_auto", "library_copy_audio", "ui_rail_collapsed", "ui_compact", "accounts_enabled",
+                  "accounts_auto_refresh"):
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
         for k, low, high in [
@@ -272,6 +301,8 @@ class Config:
             ("max_retries", 1, 6), ("opencode_timeout", 60, 43200),
             ("youtube_cooldown", 60, 86400), ("youtube_retry_attempts", 0, 6),
             ("ui_scale", 0.8, 1.4),
+            ("accounts_max_concurrency", 1, 16),
+            ("accounts_refresh_seconds", 60, 1800),
             ("auto_retry_attempts", 0, 6), ("opencode_limit_retries", 0, 12),
         ]:
             if not isinstance(d[k], (int, float)) or isinstance(d[k], bool):
@@ -282,7 +313,8 @@ class Config:
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
         for k in ("project_concurrency", "max_pending_audio", "chunk_seconds", "audio_bitrate", "audio_rate", "audio_channels", "max_retries",
-                  "youtube_retry_attempts", "auto_retry_attempts", "opencode_limit_retries"):
+                  "youtube_retry_attempts", "auto_retry_attempts", "opencode_limit_retries", "accounts_max_concurrency",
+                  "accounts_refresh_seconds"):
             if not isinstance(d[k], int) or isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون عددًا صحيحًا.")
         if int(d["youtube_sleep_max"]) < int(d["youtube_sleep_min"]):

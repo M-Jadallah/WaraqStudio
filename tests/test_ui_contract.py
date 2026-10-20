@@ -1,6 +1,6 @@
 """Regression boundary for the petrol redesign: UI changes cannot rewrite execution.
 
-The fixture was recorded from a38688f before any presentation changes. Update it
+The fixture was recorded from 066c67b (current main before integration) before any presentation changes. Update it
 deliberately when a future task intentionally changes a backend/UI contract.
 """
 import hashlib

@@ -26,11 +26,15 @@ def make_docx(path, text="مستند اختباري"):
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, scheduler_harness):
     cfg = Config(tmp_path)
     store = Store(tmp_path / "tasks.db")
-    yield store, cfg
-    store.db.close()
+    try:
+        yield store, cfg
+    finally:
+        scheduler_harness.shutdown_and_join()
+        with store.lock:
+            store.db.close()
 
 
 def items(n=1):
@@ -64,7 +68,9 @@ def test_local_txt_skips_upstream(env, tmp_path):
     txt.write_text("نص", encoding="utf-8")
     ident = store.add(items(), cfg.snapshot(), input_path=str(txt))[0]
     job = store.get(ident)
-    assert job["transcript"] == str(txt)
+    assert Path(job["transcript"]) == Path(job["folder"]) / txt.name
+    assert Path(job["transcript"]).read_bytes() == txt.read_bytes()
+    assert job["input_path"] == str(txt)
     assert job["stages"]["download"]["status"] == "skipped"
     assert job["stages"]["deepgram"]["status"] == "skipped"
     assert job["stages"]["opencode"]["status"] == "pending"
@@ -178,18 +184,31 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
     peaks = counts.copy()
     seen_keys, downloads = [], []
     lock = threading.Lock()
-    def activity(stage, delay):
+    targets = {"deepgram": 2, "opencode": 3}
+    overlap = {stage: threading.Event() for stage in targets}
+    def activity(stage):
         with lock:
             counts[stage] += 1
             peaks[stage] = max(peaks[stage], counts[stage])
-        time.sleep(delay)
-        with lock:
-            counts[stage] -= 1
+            if stage in targets and counts[stage] >= targets[stage]:
+                overlap[stage].set()
+        try:
+            # Keep the first workers in flight until the required concurrency
+            # is observed. Fixed service sleeps depend on runner/disk speed and
+            # can miss overlap even when the pool dispatches correctly.
+            if stage in overlap:
+                if not overlap[stage].wait(10):
+                    raise TimeoutError("Required worker overlap was not reached: " + stage)
+            else:
+                time.sleep(0.03)
+        finally:
+            with lock:
+                counts[stage] -= 1
     class FakeYoutube:
         cooldown_until = 0
         def download(self, job, cfg, cancel, progress):
             downloads.append(job["position"])
-            activity("download", 0.03)
+            activity("download")
             p = Path(job["folder"]) / "audio.mp3"
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(b"test audio")
@@ -197,23 +216,25 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
     class FakeDG:
         def transcribe(self, job, worker, cfg, secret, cancel, progress):
             seen_keys.append((worker["id"], secret))
-            activity("deepgram", 0.4)
+            activity("deepgram")
             p = Path(job["folder"]) / "transcript.txt"
             p.write_text("تفريغ اختباري", encoding="utf-8")
             return p
     class FakeOC:
         def process(self, job, worker, cfg, secret, cancel, log):
-            activity("opencode", 0.5)
+            activity("opencode")
             return make_docx(Path(job["folder"]) / "result.docx")
     class Keys:
         def get(self, worker): return {"dg1": "key-one", "dg2": "key-two"}.get(worker, "")
     scheduler = Scheduler(store, cfg, Keys(), FakeYoutube(), FakeDG(), FakeOC())
-    deadline = time.time() + 8
-    while time.time() < deadline:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
         scheduler.tick()
-        if all(j["stages"]["opencode"]["status"] == "completed" for j in store.jobs()):
+        if all(j["stages"]["opencode"]["status"] == "completed" for j in store.jobs()) and scheduler.idle():
             break
         time.sleep(0.015)
+    assert scheduler.idle(), "Workers are still publishing completed results"
+    assert all(j["stages"]["opencode"]["status"] == "completed" for j in store.jobs())
     assert all(j["document"] for j in store.jobs())
     # One downloader, two keyed Deepgram workers, and an OpenCode pool no longer capped at two.
     assert peaks["download"] == 1 and peaks["deepgram"] == 2
@@ -222,6 +243,62 @@ def test_full_pipeline_worker_concurrency_and_separate_keys(env, tmp_path):
     assert set(seen_keys) == {("dg1", "key-one"), ("dg2", "key-two")}
     for j in store.jobs():
         validate_docx(j["document"])
+
+
+@pytest.mark.parametrize("background_loop", [False, True])
+def test_database_cleanup_waits_for_completed_worker_publication(env, tmp_path, background_loop):
+    store, cfg = env
+    ident = local_txt_job(store, cfg, tmp_path)
+    publishing = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    class FakeOC:
+        def process(self, job, worker, config, secret, cancel, log):
+            return make_docx(Path(job["folder"]) / "result.docx")
+
+    class HeldLibrary:
+        def publish_current(self, current_store, job_id, config):
+            publishing.set()
+            if not release.wait(5):
+                raise TimeoutError("Test publication was not released by scheduler shutdown")
+            current_store.event(job_id, "Publication finished before database cleanup")
+            finished.set()
+            return []
+
+    scheduler = Scheduler(store, cfg, None, opencode=FakeOC(), library=HeldLibrary())
+    original_shutdown = scheduler.shutdown
+
+    def shutdown():
+        original_shutdown()
+        release.set()
+
+    scheduler.shutdown = shutdown
+    # Held entries in other concurrency tests have no backing thread. They
+    # must not prevent teardown from joining the actual OpenCode worker.
+    scheduler.active["synthetic"] = {"job_id": "held", "stage": "deepgram", "project": "held",
+                                     "started": time.time(), "cancel": threading.Event()}
+    connection = store.db
+
+    class GuardedConnection:
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+        def close(self):
+            assert finished.is_set(), "SQLite closed before completed worker finished publishing"
+            assert scheduler.thread is None or not scheduler.thread.is_alive()
+            connection.close()
+
+    store.db = GuardedConnection()
+    if background_loop:
+        scheduler.start()
+    else:
+        scheduler.tick()
+    assert publishing.wait(3)
+    assert store.get(ident)["stages"]["opencode"]["status"] == "completed"
+    assert not scheduler.idle()
+    # Deliberately return while publication is blocked: env's finalizer must
+    # stop/join real threads before GuardedConnection allows SQLite to close.
 
 
 def test_project_cap(env):
@@ -383,6 +460,7 @@ def test_opencode_only_reuses_committed_validated_document(env, tmp_path, monkey
     job = store.get(ident)
     calls = []
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     def run(command, work, *args):
         calls.append(1)
@@ -417,6 +495,7 @@ def test_opencode_works_on_transcript_copy_inside_workspace(env, tmp_path, monke
     job = store.get(ident)
     captured = {}
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     def run(command, cwd, *args):
         captured["cwd"] = Path(cwd)
@@ -443,6 +522,7 @@ def test_opencode_permission_rejection_diagnosed(env, tmp_path, monkeypatch):
     ident = store.add(items(), cfg.snapshot(), input_path=str(txt))[0]
     job = store.get(ident)
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     def run(command, cwd, cancel, timeout, log, process_env=None):
         log("permission requested: external_directory (C:\\blocked\\*); auto-rejecting")
@@ -474,6 +554,7 @@ def pump(scheduler, store, ident, stage, wanted, timeout=5.0):
             # sqlite connection mid-write is not thread-safe.
             while not scheduler.idle() and time.time() < deadline:
                 time.sleep(0.005)
+            assert scheduler.idle(), f"{stage} reached {wanted} but its worker did not finish"
             return
         time.sleep(0.01)
     raise AssertionError(f"{stage} stuck at {store.get(ident)['stages'][stage]['status']}")
@@ -621,10 +702,9 @@ def test_deepgram_explicit_server_failure_is_backup_eligible(monkeypatch, env, t
     assert error.value.kind == "retryable"
 
 
-def test_bulk_retry_only_matching_attention_group(env):
-    from PySide6.QtCore import QCoreApplication
+def test_bulk_retry_only_matching_attention_group(env, qt_app):
+    from qt_test_support import dispose_bridge
     from waraq.bridge import Bridge
-    app = QCoreApplication.instance() or QCoreApplication([])
     store, cfg = env
     ids = store.add(items(3), cfg.snapshot())
     store.set_stage(ids[0], "download", "failed")
@@ -632,10 +712,12 @@ def test_bulk_retry_only_matching_attention_group(env):
     store.set_stage(ids[2], "download", "blocked")
     scheduler = Scheduler(store, cfg, None)
     bridge = Bridge(store, cfg, None, scheduler)
-    bridge.retryMany(ids + [ids[0], "missing"], "download", "failed")
-    assert [store.get(ident)["stages"]["download"]["status"] for ident in ids] == ["pending", "pending", "blocked"]
-    assert len([event for event in store.events() if event["message"] == "إعادة محاولة جماعية بطلب المستخدم."]) == 2
-    bridge.timer.stop()
+    try:
+        bridge.retryMany(ids + [ids[0], "missing"], "download", "failed")
+        assert [store.get(ident)["stages"]["download"]["status"] for ident in ids] == ["pending", "pending", "blocked"]
+        assert len([event for event in store.events() if event["message"] == "إعادة محاولة جماعية بطلب المستخدم."]) == 2
+    finally:
+        dispose_bridge(bridge)
 
 
 @pytest.mark.parametrize("kind", ["uncertain", "blocked", "cancelled"])
@@ -656,6 +738,9 @@ def test_terminal_kinds_never_rescheduled(env, tmp_path, kind):
 
 def test_opencode_quota_retries_hourly_then_terminal(env, tmp_path):
     store, cfg = env
+    # External non-subscription workers retain their bounded retry policy.
+    for worker in cfg.data["opencode_workers"]:
+        worker["model"] = "local/mock"
     ident = local_txt_job(store, cfg, tmp_path, {"opencode_limit_retries": 2})
     calls = []
     class FakeOC:
@@ -747,14 +832,19 @@ def test_quota_line_matching():
 
 
 @pytest.mark.parametrize("raises", [True, False])
-def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises):
+@pytest.mark.parametrize("error", [
+    {"data": {"statusCode": 429, "message": "The usage limit has been reached"}},
+    {"type": "api", "status": 429, "message": "The usage limit has been reached"},
+])
+def test_opencode_quota_stop_diagnosed(env, tmp_path, monkeypatch, raises, error):
     import waraq.services as services
     store, cfg = env
     ident = local_txt_job(store, cfg, tmp_path)
     job = store.get(ident)
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
-    quota = '{"type":"error","sessionID":"ses_x","error":{"data":{"statusCode":429,"message":"The usage limit has been reached"}}}'
+    quota = json.dumps({"type": "error", "sessionID": "ses_x", "error": error})
     def run(command, cwd, cancel, timeout, log, process_env=None):
         log(quota)
         if raises:
@@ -890,6 +980,7 @@ def test_opencode_command_carries_provider_model_and_isolated_env(env, tmp_path,
     job = store.get(ident)
     captured = {}
     monkeypatch.setattr(services, "resolve_opencode", lambda _: Path("opencode.exe"))
+    monkeypatch.setattr(services, "opencode_version", lambda _: "2.0.27")
     monkeypatch.setattr(services.OpenCode, "prepare_context", lambda *a: [])
     def run(command, cwd, cancel, timeout, log, process_env=None):
         captured["command"] = command
@@ -908,8 +999,11 @@ def test_opencode_command_carries_provider_model_and_isolated_env(env, tmp_path,
     login = {"id": "oc1", "name": "OpenCode 01", "provider": "login",
              "model": "openai/gpt-6-astra", "variant": "high", "agent": "build"}
     services.OpenCode().process(job, login, cfg.data, "", threading.Event(), lambda _: None)
-    assert captured["command"][captured["command"].index("--model") + 1] == "openai/gpt-6-astra"
-    assert captured["command"][captured["command"].index("--variant") + 1] == "high"
+    assert captured["command"][captured["command"].index("--model") + 1] == "openai/gpt-6-astra#high"
+    assert "--variant" not in captured["command"]
+    assert "--dir" not in captured["command"]
+    assert "--standalone" in captured["command"]
+    assert "--auto" in captured["command"]
     assert "OPENROUTER_API_KEY" not in captured["env"]
     assert "XDG_DATA_HOME" not in captured["env"]
 

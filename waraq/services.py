@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import platform
 import queue
 import random
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import zipfile
+import uuid
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
@@ -20,10 +25,15 @@ from .store import fingerprint
 
 
 class ServiceError(Exception):
-    def __init__(self, message, kind="failed", retry_after=0):
+    def __init__(self, message, kind="failed", retry_after=0, *, account_id="", reset_at=0,
+                 scope="unknown", confirmed=False):
         super().__init__(message)
         self.kind = kind
         self.retry_after = retry_after
+        self.account_id = account_id
+        self.reset_at = reset_at
+        self.scope = scope
+        self.confirmed = confirmed
 
 
 class Cancelled(ServiceError):
@@ -53,7 +63,7 @@ def safe_title(text):
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text).strip().rstrip(". ")[:55] or "درس"
 
 
-LIMIT_MESSAGE = "بلغ OpenCode حد استخدام اشتراك ChatGPT (نافذة الخمس ساعات)، ولم يُنتج الملف بعد."
+LIMIT_MESSAGE = "بلغ OpenCode حد استخدام اشتراك ChatGPT، ولم يُنتج الملف بعد."
 
 
 def worker_env(worker, provider, secret, cfg):
@@ -77,19 +87,94 @@ def worker_env(worker, provider, secret, cfg):
 
 
 def limit_reached(line):
-    """Match the subscription quota error on an opencode stdout line, not the exit code."""
-    lowered = line.lower()
-    if "usage limit has been reached" in lowered:
-        return True
-    if '"type":"error"' in line or '"type": "error"' in line:
-        try:
-            event = json.loads(line)
-        except ValueError:
-            return False
-        error = event.get("error") if isinstance(event, dict) else None
-        payload = error.get("data") if isinstance(error, dict) else None
-        return isinstance(payload, dict) and payload.get("statusCode") == 429
-    return False
+    """429 alone can be transient overload; only explicit quota evidence counts."""
+    try:
+        event = json.loads(line)
+    except (ValueError, TypeError):
+        return _quota_evidence(str(line))
+    if not isinstance(event, dict) or event.get("type") != "error":
+        return False
+    return _quota_evidence(json.dumps(event.get("error", {})))
+
+
+def _quota_evidence(message):
+    lowered = str(message).lower()
+    return any(code in lowered for code in ("subscription_sharing_usage_limit_exceeded",
+        "usage limit has been reached", "usage_limit_reached", "usage_limit_exceeded"))
+
+
+def opencode_error(line, account_id=""):
+    """Classify native errors conservatively, preserving reset/scope when stated."""
+    try:
+        event = json.loads(line)
+    except (ValueError, TypeError):
+        return ServiceError(LIMIT_MESSAGE, "rate_limited", account_id=account_id,
+                            scope="account", confirmed=True) if limit_reached(line) else None
+    if not isinstance(event, dict) or event.get("type") != "error":
+        return None
+    error = event.get("error") or {}
+    low = json.dumps(error, ensure_ascii=False).lower()
+    def fields(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                yield key.lower(), child
+                yield from fields(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from fields(child)
+        elif isinstance(value, str) and value.startswith("{"):
+            try:
+                yield from fields(json.loads(value))
+            except ValueError:
+                pass
+    pairs = list(fields(error))
+    status = next((v for k, v in pairs if k in ("status", "statuscode") and isinstance(v, int)), 0)
+    reset_at = 0
+    for key, value in pairs:
+        if key in ("resets_at", "reset_at", "resetat", "resetsat", "reset_timestamp"):
+            try:
+                number = float(value)
+                if math.isfinite(number) and number > 0:
+                    reset_at = number / 1000 if number > 1e12 else number
+            except (ValueError, TypeError):
+                pass
+        elif key in ("retry-after", "retry_after", "retryafter", "resets_in_seconds", "reset_after") and not reset_at:
+            try:
+                number = float(value)
+                if math.isfinite(number) and number > 0:
+                    reset_at = time.time() + number
+            except (ValueError, TypeError):
+                pass
+    if _quota_evidence(low):
+        scope = "model" if any(k in ("scope", "limit_scope") and v == "model" for k, v in pairs) else "account"
+        return ServiceError(LIMIT_MESSAGE, "rate_limited", max(0, reset_at - time.time()),
+                            account_id=account_id, reset_at=reset_at, scope=scope, confirmed=True)
+    if any(s in low for s in ("subscription_sharing_unsupported_capability", "subscription_sharing_route_not_supported",
+                              "unsupported_country", "region_not_supported", "insufficient_permissions", "permission_denied")):
+        return ServiceError("رفض المزود مسار الطلب أو صلاحياته؛ يلزم مراجعة إعداد الطلب.", "blocked", account_id=account_id)
+    if any(s in low for s in ("model_not_found", "modelnotfound", "unsupported_model", "model is not available")):
+        return ServiceError("النموذج غير متاح لهذا الحساب.", "model_unavailable", account_id=account_id, scope="model")
+    if status == 401 or any(s in low for s in ("invalid_grant", "token_expired", "authentication", "unauthorized",
+                "subscription_sharing_invalid_user", "subscription_sharing_user_not_eligible", "chatpass_v2_scope_not_authorized")):
+        return ServiceError("يحتاج حساب ChatGPT إلى إعادة تسجيل الدخول أو مراجعة صلاحيات الاشتراك.",
+                            "account_auth", account_id=account_id, scope="account")
+    if status == 429 or "too many requests" in low:
+        return ServiceError("قيّد المزود الطلب مؤقتًا دون تأكيد نفاد حصة الاشتراك.", "throttled",
+                            max(0, reset_at - time.time()), account_id=account_id, reset_at=reset_at)
+    return ServiceError("أعاد OpenCode خطأ أثناء المعالجة.", account_id=account_id)
+
+
+def preferred_opencode_error(errors):
+    priority = {"execution_uncertain": 100, "blocked": 90, "account_auth": 80,
+                "rate_limited": 70, "model_unavailable": 60, "throttled": 50, "failed": 10}
+    return max(errors, key=lambda error: priority.get(error.kind, 20))
+
+
+def abort_managed_session(runtime, session_id, work):
+    try:
+        return runtime.abort_and_wait(session_id, work) is True
+    except Exception:
+        return False
 
 
 def validate_docx(path):
@@ -122,44 +207,74 @@ def validate_docx(path):
 
 def run_process(command, cwd, cancel, timeout, log=lambda s: None, env=None):
     """No shell; stream output, bound runtime and terminate child process trees."""
+    checkpoint(cancel)
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             creationflags=flags, text=True, encoding="utf-8", errors="replace")
     lines = queue.Queue()
+    reader_done = threading.Event()
     def reader():
-        for line in proc.stdout:
-            lines.put(line.rstrip())
-    threading.Thread(target=reader, daemon=True).start()
+        try:
+            for line in proc.stdout:
+                lines.put((line.rstrip(), None))
+        except Exception as exc:
+            lines.put((None, exc))
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception as exc:
+                lines.put((None, exc))
+            finally:
+                reader_done.set()
     started = time.monotonic()
     tail = []
+    reader_thread = None
     try:
-        while proc.poll() is None or not lines.empty():
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+        # Process exit can precede the reader's last queued line. Only EOF
+        # proves that stdout was drained, including quota/permission notices.
+        while proc.poll() is None or not reader_done.is_set() or not lines.empty():
             checkpoint(cancel)
             if time.monotonic() - started > timeout:
                 raise ServiceError("تجاوزت العملية المهلة المحددة.")
             try:
-                line = lines.get(timeout=0.15)
+                line, error = lines.get(timeout=0.15)
+                if error is not None:
+                    raise ServiceError("تعذر قراءة مخرجات العملية الخارجية: " + str(error)) from error
                 tail.append(line)
                 tail = tail[-30:]
                 log(line)
             except queue.Empty:
                 pass
+        checkpoint(cancel)
         if proc.returncode:
             raise ServiceError("فشلت العملية الخارجية:\n" + "\n".join(tail)[-2500:])
         return "\n".join(tail)
     finally:
         if proc.poll() is None:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               capture_output=True, creationflags=flags, timeout=15)
-            else:
-                proc.terminate()
+            try:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   capture_output=True, creationflags=flags, timeout=15)
+                else:
+                    proc.terminate()
+            except (OSError, subprocess.TimeoutExpired):
+                # Preserve cancellation/timeout if tree termination itself
+                # fails, and still attempt to reap the immediate process.
+                pass
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        if proc.stdout:
+                proc.wait(timeout=10)
+        if reader_thread is not None and reader_thread.ident is not None:
+            reader_thread.join(timeout=1)
+        # A descendant can inherit stdout after the parent exits. Closing a
+        # buffered stream from here would hang on the reader's I/O lock; its
+        # daemon thread owns closing until EOF. Return within the timeout.
+        if proc.stdout and (reader_thread is None or reader_thread.ident is None):
             proc.stdout.close()
 
 
@@ -537,18 +652,129 @@ class Deepgram:
 
 
 def resolve_opencode(value):
-    path = Path(value) if Path(value).is_file() else Path(shutil.which(value) or "__missing__")
-    if path.suffix.lower() in (".cmd", ".bat", ".ps1"):
-        candidate = path.parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
-        if candidate.is_file():
-            return candidate
-        raise ServiceError("اختر ملف opencode.exe التنفيذي مباشرة بدل ملف BAT/CMD.", "blocked")
+    """Resolve native binaries, including npm shims, without executing a shell.
+
+    Automatic lookup follows PATH, then common per-user installs. Explicit paths
+    never silently switch to another installation when missing or broken.
+    """
+    value = os.path.expandvars(str(value or "opencode").strip().strip('"'))
+    automatic = value.lower() in ("opencode", "opencode.exe", "opencode2", "opencode2.exe")
+    path = Path(value).expanduser()
+    if path.is_file():
+        found = _opencode_binary(path)
+        if found:
+            return found
+        if not automatic:
+            raise ServiceError("تعذر العثور على ملف OpenCode التنفيذي خلف ملف التشغيل المحدد؛ "
+                               "اكتب opencode للاكتشاف التلقائي أو اختر opencode.exe مباشرة.", "blocked")
+    else:
+        located = shutil.which(value)
+        if located:
+            found = _opencode_binary(Path(located))
+            if found:
+                return found
+    if automatic:
+        # GUI apps can inherit an older PATH than a newly opened terminal.
+        roots = [Path(p) for p in os.get_exec_path() if p]
+        if os.environ.get("APPDATA"):
+            roots.append(Path(os.environ["APPDATA"]) / "npm")
+        roots += [Path.home() / ".opencode" / "bin", Path.home() / ".bun" / "bin",
+                  Path.home() / "scoop" / "apps" / "opencode" / "current"]
+        for root in dict.fromkeys(roots):
+            for name in ("opencode.exe", "opencode.cmd", "opencode.ps1", "opencode"):
+                found = _opencode_binary(root / name)
+                if found:
+                    return found
+            for candidate in _opencode_npm_binaries(root / "node_modules"):
+                if candidate.is_file():
+                    return candidate.resolve()
+    raise ServiceError("لم يُعثر على OpenCode. ثبّت OpenCode 2 بالأمر npm install -g @opencode/cli، "
+                       "ثم اكتب opencode في الإعدادات أو اختر ملف opencode.exe.", "blocked")
+
+
+def _opencode_npm_binaries(modules, preferred="@opencode/cli"):
+    # V2 postinstall installs a native file in @opencode/cli/bin; V1 can
+    # leave it in its platform dependency, nested or hoisted by npm.
+    packages = (preferred, "opencode-ai" if preferred == "@opencode/cli" else "@opencode/cli")
+    arches = ("arm64",) if platform.machine().lower() in ("arm64", "aarch64") else ("x64-baseline", "x64")
+    for name in packages:
+        package = modules / name
+        yield package / "bin" / "opencode.exe"
+        yield package / "bin" / ".opencode.exe"
+        for deps in (package / "node_modules", modules):
+            prefix = "@opencode/cli-windows-" if name == "@opencode/cli" else "opencode-windows-"
+            for arch in arches:
+                yield deps / (prefix + arch) / "bin" / "opencode.exe"
+
+
+def _opencode_binary(path):
     if not path.is_file():
-        raise ServiceError("لم يُعثر على OpenCode؛ حدد مسار opencode.exe.", "blocked")
-    return path.resolve()
+        return None
+    if path.suffix.lower() == ".exe":
+        return path.resolve()
+    if path.suffix.lower() in (".cmd", ".bat", ".ps1") or (os.name == "nt" and not path.suffix):
+        modules = path.parent.parent if path.parent.name == ".bin" else path.parent / "node_modules"
+        # Read only a bounded prefix of the shim to respect its package choice.
+        # Never execute it or interpolate its contents into a command.
+        try:
+            with path.open("rb") as shim:
+                content = shim.read(16_384).decode("utf-8", errors="replace").replace("\\", "/")
+        except OSError:
+            content = ""
+        preferred = "opencode-ai" if "opencode-ai/" in content else "@opencode/cli"
+        return next((p.resolve() for p in _opencode_npm_binaries(modules, preferred) if p.is_file()), None)
+    if os.name != "nt":
+        return path.resolve()
+    return None
+
+
+_opencode_probe_lock = threading.Lock()
+
+
+def opencode_version(executable):
+    """Cache a bounded version probe; replacing/upgrading the file invalidates it."""
+    try:
+        path = Path(executable).resolve()
+        stat = path.stat()
+        with _opencode_probe_lock:
+            return _opencode_version_cached(str(path), stat.st_mtime_ns, stat.st_size)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ServiceError("تعذر تشغيل OpenCode للتحقق من إصداره؛ راجع الملف التنفيذي وصلاحياته.", "blocked") from exc
+
+
+@lru_cache(maxsize=16)
+def _opencode_version_cached(executable, modified, size):
+    result = subprocess.run([executable, "--version"], capture_output=True, stdin=subprocess.DEVNULL,
+                            text=True, encoding="utf-8", errors="replace", timeout=10, check=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    match = re.search(r"\b(?:v)?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\b", result.stdout)
+    if not match:
+        raise ServiceError("تعذر التعرف على إصدار OpenCode من الملف المحدد.", "blocked")
+    version = match.group(1)
+    if version.split(".")[0] not in ("1", "2"):
+        raise ServiceError("إصدار OpenCode غير مدعوم: " + version + "؛ حدّث ورق لدعم هذا الإصدار.", "blocked")
+    return version
+
+
+def opencode_run_command(executable, version, worker, model, work, prompt):
+    """Keep V1 compatibility while using V2's private server and model syntax."""
+    variant = str(worker.get("variant", "")).strip()
+    if version.startswith("2."):
+        if variant:
+            model = model.split("#", 1)[0] + "#" + variant
+        command = [str(executable), "run", "--standalone", "--auto", "--model", model]
+    else:
+        command = [str(executable), "run", "--model", model]
+        if variant:
+            command += ["--variant", variant]
+        command += ["--dir", str(work)]
+    return command + ["--agent", worker["agent"], "--format", "json", "--", prompt]
 
 
 class OpenCode:
+    def __init__(self, accounts=None):
+        self.accounts = accounts
+
     def prepare_context(self, work, cfg):
         """Copy only skill sources, never credentials, cookies or legacy user inputs."""
         sources = [Path.home() / ".agents" / "skills" / "arabic-lesson-formatter-sequential"]
@@ -565,6 +791,8 @@ class OpenCode:
         return module_paths
 
     def process(self, job, worker, cfg, secret, cancel, log):
+        if cfg.get("_embedded_accounts"):
+            return self._process_managed(job, worker, cfg, cancel, log)
         transcript = Path(job["transcript"])
         if not transcript.is_file() or not transcript.read_text(encoding="utf-8-sig").strip():
             raise ServiceError("ملف التفريغ فارغ أو غير موجود.", "blocked")
@@ -585,10 +813,8 @@ class OpenCode:
             # Only a committed validation record qualifies for automatic reuse.
             output.rename(work / ("unverified-" + str(time.time_ns()) + ".docx"))
         module_paths = self.prepare_context(work, cfg)
-        # The session is sandboxed to --dir: reads outside it hit OpenCode's
-        # external_directory permission, which headless runs auto-reject. The
-        # agent therefore works on a copy inside its workspace; the original
-        # TXT stays out of reach and its hash is still verified after the run.
+        # Work on a local copy. OpenCode has the account's host permissions;
+        # the original TXT's hash is independently verified after the run.
         local_transcript = work / transcript.name
         shutil.copyfile(transcript, local_transcript)
         prompt = cfg["prompt"]
@@ -603,12 +829,17 @@ class OpenCode:
         provider = provider_of(worker, cfg)
         model = compose_model(provider, worker["model"])
         env.update(worker_env(worker, provider, secret, cfg))
-        log(f"المزود: {provider} · النموذج: {model}")
-        command = [str(resolve_opencode(cfg["opencode_executable"])), "run", "--model", model]
-        if str(worker.get("variant", "")).strip():
-            # Reasoning effort is provider specific; empty means the flag is left out.
-            command += ["--variant", worker["variant"]]
-        command += ["--agent", worker["agent"], "--dir", str(work), "--format", "json", prompt]
+        executable = resolve_opencode(cfg["opencode_executable"])
+        cli_version = opencode_version(executable)
+        # V2 uses PWD before process.cwd(); an inherited PWD can otherwise
+        # send a task into the directory of the terminal that launched Waraq.
+        env["PWD"] = str(work.resolve())
+        if cli_version.startswith("2."):
+            # An inherited OPENCODE_DB bypasses XDG worker isolation.
+            if provider_isolated(provider, cfg) and cfg.get("opencode_data_root"):
+                env.pop("OPENCODE_DB", None)
+        log(f"OpenCode {cli_version} · المزود: {provider} · النموذج: {model}")
+        command = opencode_run_command(executable, cli_version, worker, model, work, prompt)
         denied = []
         limited = []
         def track(line):
@@ -636,3 +867,182 @@ class OpenCode:
         report = validate_docx(output)
         atomic_json(verified, {**report, "input_sha256": original_hash, "output": str(output)})
         return output
+
+    def _process_managed(self, job, worker, cfg, cancel, log):
+        """A plugin-bound account, an isolated attempt, and one validated commit."""
+        account_id = ""
+        if self.accounts is None:
+            raise ServiceError("مدير حسابات ChatGPT غير متاح.", "blocked", account_id=account_id)
+        checkpoint(cancel)
+        transcript = Path(job["transcript"])
+        if not transcript.is_file() or not transcript.read_text(encoding="utf-8-sig").strip():
+            raise ServiceError("ملف التفريغ فارغ أو غير موجود.", "blocked", account_id=account_id)
+        original_hash = digest(transcript)
+        version = fingerprint({"input": original_hash, "worker": worker, "prompt": cfg["prompt"],
+                               "revision": cfg.get("revision_opencode", "")})
+        final_work = Path(job["folder"]) / ("word-" + version)
+        final_work.mkdir(parents=True, exist_ok=True)
+        name = f'{job["position"]:03d}-{safe_title(job["title"])}.docx'
+        output, verified = final_work / name, final_work / "validated.json"
+        if output.exists() and verified.exists():
+            try:
+                previous = json.loads(verified.read_text(encoding="utf-8"))
+                if previous.get("input_sha256") == original_hash and previous.get("sha256") == digest(output):
+                    validate_docx(output)
+                    return output
+            except (OSError, ValueError):
+                pass
+        work = final_work / "attempts" / uuid.uuid4().hex
+        work.mkdir(parents=True)
+        local_transcript = work / transcript.name
+        shutil.copyfile(transcript, local_transcript)
+        candidate = work / name
+        module_paths = self.prepare_context(work, cfg)
+        prompt = cfg["prompt"]
+        for key, value in {"transcript_path": str(local_transcript.resolve()), "output_path": str(candidate.resolve()),
+                           "title": job["title"], "position": str(job["position"])}.items():
+            prompt = prompt.replace("{" + key + "}", value)
+        prompt += f'\nالمخرج المطلوب مستند Word واحد بالمسار: "{candidate.resolve()}". لا تعدّل ملف التفريغ.'
+        # A managed account never accepts a worker API key, custom provider, or
+        # paid fallback model even when old worker settings survive migration.
+        model = str(worker["model"])
+        if not model.startswith("openai/"):
+            raise ServiceError("حساب ChatGPT يتطلب نموذج openai من الاشتراك.", "model_unavailable",
+                               account_id=account_id, scope="model")
+        runtime, session_id, attempt_session_id, attempt = None, None, None, None
+        audited, outcome = False, "failed"
+        errors = []
+        def binding_error():
+            # The plugin sees provider errors before the CLI wraps them. Consult
+            # its safe classification after stopping, so routing never depends
+            # on a model's prose or an arbitrary error string.
+            resolved = self.accounts.resolve_attempt(attempt["attempt_id"])
+            failure = resolved.get("failure") if isinstance(resolved, dict) else None
+            if not isinstance(failure, dict):
+                return None
+            kind = failure.get("kind")
+            mapped = {"quota": "rate_limited", "rate_limited": "throttled", "reauth": "account_auth",
+                      "workspace_blocked": "account_workspace", "provider_error": "failed"}.get(kind, "failed")
+            reset = float(failure.get("retry_at") or 0)
+            return ServiceError(LIMIT_MESSAGE if kind == "quota" else "أوقف محرك الحسابات الطلب؛ راجع حالة الحساب.",
+                                mapped, max(0, reset - time.time()), account_id=account_id, reset_at=reset,
+                                scope="account", confirmed=bool(failure.get("confirmed")))
+        try:
+            attempt = self.accounts.begin_attempt(job["id"], worker["id"], model, directory=work,
+                                                 max_concurrency=cfg.get("accounts_max_concurrency", 5))
+            account_id = attempt.get("account_id", "")
+            runtime = self.accounts.supervisor.ensure(cfg)
+            attempt.update(workpath=str(work.resolve()), runtime_instance_id=runtime.instance_id)
+            callback = cfg.get("_execution_started")
+            if callback:
+                callback(attempt)
+                audited = True
+            # Keep the engine on its pinned executables, while Word skills may
+            # still use the user's installed Python/document tools. Packaged
+            # Node stays first; no inherited credentials enter this environment.
+            tool_path = os.pathsep.join(part for part in (runtime.env.get("PATH", ""), os.environ.get("PATH", "")) if part)
+            environment = {"PWD": str(work.resolve()), "PATH": tool_path}
+            if module_paths:
+                environment["NODE_PATH"] = os.pathsep.join(module_paths)
+            session_id = runtime.create_session(work, environment)
+            attempt_session_id = session_id
+            callback = cfg.get("_execution_session")
+            if callback:
+                callback(attempt["attempt_id"], session_id, runtime.instance_id)
+            checkpoint(cancel)
+            env = dict(runtime.env, **environment, OPENCODE_PASSWORD=runtime.password)
+            variant = str(worker.get("variant", "")).strip()
+            if variant:
+                model = model.split("#", 1)[0] + "#" + variant
+            command = [str(runtime.executable), "run", "--server", runtime.url, "--session", session_id,
+                       "--auto", "--model", model, "--agent", worker["agent"], "--format", "json", "--", prompt]
+            def track(line):
+                error = opencode_error(line, account_id)
+                if error:
+                    errors.append(error)
+                # Native errors can include HTTP request headers. Keep only the
+                # safe diagnosis for structured errors, never token-bearing JSON.
+                if error:
+                    log(str(error))
+                else:
+                    safe = line.replace(runtime.password, "[redacted]")
+                    safe = re.sub(r"(?i)(bearer\s+|basic\s+|sk-)[A-Za-z0-9+/=._-]+", r"\1[redacted]", safe)
+                    safe = re.sub(r'(?i)(["\x27]?(?:authorization|access_token|refresh_token|password)["\x27]?\s*[:=]\s*)["\x27]?[^,"\x27\s}]+', r'\1[redacted]', safe)
+                    log(safe)
+            try:
+                run_process(command, work, cancel, cfg["opencode_timeout"], track, env)
+            except (Cancelled, ServiceError):
+                if not abort_managed_session(runtime, session_id, work):
+                    raise ServiceError("تعذر إثبات توقف جلسة OpenCode؛ أوقفت إعادة التنفيذ لحماية النتيجة.",
+                                       "execution_uncertain", account_id=account_id) from None
+                session_id = None
+                if cancel.is_set():
+                    raise Cancelled()
+                classified = binding_error()
+                if classified:
+                    raise classified
+                if errors:
+                    raise preferred_opencode_error(errors) from None
+                raise
+            # CLI success does not establish server inactivity or model success.
+            if not runtime.inactive(session_id) and not abort_managed_session(runtime, session_id, work):
+                raise ServiceError("لم يتأكد توقف جلسة OpenCode.", "execution_uncertain", account_id=account_id)
+            runtime.release_session(session_id)
+            session_id = None
+            checkpoint(cancel)
+            classified = binding_error()
+            if classified:
+                raise classified
+            if errors:
+                raise preferred_opencode_error(errors)
+            if digest(transcript) != original_hash or digest(local_transcript) != original_hash:
+                raise ServiceError("تغيّر TXT أثناء OpenCode؛ أوقفت اعتماد الناتج للمراجعة.", "blocked", account_id=account_id)
+            report = validate_docx(candidate)
+            checkpoint(cancel)
+            # Candidate is immutable after confirmed inactivity. os.replace is
+            # the sole adoption point; a failed attempt can never supply output.
+            temporary = final_work / (".commit-" + uuid.uuid4().hex + ".docx")
+            shutil.copyfile(candidate, temporary)
+            os.replace(temporary, output)
+            atomic_json(verified, {**report, "input_sha256": original_hash, "output": str(output),
+                                   "attempt": work.name, "session_id": attempt_session_id,
+                                   "instance_id": runtime.instance_id})
+            outcome = "completed"
+            return output
+        except (ServiceError, Cancelled) as exc:
+            outcome = exc.kind
+            if runtime and session_id and exc.kind != "execution_uncertain":
+                if not abort_managed_session(runtime, session_id, work):
+                    outcome = "execution_uncertain"
+                    raise ServiceError("تعذر إثبات توقف جلسة OpenCode؛ أوقفت إعادة التنفيذ لحماية النتيجة.",
+                                       "execution_uncertain", account_id=account_id) from None
+            raise
+        except Exception as exc:
+            if runtime and session_id and not abort_managed_session(runtime, session_id, work):
+                outcome = "execution_uncertain"
+                raise ServiceError("تعذر التحقق من توقف جلسة OpenCode؛ يلزم فحصها قبل إعادة التنفيذ.",
+                                   "execution_uncertain", account_id=account_id) from None
+            outcome = getattr(exc, "kind", "failed")
+            raise ServiceError("تعذر الاتصال بمحرك حسابات ورق المضمّن.", outcome,
+                               account_id=account_id) from None
+        finally:
+            active_error = sys.exc_info()[1]
+            if getattr(active_error, "kind", "") == "execution_uncertain":
+                outcome = "execution_uncertain"
+            if attempt:
+                # Release the binding only after native inactivity has been proved.
+                # An uncertain session retains both its binding and durable replay hold.
+                if outcome != "execution_uncertain":
+                    try:
+                        engine_outcome = ("limit" if outcome in ("rate_limited", "quota_exhausted", "throttled") else
+                                          outcome if outcome in ("completed", "cancelled") else "failed")
+                        self.accounts.close_attempt(attempt["attempt_id"], outcome=engine_outcome)
+                    except Exception:
+                        outcome = "execution_uncertain"
+                if audited and cfg.get("_execution_finished"):
+                    cfg["_execution_finished"](attempt["attempt_id"], outcome)
+                if outcome == "execution_uncertain" and getattr(active_error, "kind", "") != "execution_uncertain":
+                    raise ServiceError("تعذر إغلاق سجل المحاولة بأمان؛ افحص المحرك قبل إعادة التنفيذ.",
+                                       "execution_uncertain", account_id=account_id)
+            if (outcome != "execution_uncertain" and (not transcript.exists() or digest(transcript) != original_hash)):
+                raise ServiceError("تغيّر TXT الأصلي أثناء OpenCode؛ أوقفت اعتماد الناتج للمراجعة.", "blocked", account_id=account_id)

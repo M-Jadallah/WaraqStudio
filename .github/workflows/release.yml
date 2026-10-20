@@ -14,6 +14,10 @@ permissions:
   # and the account's artifact storage stays full.
   actions: write
 
+env:
+  OPENCODE_TEST_VERSION: "2.0.32"
+  OPENCODE_TEST_EXECUTABLE: "build/embedded-runtime/opencode/opencode.exe"
+
 defaults:
   run:
     shell: bash
@@ -25,9 +29,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  relay:
+    name: Relay container gate
+    uses: ./.github/workflows/relay.yml
+    permissions:
+      contents: read
+
   tests:
     name: Test gate
     runs-on: windows-latest
+    env:
+      QT_QUICK_BACKEND: software
+      QT_QPA_PLATFORM: offscreen
+      QT_QPA_FONTDIR: C:/Windows/Fonts
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -44,14 +58,49 @@ jobs:
           python -m pip install -r requirements-dev.txt
 
       - name: Engine and service tests
-        run: python -m pytest tests/test_engine.py -v --tb=short
+        run: python -m pytest tests -v --tb=short
+
+      - name: Prepare pinned embedded runtime (Windows x64)
+        run: python scripts/prepare_embedded_engine.py
+
+      - name: Native OpenCode 2 acceptance (local model, no paid requests)
+        run: python tests/verify_opencode_v2.py
+
+      - name: Embedded account engine native fixture (no OAuth or paid model)
+        run: python tests/verify_embedded_engine.py
 
       - name: Native UI interaction checks
-        run: python tests/verify_ui.py
+        timeout-minutes: 5
+        run: python -u tests/verify_ui.py
+
+      - name: Petrol theme, layout and dialog matrix
+        timeout-minutes: 5
+        run: python tests/verify_redesign.py
+
+      - name: Native account management and quota UI checks
+        run: python tests/verify_accounts_ui.py
+
+      - name: Native queue scrolling stress
+        run: python tests/verify_queue_scroll.py
+
+      - name: Native Internet pairing controls
+        run: python tests/verify_internet_ui.py
+
+      - name: Ensure phone browser is available
+        run: python -m playwright install msedge
+
+      - name: LAN and Internet phone acceptance
+        run: |
+          python tests/verify_mobile.py
+          python tests/verify_mobile_internet.py
+          python tests/verify_internet_stack.py
+
+      - name: PWA HTTPS service worker and pairing acceptance
+        run: python tests/verify_pwa.py
 
   build-release:
     name: Build exe and publish release
-    needs: tests
+    needs: [tests, relay]
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -101,6 +150,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Prepare pinned embedded runtime (Windows x64)
+        run: python scripts/prepare_embedded_engine.py
+
       - name: Build Windows bundle (PyInstaller)
         run: python build_windows.py
 
@@ -109,13 +161,8 @@ jobs:
           test -f Windows/WaraqStudio/WaraqStudio.exe
           ls Windows/WaraqStudio | head -20
 
-      - name: Smoke test bundled exe (environment check)
-        run: |
-          ./Windows/WaraqStudio/WaraqStudio.exe --check-environment env-report.json
-          cat env-report.json
-
-      - name: Smoke test bundled exe (UI launch)
-        run: ./Windows/WaraqStudio/WaraqStudio.exe --smoke
+      - name: Clean environment bundled engine and UI startup
+        run: python scripts/verify_clean_package.py
 
       - name: Package portable bundle
         shell: pwsh
@@ -127,7 +174,11 @@ jobs:
       - name: Create source zip
         run: |
           mkdir -p dist
-          git archive --format=zip --prefix="WaraqStudio-$TAG/" -o "dist/WaraqStudio-$TAG-source.zip" HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git archive --format=zip --prefix="WaraqStudio-$TAG/" -o "dist/WaraqStudio-$TAG-source.zip" "$GITHUB_SHA"
+
+      - name: Package the Coolify gateway from this commit
+        run: python deploy/package_relay.py
 
       - name: Build installer (Inno Setup)
         shell: pwsh
@@ -138,17 +189,71 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem dist
 
+      - name: Verify installer (install, launch and uninstall)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          ./tests/verify_installer.ps1 -InstallerPath "dist/WaraqStudio-$env:VERSION-setup.exe" -ExpectedVersion $env:VERSION -ExpectedOpenCodeVersion $env:OPENCODE_TEST_VERSION
+
+      - name: Record exact source commit and asset checksums
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def sha256(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+          dist = Path('dist')
+          assets = sorted(path for path in dist.iterdir()
+                          if path.is_file() and path.suffix in ('.zip', '.exe', '.sha256'))
+          required = {'WaraqGateway-Coolify.zip', 'WaraqGateway-Coolify.zip.sha256',
+                      f"WaraqStudio-{os.environ['TAG']}-source.zip",
+                      f"WaraqStudio-{os.environ['TAG']}-windows-x64.zip",
+                      f"WaraqStudio-{os.environ['VERSION']}-setup.exe"}
+          assert required.issubset({path.name for path in assets}), 'Release assets are incomplete'
+          provenance = {
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'commit': os.environ['GITHUB_SHA'],
+              'tag': os.environ['TAG'],
+              'source_url': f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/tree/{os.environ['GITHUB_SHA']}",
+              'compose_path': 'compose.relay.yaml',
+              'assets': [{'name': path.name, 'sha256': sha256(path)} for path in assets],
+          }
+          receipt = dist / f"WaraqStudio-{os.environ['TAG']}-provenance.json"
+          receipt.write_text(json.dumps(provenance, indent=2) + '\n', encoding='utf-8')
+          (dist / 'SHA256SUMS').write_text(''.join(f'{sha256(path)}  {path.name}\n'
+                                                for path in sorted(assets + [receipt])), encoding='ascii')
+          PY
+
       - name: Write release notes
         run: |
           cat > RELEASE_NOTES.md <<EOF
           إصدار تلقائي بواسطة GitHub Actions (وسم $TAG، من الالتزام ${GITHUB_SHA:0:7}).
 
           ## الملفات المرفقة
-          - \`WaraqStudio-${TAG#v}-setup.exe\` — **ملف التثبيت**: شغّله وسيثبّت التطبيق وكل ما يحتاجه (Python وQt وFFmpeg وyt-dlp مضمّنة داخله — لا يحتاج تثبيت أي شيء آخر) في Program Files، مع اختصار في قائمة ابدأ (وسطح المكتب اختياريًا) وإمكانية الإزالة من إعدادات Windows.
+          - \`WaraqStudio-${TAG#v}-setup.exe\` — **ملف التثبيت**: يثبّت التطبيق مع Python وQt وFFmpeg وyt-dlp المضمّنة في Program Files، مع اختصار في قائمة ابدأ (وسطح المكتب اختياريًا) وإمكانية الإزالة من إعدادات Windows.
           - \`WaraqStudio-$TAG-windows-x64.zip\` — بديل محمول دون تثبيت: فك الضغط وشغّل \`WaraqStudio.exe\` (أو \`Start.cmd\`).
-          - \`WaraqStudio-$TAG-source.zip\` — نسخة مضغوطة من الكود المصدري.
+          - \`WaraqStudio-$TAG-source.zip\` — الكود المصدري المثبت على الالتزام الكامل \`$GITHUB_SHA\`، وهو الالتزام نفسه المستخدم لبناء Windows والبوابة.
+          - \`WaraqGateway-Coolify.zip\` و\`WaraqGateway-Coolify.zip.sha256\` — حزمة بوابة الإنترنت وDocker Compose وأدلة Coolify وبصمتها، دون بيانات المستخدم أو أسرار الخادم.
+          - \`SHA256SUMS\` و\`WaraqStudio-$TAG-provenance.json\` — بصمات الملفات وسجل مصدر الإصدار والالتزام الدقيق.
+
+          ## النشر من المستودع نفسه
+          - نسخة Windows للمستخدمين عبر المُثبّت أو الحزمة المحمولة؛ بوابة الخادم عبر Coolify باستخدام \`compose.relay.yaml\` من جذر المستودع، دون تشغيل تطبيق Windows على VPS.
+          - [مصدر هذا الإصدار المثبت على الالتزام]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/tree/$GITHUB_SHA) · [ملف Compose المطابق]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/compose.relay.yaml).
+          - اجتازت بوابة الخادم اختبار Docker Compose وPostgreSQL على Ubuntu قبل إتاحة بناء الإصدار.
 
           ## ملاحظات
+          - تستخدم حسابات ChatGPT محركًا خاصًا مضمّنًا، مع خادم مشترك وجلسة مستقلة لكل محاولة. لا يلزم تثبيت مدير حسابات أو OpenCode أو Node.js خارجيًا لهذا المسار.
+          - اجتاز المُثبّت اختبار التثبيت والتشغيل والإزالة على Windows داخل GitHub Actions قبل النشر، واختُبر OpenCode 2 بمزود محلي دون طلبات مدفوعة.
+          - تتضمن حزمة Windows x64 محرك الحسابات وOpenCode 2.0.32 وNode.js 24.22.0. تبقى موافقة دخول الحساب وإعداد مزود API ومهارات Word على صاحب الجهاز.
+          - يمكنك تحديد عناصر الطابور وحذف سجلاتها مع الاحتفاظ بالملفات. التفريغات TXT المستوردة تعرض مرحلة Word وحدها.
+          - تظهر خيارات قالب البرومبت والمادة ومسار النتائج أعلى صفحة إضافة المصدر، قبل استيراد ملفات TXT أو مجلد التفريغات.
+          - خُفّضت كلفة تحديث مركز العمليات للطوابير الكبيرة، مع فحص تمرير أصلي بالعجلة وشريط التمرير حتى 2000 عنصر.
+          - يتوفر فحص تحديث التطبيق وتنزيل مُثبّت موثَّق بالبصمة من الإعدادات. الإصدارات الخاصة تحتاج رمز GitHub شخصيًا له صلاحية قراءة المستودع.
           - أدخل مفاتيح Deepgram وOpenCode من شاشة الإعدادات داخل التطبيق — لا تُضمَّن أي مفاتيح أو بيانات في التثبيت.
           - بيانات المستخدم تُحفظ في \`%LOCALAPPDATA%\\WaraqStudio\` ولا تُحذف عند إزالة التطبيق.
           - يتوفر أيضًا «Source code (zip)» يُنشئه GitHub تلقائيًا أسفل الإصدار.
@@ -158,13 +263,48 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A re-run of the same build must replace its release, not stack a
-          # duplicate under the same tag.
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" dist/*.zip dist/*-setup.exe \
-            --target "$GITHUB_SHA" \
-            --title "WaraqStudio $TAG" \
-            --notes-file RELEASE_NOTES.md
+          set -euo pipefail
+          # Existing tags are immutable, including annotated tags (peeled SHA).
+          # A transport/auth failure must never be mistaken for a missing tag.
+          check_tag() {
+            local refs status resolved
+            if refs="$(git ls-remote --exit-code --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"; then
+              resolved="$(printf '%s\n' "$refs" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
+              if [[ -z "$resolved" ]]; then
+                resolved="$(printf '%s\n' "$refs" | awk 'NR == 1 {print $1}')"
+              fi
+              if [[ "$resolved" != "$GITHUB_SHA" ]]; then
+                echo "::error::Refusing to publish: tag $TAG points to $resolved, expected $GITHUB_SHA. Existing tags will not be changed."
+                exit 1
+              fi
+              return 0
+            else
+              status=$?
+              if [[ "$status" != 2 ]]; then
+                echo "::error::Could not verify remote tag $TAG (git exit $status)."
+                exit "$status"
+              fi
+              return 2
+            fi
+          }
+          if check_tag; then
+            echo "Verified immutable tag $TAG at $GITHUB_SHA."
+          else
+            # This branch runs only for an absent tag; all other errors exit.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
+          fi
+          check_tag
+          if gh release view "$TAG" --json id --jq .id >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "WaraqStudio $TAG" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" \
+              --title "WaraqStudio $TAG" --notes-file RELEASE_NOTES.md
+          fi
+          # Recheck immediately before attaching assets. Never move/delete tags.
+          check_tag
+          gh release upload "$TAG" dist/*.zip dist/*-setup.exe dist/*.sha256 \
+            dist/SHA256SUMS "dist/WaraqStudio-$TAG-provenance.json" --clobber
 
       - name: Upload build as fallback artifact
         # The release assets above ARE the deliverable, and release storage is
@@ -181,5 +321,8 @@ jobs:
           path: |
             dist/*.zip
             dist/*.exe
+            dist/*.sha256
+            dist/SHA256SUMS
+            dist/*-provenance.json
             env-report.json
           retention-days: 1
