@@ -22,3 +22,4 @@ node_modules/
 .next/
 coverage/
 env-report.json
+output/

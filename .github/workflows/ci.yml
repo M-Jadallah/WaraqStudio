@@ -36,8 +36,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
-      - name: Engine and service tests
-        run: python -m pytest tests/test_engine.py -v --tb=short
+      - name: Engine, model and UI contract tests
+        run: python -m pytest tests -v --tb=short
 
       - name: Native UI interaction checks
         run: python tests/verify_ui.py
