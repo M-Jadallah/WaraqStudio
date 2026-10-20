@@ -257,6 +257,25 @@ def windows_acl_bytes(path):
         kernel.CloseHandle(handle)
 
 
+def windows_denies_world_list_directory(descriptor):
+    """Inspect the self-relative DACL, independent of the caller's privileges."""
+    assert int.from_bytes(descriptor[2:4], "little") & 0x8000  # SE_SELF_RELATIVE
+    dacl = int.from_bytes(descriptor[16:20], "little")
+    assert dacl and dacl + 8 <= len(descriptor)
+    count = int.from_bytes(descriptor[dacl + 4:dacl + 6], "little")
+    cursor = dacl + 8
+    world_sid = bytes((1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0))  # S-1-1-0
+    for _ in range(count):
+        size = int.from_bytes(descriptor[cursor + 2:cursor + 4], "little")
+        assert size >= 4 and cursor + size <= len(descriptor)
+        if (descriptor[cursor] == 1 and  # ACCESS_DENIED_ACE_TYPE
+                int.from_bytes(descriptor[cursor + 4:cursor + 8], "little") & 1 and
+                descriptor[cursor + 8:cursor + size] == world_sid):
+            return True
+        cursor += size
+    return False
+
+
 def test_profile_preparation_cancellation_is_terminal_and_releases_lease(tmp_path, monkeypatch):
     manager = native.EmbeddedRuntimeSupervisor(SimpleNamespace(home=tmp_path))
     entered = threading.Event()
@@ -459,7 +478,8 @@ def test_exact_windows_cache_junction_is_preserved_without_alias_acl_or_walk(tmp
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows compatibility-junction deny-list ACL")
-def test_windows_cache_alias_deny_list_directory_is_supported_and_acl_preserved(tmp_path):
+@pytest.mark.parametrize("probe_access", ["list_directory", "metadata"])
+def test_windows_cache_alias_deny_list_directory_is_supported_and_acl_preserved(tmp_path, probe_access):
     from ctypes import wintypes
     root = tmp_path / "profile"
     alias = root / native._CACHE_ALIAS
@@ -485,10 +505,25 @@ def test_windows_cache_alias_deny_list_directory_is_supported_and_acl_preserved(
         node.close()
     try:
         before = windows_acl_bytes(alias)
-        with pytest.raises(native.EmbeddedRuntimeError, match="private_permissions_failed"):
-            native._WindowsPath(alias, writable=True)
+        assert windows_denies_world_list_directory(before)
+        before_target = os.readlink(alias)
+        assert Path(before_target).samefile(target)
+        probe = None
+        try:
+            # Elevated/backup-enabled runners may grant LIST_DIRECTORY despite
+            # this deny ACE. Metadata mode exercises successful-probe cleanup
+            # even on ordinary Windows accounts where the broader open fails.
+            probe = native._WindowsPath(alias, writable=True, metadata_only=probe_access == "metadata")
+        except native.EmbeddedRuntimeError as exc:
+            assert probe_access == "list_directory" and exc.reason == "private_permissions_failed"
+        finally:
+            if probe is not None:
+                probe.close()
+        if probe_access == "metadata":
+            assert probe is not None and probe.handle is None
         native.prepare_private_profile(root)
         assert windows_acl_bytes(alias) == before
+        assert os.readlink(alias) == before_target
         assert alias.is_junction()
     finally:
         alias.rmdir()
