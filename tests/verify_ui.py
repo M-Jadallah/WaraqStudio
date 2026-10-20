@@ -45,13 +45,25 @@ def main():
         home = Path(temp)
         store, config = Store(home / "test.db"), Config(home)
         keys = type("Keys", (), {"get": lambda s, w: "", "set": lambda s,w,v: None})()
-        bridge_module.deepgram_models = lambda: [
-            {"id": "nova-3-general", "languages": ["ar", "ar-JO", "en"]},
-            {"id": "whisper-large", "languages": ["ar", "en"]},
-        ]
-        EmbeddedAccountService.models = lambda self: [
-            "openai/gpt-6-astra", "openai/gpt-6-sol", "opencode/big-pickle"
-        ]
+        catalog_loads = []
+        # Optional slow synthetic responses exercise the same queued-signal race
+        # as a busy hosted runner, without contacting either model service.
+        catalog_delay = max(0, float(os.environ.get("WARAQ_UI_CATALOG_DELAY_MS", "0"))) / 1000
+        expected_deepgram = ["nova-3-general", "whisper-large"]
+        expected_opencode = ["openai/gpt-6-astra", "openai/gpt-6-sol", "opencode/big-pickle"]
+        def deepgram_catalog():
+            time.sleep(catalog_delay)
+            catalog_loads.append("deepgram")
+            return [
+                {"id": "nova-3-general", "languages": ["ar", "ar-JO", "en"]},
+                {"id": "whisper-large", "languages": ["ar", "en"]},
+            ]
+        def opencode_catalog(self):
+            time.sleep(catalog_delay)
+            catalog_loads.append("opencode")
+            return list(expected_opencode)
+        bridge_module.deepgram_models = deepgram_catalog
+        EmbeddedAccountService.models = opencode_catalog
         scheduler = Scheduler(store, config, keys)
         # UI acceptance checks start/pause wiring, never real external work.
         # Dispatch behavior is covered separately by the engine/service tests.
@@ -98,6 +110,25 @@ def main():
             p = item.mapToScene(item.boundingRect().center())
             QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(p.x()), int(p.y())))
             QTest.qWait(60)
+        def wait_for(predicate, description, timeout=5):
+            deadline = time.monotonic() + timeout
+            while not predicate() and time.monotonic() < deadline:
+                QTest.qWait(25)
+            assert predicate(), (description, bridge.catalogBusy, bridge.catalogErrors,
+                                 list(catalog_loads), messages[-5:])
+        def wait_catalog_open(previous_loads):
+            # Opening transitions, Python workers and their queued Qt publication
+            # all complete asynchronously. Require this opening's refresh rather
+            # than accepting a previous dialog's cached catalog.
+            def ready():
+                dialog = root.findChild(QObject, "workerDialog")
+                return (dialog is not None and dialog.property("opened")
+                        and len(catalog_loads) >= previous_loads + 2 and not bridge.catalogBusy)
+            wait_for(ready, "worker dialog catalog refresh did not complete")
+            assert not bridge.catalogBusy
+            assert bridge.catalogErrors == {"deepgram": "", "opencode": ""}
+            assert [item["id"] for item in bridge.deepgramModels] == expected_deepgram
+            assert bridge.opencodeModels == expected_opencode
         for index in range(6):
             click("nav" + str(index))
             assert root.property("page") == index
@@ -187,12 +218,15 @@ def main():
         oc1 = [w for w in scheduler.workers() if w["id"] == "oc1"][0]
         assert oc1["provider"] == "login" and oc1["modelResolved"] == "openai/gpt-6-astra"
         # Model selectors load asynchronously, retain saved values and persist choices.
+        previous_loads = len(catalog_loads)
         QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", config.data["deepgram_workers"][0]), Q_ARG("QVariant", "deepgram"))
-        QTest.qWait(150)
+        wait_catalog_open(previous_loads)
         assert [item["id"] for item in bridge.deepgramModels] == ["nova-3-general", "whisper-large"]
         model_box = find(root.contentItem(), "workerModelBox")
         language_box = find(root.contentItem(), "workerLanguageBox")
-        worker_dialog = find(root.contentItem(), "workerDialog")
+        worker_dialog = root.findChild(QObject, "workerDialog")
+        wait_for(lambda: model_box.property("count") >= 2 and language_box.property("count") >= 3
+                 and model_box.property("editText") == "nova-3", "Deepgram selector bindings did not settle")
         assert model_box.property("count") >= 2 and language_box.property("count") >= 3
         assert model_box.property("editText") == "nova-3"
         p = model_box.mapToScene(QPointF(model_box.width() - 16, model_box.height() / 2))
@@ -208,9 +242,11 @@ def main():
         click("workerSaveButton")
         assert config.data["deepgram_workers"][0]["model"] == "whisper-large", (config.data["deepgram_workers"][0], messages[-5:])
         assert config.data["deepgram_workers"][0]["language"] == "en"
+        previous_loads = len(catalog_loads)
         QMetaObject.invokeMethod(root, "editWorker", Q_ARG("QVariant", config.data["opencode_workers"][0]), Q_ARG("QVariant", "opencode"))
-        QTest.qWait(100)
+        wait_catalog_open(previous_loads)
         model_box = find(root.contentItem(), "workerModelBox")
+        wait_for(lambda: model_box.property("count") >= 3, "OpenCode selector bindings did not settle")
         assert model_box.property("count") >= 3
         model_box.setProperty("editText", "openai/gpt-6-sol")
         click("workerSaveButton")

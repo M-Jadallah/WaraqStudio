@@ -75,6 +75,8 @@ jobs:
 
       - name: Native UI interaction checks
         timeout-minutes: 5
+        env:
+          WARAQ_UI_CATALOG_DELAY_MS: "300"
         run: python -u tests/verify_ui.py
 
       - name: Petrol theme, layout and dialog matrix
