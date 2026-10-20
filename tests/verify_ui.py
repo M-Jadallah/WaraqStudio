@@ -1,5 +1,6 @@
 """Native Qt interaction checks; synthetic entries exist only in a temp test database."""
 import json
+import faulthandler
 import os
 import sys
 import tempfile
@@ -23,6 +24,10 @@ from waraq.store import Store
 
 
 def main():
+    # Hosted Windows rendering failures must produce diagnostics, not hang CI.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(90, repeat=True)
     QQuickStyle.setStyle("Basic")
     app = QApplication([])
     messages = []
@@ -375,6 +380,7 @@ def main():
     print("Native UI passed: 6 pages, range selection, reorder, enqueue, templates, auto-stop toggle, worker toggles, "
           "provider override, library organise/list/delete, stage pause, automatic-block re-check, scroll pinning, "
           "collapsible rail, UI scale, themes, 1060x720, no QML errors.")
+    faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == "__main__":

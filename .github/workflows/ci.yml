@@ -40,4 +40,7 @@ jobs:
         run: python -m pytest tests -v --tb=short
 
       - name: Native UI interaction checks
-        run: python tests/verify_ui.py
+        timeout-minutes: 5
+        env:
+          QT_QUICK_BACKEND: software
+        run: python -u tests/verify_ui.py
