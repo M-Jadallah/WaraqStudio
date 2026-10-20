@@ -43,4 +43,5 @@ jobs:
         timeout-minutes: 5
         env:
           QT_QUICK_BACKEND: software
+          QT_QPA_PLATFORM: offscreen
         run: python -u tests/verify_ui.py

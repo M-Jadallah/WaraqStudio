@@ -24,6 +24,9 @@ from waraq.store import Store
 
 
 def main():
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen" and os.environ.get("WINDIR"):
+        # The offscreen platform has no Windows system-font discovery.
+        os.environ.setdefault("QT_QPA_FONTDIR", str(Path(os.environ["WINDIR"]) / "Fonts"))
     # Hosted Windows rendering failures must produce diagnostics, not hang CI.
     if os.environ.get("GITHUB_ACTIONS") == "true":
         faulthandler.enable()
@@ -44,6 +47,9 @@ def main():
             "openai/gpt-6-astra", "openai/gpt-6-sol", "opencode/big-pickle"
         ]
         scheduler = Scheduler(store, config, keys)
+        # UI acceptance checks start/pause wiring, never real external work.
+        # Dispatch behavior is covered separately by the engine/service tests.
+        scheduler.tick = lambda: None
         bridge = Bridge(store, config, keys, scheduler)
         engine = QQmlApplicationEngine()
         engine.rootContext().setContextProperty("backend", bridge)
@@ -78,6 +84,7 @@ def main():
         def click(name):
             item = find(root.contentItem(), name)
             assert item is not None, name
+            assert item.isVisible(), "Refusing to click a hidden control: " + name
             p = item.mapToScene(item.boundingRect().center())
             QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(p.x()), int(p.y())))
             QTest.qWait(60)
@@ -121,8 +128,8 @@ def main():
         click("autoStopBox")
         assert not bridge._auto_stop
         # The prompt-template editor opens, lists every template and re-evaluates its bindings.
-        click("nav4")
-        assert root.property("page") == 4
+        click("nav5")
+        assert root.property("page") == 5
         assert find(root.contentItem(), "templatesButton") is not None
         click("templatesButton")
         editor, deadline = None, time.time() + 3
@@ -371,6 +378,9 @@ def main():
             root.grabWindow().save(str(evidence / "providers-dialog.png"))
         root.close()
         scheduler.shutdown()
+        if scheduler.thread is not None:
+            scheduler.thread.join(timeout=3)
+            assert not scheduler.thread.is_alive(), "UI test scheduler did not stop"
         bridge.timer.stop()
         engine.deleteLater()
         app.processEvents()
