@@ -1801,6 +1801,12 @@ ApplicationWindow {
             Layout.maximumWidth: railOpen ? 220 : 64
             Layout.fillHeight: true
             color: visualTheme.rail
+            Rectangle {
+                objectName: "railDivider"
+                anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                width: 1; color: visualTheme.line; visible: !win.dark
+                Accessible.ignored: true
+            }
             Behavior on Layout.preferredWidth { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
             ColumnLayout {
                 anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
@@ -1820,14 +1826,15 @@ ApplicationWindow {
                     Item { Layout.fillWidth: true }
                     ColumnLayout {
                         visible: railOpen; spacing: 0
-                        Text { text: "وَرَق"; color: visualTheme.railInk; font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; font.pixelSize: win.fs(28);  Layout.alignment: Qt.AlignRight }
-                        Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; text: "WARAQ STUDIO"; color: visualTheme.railActive; font.pixelSize: win.fs(10); font.letterSpacing: 2; Layout.alignment: Qt.AlignRight }
+                        Text { objectName: "railBrand"; text: "وَرَق"; color: visualTheme.railInk; font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; font.pixelSize: win.fs(28);  Layout.alignment: Qt.AlignRight }
+                        Text { objectName: "railBrandCaption"; font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; text: "WARAQ STUDIO"; color: visualTheme.railActive; font.pixelSize: win.fs(10); font.letterSpacing: 2; Layout.alignment: Qt.AlignRight }
                     }
-                    Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: !railOpen; text: "و"; color: visualTheme.railActive; font.pixelSize: win.fs(24);  }
+                    Text { objectName: "railMonogram"; font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: !railOpen; text: "و"; color: visualTheme.railActive; font.pixelSize: win.fs(24);  }
                 }
                 Repeater {
                     model: win.pageNames
                     delegate: Button {
+                        id: navButton
                         font.family: visualTheme.fontFamily
                         font.weight: visualTheme.fontWeight
                         required property string modelData
@@ -1840,10 +1847,17 @@ ApplicationWindow {
                         ToolTip.visible: !railOpen && hovered
                         ToolTip.delay: 400
                         ToolTip.text: modelData
-                        background: Rectangle { radius: 6; color: win.page === index ? visualTheme.railActive : (parent.hovered ? visualTheme.railHover : "transparent"); border.color: parent.activeFocus ? visualTheme.railInk : "transparent" }
+                        background: Rectangle {
+                            objectName: "navBackground" + index
+                            radius: 6
+                            color: win.page === index ? visualTheme.railActive : (navButton.hovered ? visualTheme.railHover : "transparent")
+                            border.width: !win.dark && navButton.activeFocus ? 2 : 1
+                            border.color: navButton.activeFocus ? (!win.dark && win.page === index ? visualTheme.railSelectedInk : visualTheme.railInk) : "transparent"
+                        }
                         contentItem: RowLayout {
                             spacing: 10
                             Text {
+                                objectName: "navLabel" + index
                                 font.family: visualTheme.fontFamily
                                 font.weight: visualTheme.fontWeight
                                 Layout.fillWidth: true; visible: railOpen
@@ -1851,14 +1865,18 @@ ApplicationWindow {
                                 color: win.page === index ? visualTheme.railSelectedInk : visualTheme.railInk
                                 horizontalAlignment: Text.AlignRight; elide: Text.ElideRight
                             }
-                            Image { source: "icons/" + win.pageIcons[index] + (win.page === index ? "-active" : "") + ".svg"; Layout.preferredWidth: 20; Layout.preferredHeight: 20; Layout.alignment: Qt.AlignHCenter }
+                            Image {
+                                objectName: "navIcon" + index
+                                source: "icons/" + win.pageIcons[index] + (win.dark ? (win.page === index ? "-active" : "") : (win.page === index ? "-rail-selected-light" : "-rail-light")) + ".svg"
+                                Layout.preferredWidth: 20; Layout.preferredHeight: 20; Layout.alignment: Qt.AlignHCenter
+                            }
                         }
                     }
                 }
                 Item { Layout.fillHeight: true }
                 Rectangle { Layout.fillWidth: true; height: 1; color: visualTheme.line; visible: railOpen }
-                Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: railOpen; text: "سير عملك، تحت سيطرتك"; color: visualTheme.railMuted; font.pixelSize: win.fs(12); Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight; Layout.topMargin: 10 }
-                Text { font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: railOpen; text: "نسخة محلية  ·  " + backend.version; color: visualTheme.railMuted; font.pixelSize: win.fs(11); Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 4 }
+                Text { objectName: "railTagline"; font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: railOpen; text: "سير عملك، تحت سيطرتك"; color: visualTheme.railMuted; font.pixelSize: win.fs(12); Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight; Layout.topMargin: 10 }
+                Text { objectName: "railVersion"; font.family: visualTheme.fontFamily; font.weight: visualTheme.fontWeight; visible: railOpen; text: "نسخة محلية  ·  " + backend.version; color: visualTheme.railMuted; font.pixelSize: win.fs(11); Layout.alignment: Qt.AlignRight; Layout.bottomMargin: 4 }
             }
         }
     }

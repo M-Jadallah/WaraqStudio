@@ -91,6 +91,10 @@ jobs:
         timeout-minutes: 3
         run: python tests/verify_queue_stages.py
 
+      - name: Light navigation rail, focus and theme parity
+        timeout-minutes: 3
+        run: python tests/verify_navigation_rail.py
+
       - name: Native account management and quota UI checks
         run: python tests/verify_accounts_ui.py
 
