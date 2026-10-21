@@ -7,7 +7,10 @@ QtObject {
     readonly property string fontFamily: "Segoe UI"
     readonly property string monoFontFamily: "Consolas"
     readonly property int fontWeight: Font.Bold
-    readonly property real stageTintOpacity: 0.08
+    readonly property color stageDownloadCompleted: dark ? "#2AA8A6" : "#0B7478"
+    readonly property color stageTranscriptCompleted: dark ? "#5C9DCF" : "#1B62A0"
+    readonly property color stageWordCompleted: dark ? "#BA8C44" : "#815A1F"
+    readonly property color stageCompletedInk: dark ? "#06272B" : "#FFFFFF"
     readonly property color bg: dark ? "#0C242A" : "#F2F7F7"
     readonly property color panel: dark ? "#14363E" : "#FFFFFF"
     readonly property color inset: dark ? "#0F2E35" : "#E5F0F1"

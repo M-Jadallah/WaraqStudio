@@ -93,6 +93,32 @@ def main():
             root.setProperty("toastText", "")
             QTest.qWait(180)
 
+        def assert_stage_appearance(job_id, theme):
+            """The real queue and open dialog must agree after backend refreshes."""
+            job = bridge.jobById(job_id)
+            fills = dict(zip(("download", "deepgram", "opencode"),
+                             ("#2aa8a6", "#5c9dcf", "#ba8c44") if theme == "dark"
+                             else ("#0b7478", "#1b62a0", "#815a1f")))
+            for step in job["steps"]:
+                table = find("queueStage-" + job_id + "-" + step["name"])
+                dialog = find("jobDialogStage-" + step["name"])
+                for badge in (table, dialog):
+                    completed = step["status"] == "completed"
+                    assert badge.property("status") == step["status"]
+                    assert badge.property("completed") == completed
+                    background = badge.property("backgroundColor")
+                    assert badge.property("color") == background
+                    if completed:
+                        assert background.alpha() == 255
+                        assert background.name() == fills[step["name"]]
+                        assert badge.property("foregroundColor").name() == ("#06272b" if theme == "dark" else "#ffffff")
+                    else:
+                        assert background.alpha() == 0, (step, background.name())
+                        assert badge.property("outlineColor").alpha() > 0
+                for name in ("completed", "foregroundColor", "backgroundColor", "completedFillColor", "outlineColor", "stageIconSource", "statusIconSource"):
+                    assert table.property(name) == dialog.property(name), (step, name)
+            return job
+
         popup = find("jobDialog")
         actions = ("OpenWord", "OpenFolder", "Retry", "Cancel", "NewWord", "NewTranscript")
         original = bridge.jobById(ident)
@@ -229,28 +255,45 @@ def main():
         QTest.qWait(60)
         assert "سطر مضاف أثناء القراءة" in text.property("text")
         assert abs(log_flick.property("contentY") - before) <= 5, (before, log_flick.property("contentY"))
-        # Healthy screenshots use actual store stage state and local artifacts.
-        root.setWidth(1380); root.setHeight(900)
-        tune("dark", 1.)
-        store.set_stage(ident, "deepgram", "running", progress=63)
-        bridge.refresh()
-        root.setProperty("selectedJob", bridge.jobById(ident))
-        find("jobDialogBodyScroll").property("contentItem").setProperty("contentY", 0)
-        QTest.qWait(80)
-        if evidence:
-            assert root.grabWindow().save(str(evidence / "task-1380-900-dark-running-63.png"))
+        # Keep the dialog open across real store changes: assigning selectedJob
+        # after each refresh would conceal broken backend-to-dialog updates.
         output = home / "lesson.docx"
         output.write_bytes(b"local test artifact")
         store.artifact(ident, "document", str(output))
-        store.set_stage(ident, "deepgram", "completed")
-        store.set_stage(ident, "opencode", "completed")
-        bridge.refresh()
         root.setProperty("selectedJob", bridge.jobById(ident))
-        QTest.qWait(80)
-        assert not find("jobDialogProgressRow").isVisible()
-        assert find("jobDialogOpenWord").isEnabled()
-        if evidence:
-            assert root.grabWindow().save(str(evidence / "task-1380-900-dark-completed.png"))
+        for theme, (width, height, scale) in itertools.product(("dark", "light"), ((1380, 900, 1.), (1060, 720, 1.4))):
+            root.setWidth(width); root.setHeight(height)
+            tune(theme, scale)
+            for status in ("running", "skipped", "completed"):
+                store.set_stage(ident, "deepgram", "running" if status == "running" else "completed", progress=63 if status == "running" else -1)
+                store.set_stage(ident, "opencode", "pending" if status == "running" else status)
+                bridge.refresh()
+                QTest.qWait(80)
+                assert_stage_appearance(ident, theme)
+                assert find("jobDialogProgressRow").isVisible() == (status == "running")
+                assert find("jobDialogOpenWord").isEnabled()
+                if evidence:
+                    stem = f"{width}-{height}-{theme}-{round(scale * 100)}-{status}"
+                    assert QMetaObject.invokeMethod(popup, "close")
+                    QTest.qWait(40)
+                    assert root.grabWindow().save(str(evidence / ("table-" + stem + ".png")))
+                    assert QMetaObject.invokeMethod(popup, "open")
+                    find("jobDialogBodyScroll").property("contentItem").setProperty("contentY", 0)
+                    QTest.qWait(80)
+                    assert root.grabWindow().save(str(evidence / ("task-" + stem + ".png")))
+
+        # TXT import's skipped source stages stay hidden as Word becomes complete.
+        root.setProperty("selectedJob", bridge.jobById(local_id))
+        for status in ("pending", "completed"):
+            store.set_stage(local_id, "opencode", status)
+            bridge.refresh()
+            QTest.qWait(50)
+            local = assert_stage_appearance(local_id, "light")
+            assert [step["name"] for step in local["steps"]] == ["opencode"]
+            for name in ("download", "deepgram"):
+                assert store.get(local_id)["stages"][name]["status"] == "skipped"
+                assert root.findChild(QObject, "jobDialogStage-" + name) is None
+                assert root.findChild(QObject, "queueStage-" + local_id + "-" + name) is None
         QTest.keyClick(root, Qt.Key_Escape)
         root.close()
         harness.shutdown_and_join()
@@ -261,7 +304,7 @@ def main():
         store.db.close()
     errors = [message for message in messages if message.startswith("file:") or any(term in message.lower() for term in ("binding loop", "failed to load", "referenceerror", "typeerror", "recursive rearrange"))]
     assert not errors, errors
-    print(f"Task detail acceptance passed: {cases} size/theme/scale layouts, 32 action scenarios (192 enabled checks), 8 progress states, TXT-only steps, full errors, reachable actions, focus and log retention.")
+    print(f"Task detail acceptance passed: {cases} size/theme/scale layouts, 32 action scenarios (192 enabled checks), 8 progress states, live queue/dialog appearance in both themes, skipped/completed distinction, TXT-only steps, full errors, reachable actions, focus and log retention.")
 
 
 if __name__ == "__main__":
