@@ -288,49 +288,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Existing tags are immutable, including annotated tags (peeled SHA).
-          # A transport/auth failure must never be mistaken for a missing tag.
-          check_tag() {
-            local refs status resolved
-            if refs="$(git ls-remote --exit-code --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"; then
-              resolved="$(printf '%s\n' "$refs" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
-              if [[ -z "$resolved" ]]; then
-                resolved="$(printf '%s\n' "$refs" | awk 'NR == 1 {print $1}')"
-              fi
-              if [[ "$resolved" != "$GITHUB_SHA" ]]; then
-                echo "::error::Refusing to publish: tag $TAG points to $resolved, expected $GITHUB_SHA. Existing tags will not be changed."
-                exit 1
-              fi
-              return 0
-            else
-              status=$?
-              if [[ "$status" != 2 ]]; then
-                echo "::error::Could not verify remote tag $TAG (git exit $status)."
-                exit "$status"
-              fi
-              return 2
-            fi
-          }
-          if check_tag; then
-            echo "Verified immutable tag $TAG at $GITHUB_SHA."
-          else
-            # This branch runs only for an absent tag; all other errors exit.
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
-          fi
-          check_tag
-          if gh release view "$TAG" --json id --jq .id >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "WaraqStudio $TAG" --notes-file RELEASE_NOTES.md
-          else
-            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" \
-              --title "WaraqStudio $TAG" --notes-file RELEASE_NOTES.md
-          fi
-          # Recheck immediately before attaching assets. Never move/delete tags.
-          check_tag
-          gh release upload "$TAG" dist/*.zip dist/*-setup.exe dist/*.sha256 \
-            dist/SHA256SUMS "dist/WaraqStudio-$TAG-provenance.json" --clobber
+        run: bash scripts/publish_release.sh
 
       - name: Upload build as fallback artifact
         # The release assets above ARE the deliverable, and release storage is
