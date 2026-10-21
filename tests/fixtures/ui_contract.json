@@ -7,7 +7,7 @@
     "settings.template.json": "09bc2d20d9461d4e743b53cddd0686923750d85ab26b938c87b3466cfa0127d0",
     "waraq/__init__.py": "f02fe3feb3e90962b79964eb8a0cbb0085790ed6174f4763f15e065c004f9a51",
     "waraq/app_update.py": "b6d244c2497aa2c7eb84694c04bf7b3b632faddc51c26a471d884ccba7551fcb",
-    "waraq/bridge.py": "c6ebc92210c5c45820534eda13c14f6ef8ab967c53251a22686f600afac25c72",
+    "waraq/bridge.py": "4e4f6c50029e0c0fa3bb158840db1ede27ad6f09ba5c9e56d408cae3e89e947b",
     "waraq/catalog.py": "d17e04d9dd7195fa2a9fbcdac75efbd30b301b77c4123cc289aadecfc195dada",
     "waraq/config.py": "af9cf65ea64003abd49f4cd985cfd30bccc033cb464a7737786c92e775dfc590",
     "waraq/embedded_accounts.py": "98162e5efa55adf6fec912e581d6c10b37322724fd0b181bbbad2efdc11e6ca6",
@@ -363,5 +363,10 @@
       "reason": "Existing ownership-checked manual recheck now resets account-service recovery latch, including empty account id."
     }
   },
-  "approved_change_base": "ff22d55f1d1bcc24969360b7974a1c0b54692377"
+  "approved_change_base": "ff22d55f1d1bcc24969360b7974a1c0b54692377",
+  "requested_stage_display_change": {
+    "git_reference": "570a69f20f71a857facb88174a74d590f6576183",
+    "previous_bridge_sha256": "c6ebc92210c5c45820534eda13c14f6ef8ab967c53251a22686f600afac25c72",
+    "reason": "Filter displayed job steps by the saved requested stages and local source applicability; stage execution, stored records and UI actions are unchanged."
+  }
 }

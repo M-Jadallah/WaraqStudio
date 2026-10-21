@@ -4,6 +4,8 @@ The fixture was recorded from 066c67b (current main before integration) before a
 deliberately when a future task intentionally changes a backend/UI contract.
 The approved idle fix records six explicit exceptions and their previous hashes;
 all other protected modules, QML controller functions and actions remain guarded.
+The requested-stage display change separately records the previous Bridge hash;
+only its job-step projection changes, with execution and UI actions preserved.
 """
 import hashlib
 import json

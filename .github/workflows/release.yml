@@ -87,6 +87,10 @@ jobs:
         timeout-minutes: 2
         run: python tests/verify_stage_badges.py
 
+      - name: Requested stages and fixed queue columns
+        timeout-minutes: 3
+        run: python tests/verify_queue_stages.py
+
       - name: Native account management and quota UI checks
         run: python tests/verify_accounts_ui.py
 

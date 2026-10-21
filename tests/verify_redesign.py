@@ -130,12 +130,16 @@ def main():
             badges = [find("queueStage-" + job["id"] + "-" + step["name"]) for step in job["steps"]]
             assert all(badge.isVisible() for badge in badges)
             for previous, badge in zip(badges, badges[1:]):
-                assert abs(badge.y() - previous.y()) < 1 and badge.x() < previous.x(), "Stages stay on one RTL line"
+                a = previous.mapToItem(flow, previous.boundingRect().center())
+                b = badge.mapToItem(flow, badge.boundingRect().center())
+                assert abs(b.y() - a.y()) < 1 and b.x() < a.x(), "Stages stay on one RTL line"
             row = find("queueRow-" + job["id"])
             for badge in badges:
                 point = badge.mapToItem(row, badge.boundingRect().bottomRight())
                 assert point.y() <= row.height() + 1, (row.height(), point.y(), [(v.objectName(), v.property("implicitHeight"), v.property("height"), v.property("y")) for v in (flow, target, row)])
-                assert badge.x() + badge.width() <= flow.width() + 1, (badge.x(), badge.width(), flow.width())
+                left = badge.mapToItem(flow, badge.boundingRect().topLeft()).x()
+                right = badge.mapToItem(flow, badge.boundingRect().bottomRight()).x()
+                assert left >= -1 and right <= flow.width() + 1, (left, right, flow.width())
             if root.width() == 1060 and root.height() == 720 and abs(root.property("uiScale") - 1.4) < .01:
                 view = find("jobsList")
                 assert view.height() >= row.height(), (view.height(), row.height(), root.property("railOpen"))
@@ -326,8 +330,12 @@ def main():
         view.setProperty("contentY", max(0, view.property("contentHeight") - view.property("height")))
         QTest.qWait(80)
         local_flow = find("queueStages-" + imported_id)
-        badges = [child.objectName() for child in local_flow.childItems() if child.objectName().startswith("queueStage-")]
+        def descendant_badges(item):
+            return ([item.objectName()] if item.objectName().startswith("queueStage-") else []) + [name for child in item.childItems() for name in descendant_badges(child)]
+        badges = descendant_badges(local_flow)
         assert badges == ["queueStage-" + imported_id + "-opencode"], badges
+        word = find(badges[0])
+        assert word.mapToItem(local_flow, word.boundingRect().center()).x() < local_flow.width() / 3, "Word keeps its left slot for TXT imports"
         assert_bold_text()
         save("dark-word-only-import")
 

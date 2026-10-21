@@ -601,11 +601,25 @@ ApplicationWindow {
                     readonly property bool miniStages: win.contentUnits < 1000
                     readonly property real statusWidth: Math.round((miniStages ? 86 : 118) * win.uiScale)
                     readonly property real progressWidth: Math.round((miniStages ? 54 : 76) * win.uiScale)
-                    readonly property real stagesWidth: Math.round((miniStages ? 138 : 282) * win.uiScale)
+                    readonly property real stageGap: Math.round(3 * win.uiScale)
+                    readonly property var stageColumns: [
+                        {name: "download", label: "التنزيل", width: downloadMetric.implicitWidth},
+                        {name: "deepgram", label: "التفريغ", width: transcriptMetric.implicitWidth},
+                        {name: "opencode", label: "ملف Word", width: wordMetric.implicitWidth}
+                    ]
+                    readonly property real stageHeight: Math.max(downloadMetric.implicitHeight, transcriptMetric.implicitHeight, wordMetric.implicitHeight)
+                    readonly property real stagesWidth: Math.max(Math.round((miniStages ? 138 : 282) * win.uiScale), downloadMetric.implicitWidth + transcriptMetric.implicitWidth + wordMetric.implicitWidth + 2 * stageGap)
                     readonly property real actionWidth: Math.round(52 * win.uiScale)
                     readonly property real selectionWidth: Math.round(28 * win.uiScale)
                     readonly property real columnGap: Math.round(6 * win.uiScale)
                     spacing: Math.round(8 * win.uiScale)
+                    // Measure once for every row; missing stages keep their empty column.
+                    Item {
+                        visible: false
+                        StageBadge { id: downloadMetric; theme: visualTheme; compact: true; mini: operationsPage.miniStages; step: ({name: "download", label: "التنزيل", status: "pending"}); activeFocusOnTab: false; Accessible.ignored: true }
+                        StageBadge { id: transcriptMetric; theme: visualTheme; compact: true; mini: operationsPage.miniStages; step: ({name: "deepgram", label: "التفريغ", status: "pending"}); activeFocusOnTab: false; Accessible.ignored: true }
+                        StageBadge { id: wordMetric; theme: visualTheme; compact: true; mini: operationsPage.miniStages; step: ({name: "opencode", label: "ملف Word", status: "pending"}); activeFocusOnTab: false; Accessible.ignored: true }
+                    }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 8
                         Repeater {
@@ -786,16 +800,27 @@ ApplicationWindow {
                                                 objectName: "queueStages-" + row.id
                                                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                                 layoutDirection: Qt.RightToLeft
-                                                spacing: Math.round(3 * win.uiScale)
+                                                spacing: operationsPage.stageGap
                                                 Repeater {
-                                                    model: row.steps
-                                                    delegate: StageBadge {
+                                                    model: operationsPage.stageColumns
+                                                    delegate: Item {
+                                                        id: stageSlot
                                                         required property var modelData
-                                                        objectName: "queueStage-" + row.id + "-" + modelData.name
-                                                        theme: visualTheme
-                                                        step: modelData
-                                                        compact: true
-                                                        mini: operationsPage.miniStages
+                                                        readonly property var stageStep: (row.steps || []).find(function(step) { return step.name === stageSlot.modelData.name }) || null
+                                                        objectName: "queueStageSlot-" + row.id + "-" + modelData.name
+                                                        width: modelData.width
+                                                        height: operationsPage.stageHeight
+                                                        Loader {
+                                                            anchors.fill: parent
+                                                            active: stageSlot.stageStep !== null
+                                                            sourceComponent: StageBadge {
+                                                                objectName: "queueStage-" + row.id + "-" + stageSlot.modelData.name
+                                                                theme: visualTheme
+                                                                step: stageSlot.stageStep || ({name: stageSlot.modelData.name, label: stageSlot.modelData.label, status: "pending"})
+                                                                compact: true
+                                                                mini: operationsPage.miniStages
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }

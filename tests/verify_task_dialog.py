@@ -93,9 +93,22 @@ def main():
             root.setProperty("toastText", "")
             QTest.qWait(180)
 
+        def stage_names(prefix):
+            pending = [root.contentItem()]
+            names = set()
+            while pending:
+                item = pending.pop()
+                if item.objectName().startswith(prefix):
+                    names.add(item.objectName()[len(prefix):])
+                pending.extend(item.childItems())
+            return names
+
         def assert_stage_appearance(job_id, theme):
             """The real queue and open dialog must agree after backend refreshes."""
             job = bridge.jobById(job_id)
+            expected = {step["name"] for step in job["steps"]}
+            assert stage_names("queueStage-" + job_id + "-") == expected
+            assert stage_names("jobDialogStage-") == expected
             fills = dict(zip(("download", "deepgram", "opencode"),
                              ("#2aa8a6", "#5c9dcf", "#ba8c44") if theme == "dark"
                              else ("#0b7478", "#1b62a0", "#815a1f")))
@@ -234,6 +247,7 @@ def main():
         QTest.qWait(50)
         assert [step["name"] for step in bridge.jobById(local_id)["steps"]] == ["opencode"]
         assert find("jobDialogStage-opencode").isVisible()
+        assert stage_names("jobDialogStage-") == {"opencode"}
         assert not root.findChild(QObject, "jobDialogStage-download")
         assert not root.findChild(QObject, "jobDialogStage-deepgram")
 

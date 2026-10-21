@@ -961,6 +961,13 @@ class Bridge(QObject):
         self._jobs_retry_deadlines = {}
         for j in jobs:
             stages = j["stages"]
+            input_path = j.get("input_path", "")
+            local_txt = str(input_path).lower().endswith(".txt")
+            # Display the saved request, including requested stages later skipped
+            # or cancelled; local inputs already supply the preceding outputs.
+            requested_stages = [name for name in STAGES if j["config"][name + "_enabled"]
+                                and not (input_path and name == "download")
+                                and not (local_txt and name == "deepgram")]
             if all(s["status"] in ("completed", "skipped") for s in stages.values()):
                 state, current = "completed", "opencode"
             else:
@@ -976,7 +983,7 @@ class Bridge(QObject):
                 "retryAt": self.retry_at(retry) if retry > now else "",
                 "template": j["config"].get("template_name", ""),
                 "steps": [{"name": name, "label": STAGE_LABELS[name], "status": stages[name]["status"]}
-                          for name in (("opencode",) if str(j.get("input_path", "")).lower().endswith(".txt") else STAGES)],
+                          for name in requested_stages],
             })
         return result
 

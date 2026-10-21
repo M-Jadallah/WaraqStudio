@@ -11,7 +11,7 @@ import requests
 from qt_test_support import dispose_bridge
 
 from waraq import app_update
-from waraq.bridge import Bridge
+from waraq.bridge import Bridge, STAGE_LABELS
 from waraq.config import Config
 from waraq.scheduler import Scheduler
 from waraq.store import Store
@@ -303,6 +303,85 @@ def test_txt_queue_display_exposes_word_only(bridge_env, tmp_path):
     bridge.refresh()
     assert [step["name"] for step in bridge.jobs[0]["steps"]] == ["opencode"]
     assert set(store.jobs()[0]["stages"]) == {"download", "deepgram", "opencode"}
+
+
+@pytest.mark.parametrize("preset,expected", [
+    ("full", ["download", "deepgram", "opencode"]),
+    ("transcript", ["download", "deepgram"]),
+    ("download", ["download"]),
+])
+def test_source_queue_steps_follow_saved_preset(bridge_env, preset, expected):
+    app, bridge, store, cfg, scheduler, secrets = bridge_env
+    bridge._source = [{"video_id": "lesson", "title": "درس", "position": 1,
+                       "selected": True, "available": True}]
+    bridge.enqueue(preset)
+    assert len(bridge.jobs) == 1
+    assert bridge.jobs[0]["steps"] == [
+        {"name": name, "label": STAGE_LABELS[name], "status": "pending"} for name in expected]
+
+    # Settings edited after enqueue must not rewrite an existing job's request,
+    # even when a later database write invalidates the cached projection.
+    cfg.save({name + "_enabled": name not in expected for name in STAGE_LABELS})
+    ident = bridge.jobs[0]["id"]
+    store.set_stage(ident, "download", "running")
+    bridge.refresh()
+    assert [step["name"] for step in bridge.jobs[0]["steps"]] == expected
+
+
+@pytest.mark.parametrize("enabled,expected", [
+    ((True, True, True), ["download", "deepgram", "opencode"]),
+    ((True, True, False), ["download", "deepgram"]),
+    ((True, False, False), ["download"]),
+])
+def test_custom_source_queue_steps_follow_enabled_flags(bridge_env, enabled, expected):
+    app, bridge, store, cfg, scheduler, secrets = bridge_env
+    cfg.save(dict(zip((name + "_enabled" for name in STAGE_LABELS), enabled)))
+    bridge._source = [{"video_id": "custom", "title": "درس", "position": 1, "selected": True}]
+    bridge.enqueue("custom")
+    assert len(bridge.jobs) == 1
+    assert [step["name"] for step in bridge.jobs[0]["steps"]] == expected
+
+
+@pytest.mark.parametrize("suffix,enabled,expected", [
+    (".mp3", (True, True, True), ["deepgram", "opencode"]),
+    (".wav", (False, True, False), ["deepgram"]),
+    (".m4a", (True, False, True), ["opencode"]),
+    (".TXT", (True, True, True), ["opencode"]),
+    (".tXt", (True, False, True), ["opencode"]),
+    (".txt", (True, True, False), []),
+])
+def test_local_queue_steps_require_enabled_and_applicable_stage(bridge_env, tmp_path, suffix, enabled, expected):
+    app, bridge, store, cfg, scheduler, secrets = bridge_env
+    path = tmp_path / ("lesson" + suffix)
+    path.write_text("نص الدرس", encoding="utf-8")
+    saved = cfg.snapshot() | dict(zip((name + "_enabled" for name in STAGE_LABELS), enabled))
+    ident = store.add([{"video_id": "local", "title": "درس", "position": 1}], saved, input_path=str(path))[0]
+    bridge.refresh()
+    assert [step["name"] for step in bridge.jobs[0]["steps"]] == expected
+    assert set(store.get(ident)["stages"]) == set(STAGE_LABELS)
+
+
+@pytest.mark.parametrize("status", ["skipped", "cancelled", "failed"])
+def test_persisted_queue_steps_follow_request_independently_of_status(bridge_env, tmp_path, status):
+    app, bridge, store, cfg, scheduler, secrets = bridge_env
+    # A separate connection represents historical jobs persisted before this
+    # bridge sees them, without changing any stage or job storage contract.
+    saved = cfg.snapshot() | {"opencode_enabled": False}
+    historical = Store(tmp_path / "tasks.db")
+    try:
+        ident = historical.add([{"video_id": "old", "title": "قديم", "position": 1}], saved)[0]
+        historical.set_stage(ident, "download", "completed")
+        historical.set_stage(ident, "deepgram", status)
+        historical.set_stage(ident, "opencode", "failed")
+    finally:
+        historical.db.close()
+    cfg.save({"download_enabled": False, "deepgram_enabled": False, "opencode_enabled": True})
+    bridge.refresh()
+    assert bridge.jobs[0]["steps"] == [
+        {"name": "download", "label": STAGE_LABELS["download"], "status": "completed"},
+        {"name": "deepgram", "label": STAGE_LABELS["deepgram"], "status": status},
+    ]
+    assert set(store.get(ident)["stages"]) == set(STAGE_LABELS)
 
 
 def test_packaged_version_stamp(monkeypatch, tmp_path):
