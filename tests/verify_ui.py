@@ -529,8 +529,8 @@ def main():
                 assert job["config"]["template_name"] == "خطب"
                 managed = Path(job["transcript"])
                 assert managed.parent == Path(job["folder"])
-                assert Path(job["folder"]).parent == selected_output
-                assert job["config"]["output_root"] == str(selected_output)
+                assert Path(job["folder"]).parent == selected_output.resolve(), (job["folder"], str(selected_output), str(selected_output.resolve()))
+                assert Path(job["config"]["output_root"]) == selected_output.resolve()
                 assert managed != source_file and managed.read_bytes() == source_file.read_bytes()
                 assert [job["stages"][stage]["status"] for stage in ("download", "deepgram", "opencode")] == ["skipped", "skipped", "pending"]
             assert root.property("page") == 0

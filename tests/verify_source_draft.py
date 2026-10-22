@@ -211,7 +211,7 @@ def main():
             assert root.property("page") == 0
             assert len(store.jobs()) == 1
             assert Path(store.jobs()[0]["transcript"]).read_bytes() == original_bytes
-            assert store.jobs()[0]["config"]["output_root"] == str(chosen_output)
+            assert Path(store.jobs()[0]["config"]["output_root"]) == chosen_output.resolve()
             assert config.data["output_root"] == original_output
             root.setProperty("page", 1)
             QTest.qWait(50)

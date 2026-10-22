@@ -88,6 +88,26 @@ def test_draft_begins_empty_despite_saved_defaults(source_draft):
     assert env.bridge.metaObject().indexOfProperty("sourceDraft") >= 0
 
 
+def test_batch_resolves_output_alias_without_changing_general_default(source_draft, tmp_path):
+    # Native Windows runners may expose TEMP under an 8.3 alias. Compare the
+    # actual directory, not the spelling used by the file picker/draft.
+    env = source_draft
+    draft = env.draft
+    original = env.config.data["output_root"]
+    chosen = str(env.output.parent) + "/./" + env.output.name
+    draft.setKind("transcript")
+    draft.setTemplateId("default")
+    draft.setFolderId(env.folder)
+    draft.setOutputRoot(chosen)
+    draft.stagePaths([str(transcript(tmp_path))], "transcript")
+    assert draft.outputRoot == chosen
+    assert draft.enqueue()["ok"]
+    job = env.store.jobs()[0]
+    assert Path(job["folder"]).parent == env.output.resolve()
+    assert Path(job["config"]["output_root"]) == env.output.resolve()
+    assert env.config.data["output_root"] == original
+
+
 @pytest.mark.parametrize("missing", ["templateId", "folderId", "outputRoot"])
 def test_each_results_field_is_mandatory_before_any_batch(source_draft, tmp_path, missing):
     env = source_draft
