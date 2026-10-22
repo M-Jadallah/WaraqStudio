@@ -249,6 +249,13 @@ def main():
                         flick.setProperty("contentY", 0)
                         QTest.qWait(40)
                         assert_tools(kind)
+                        for name in ("sourceYoutubeTab", "sourceLocalTab", "sourceAudioTab"):
+                            button = control(name)
+                            label = button.property("contentItem")
+                            needed = label.property("implicitWidth") + round(22 * scale)
+                            assert button.width() + 1 >= needed, (
+                                "Input-kind label is elided", name, width, scale, collapsed,
+                                button.width(), needed)
                         assert flick.property("contentWidth") <= flick.property("width") + 1, (width, scale, collapsed)
                         settings_card = control("sourceSettingsCard")
                         input_card = control("sourceInputCard")
@@ -283,6 +290,25 @@ def main():
             root.setHeight(720)
             bridge.sourceDraft.setKind("transcript")
             QTest.qWait(80)
+            # A real rejected confirmation must preserve the draft and include
+            # its long error in the scroll extent, so the footer stays reachable.
+            error_text = "تعذر إضافة الملفات المحددة. " * 180
+            with patch.object(store, "add", side_effect=RuntimeError(error_text)):
+                rejected = bridge.sourceDraft.enqueue()
+            assert not rejected["ok"] and bridge.sourceDraft.itemCount == 1
+            assert len(store.jobs()) == 1
+            root.setProperty("toastText", "")
+            control("templateBox").forceActiveFocus()
+            QTest.qWait(80)
+            footer = control("enqueueSourceButton")
+            footer.forceActiveFocus()
+            QTest.qWait(80)
+            top = scroll.mapToScene(QPointF(0, 0)).y()
+            footer_top = footer.mapToScene(QPointF(0, 0)).y()
+            assert top - 1 <= footer_top and footer_top + footer.height() <= top + scroll.height() + 1, (
+                "Long batch failure hid the focused footer", footer_top, footer.height(), top, scroll.height())
+            bridge.sourceDraft.setTemplateId(bridge.sourceDraft.templateId)
+            QTest.qWait(40)
             template = control("templateBox")
             template.forceActiveFocus()
             QTest.qWait(80)

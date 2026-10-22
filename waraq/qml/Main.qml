@@ -877,7 +877,7 @@ ApplicationWindow {
                         layoutDirection: Qt.RightToLeft
                         ColumnLayout {
                             id: sourceOptionsPanel
-                            width: win.contentUnits >= 850 ? 400 : sourcePage.width
+                            width: win.contentUnits >= 850 ? 400 * win.uiScale : sourcePage.width
                             spacing: 16
                             Box {
                                 objectName: "sourceSettingsCard"
@@ -956,7 +956,7 @@ ApplicationWindow {
                                     anchors.fill: parent; anchors.margins: 16; spacing: 12
                                     LabelText { text: "٢  نوع المدخل"; font.pixelSize: win.fs(19); Layout.fillWidth: true }
                                     GridLayout {
-                                        Layout.fillWidth: true; columns: width >= 350 ? 3 : 1; columnSpacing: 8; rowSpacing: 8; layoutDirection: Qt.RightToLeft
+                                        Layout.fillWidth: true; columns: width / win.uiScale >= 350 ? 3 : 1; columnSpacing: 8; rowSpacing: 8; layoutDirection: Qt.RightToLeft
                                         AppButton { objectName: "sourceYoutubeTab"; text: "رابط YouTube"; primary: win.sourceTab === 0; Layout.fillWidth: true; Layout.minimumWidth: 0; Accessible.role: Accessible.RadioButton; Accessible.checkable: true; Accessible.checked: win.sourceTab === 0; onClicked: { win.sourceDraft.setKind("youtube"); win.sourceSearch = "" } }
                                         AppButton { objectName: "sourceLocalTab"; text: "تفريغ TXT"; primary: win.sourceTab === 1; Layout.fillWidth: true; Layout.minimumWidth: 0; Accessible.role: Accessible.RadioButton; Accessible.checkable: true; Accessible.checked: win.sourceTab === 1; onClicked: { win.sourceDraft.setKind("transcript"); win.sourceSearch = "" } }
                                         AppButton { objectName: "sourceAudioTab"; text: "ملف صوتي"; primary: win.sourceTab === 2; Layout.fillWidth: true; Layout.minimumWidth: 0; Accessible.role: Accessible.RadioButton; Accessible.checkable: true; Accessible.checked: win.sourceTab === 2; onClicked: { win.sourceDraft.setKind("audio"); win.sourceSearch = "" } }
@@ -1010,7 +1010,7 @@ ApplicationWindow {
                         ColumnLayout {
                             id: sourceReviewPanel
                             width: win.contentUnits >= 850 ? Math.max(0, sourcePage.width - sourceOptionsPanel.width - 16) : sourcePage.width
-                            height: Math.max(510 * win.uiScale, sourceScroll.availableHeight - 4)
+                            height: Math.max(implicitHeight, 510 * win.uiScale, sourceScroll.availableHeight - 4)
                             spacing: 12
                             RowLayout {
                                 Layout.fillWidth: true
