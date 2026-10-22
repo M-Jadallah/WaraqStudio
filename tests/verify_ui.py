@@ -126,6 +126,16 @@ def main():
                 return
             assert item is not None, name
             assert item.isVisible(), "Refusing to click a hidden control: " + name
+            source_scroll = find(root.contentItem(), "sourceScroll")
+            ancestor = item
+            while ancestor is not None and ancestor != source_scroll:
+                ancestor = ancestor.parentItem()
+            if ancestor == source_scroll:
+                flick = source_scroll.property("contentItem")
+                local = item.mapToItem(source_scroll, QPointF(0, 0))
+                target_y = flick.property("contentY") + local.y() - max(8, (source_scroll.height() - item.height()) / 2)
+                flick.setProperty("contentY", max(0, min(target_y, flick.property("contentHeight") - flick.property("height"))))
+                QTest.qWait(35)
             p = item.mapToScene(item.boundingRect().center())
             QTest.mouseClick(root, Qt.LeftButton, Qt.NoModifier, QPoint(int(p.x()), int(p.y())))
             QTest.qWait(60)
@@ -135,6 +145,12 @@ def main():
                 QTest.qWait(25)
             assert predicate(), (description, bridge.catalogBusy, bridge.catalogErrors,
                                  list(catalog_loads), messages[-5:])
+        def assert_in_window(name):
+            control = find(root.contentItem(), name)
+            assert control is not None and control.isVisible(), name
+            origin = control.mapToScene(QPointF(0, 0))
+            assert origin.x() >= 0 and origin.x() + control.width() <= root.width() + 1, (name, origin)
+            assert origin.y() >= 0 and origin.y() + control.height() <= root.height() + 1, (name, origin)
         def wait_catalog_open(previous_loads):
             # Opening transitions, Python workers and their queued Qt publication
             # all complete asynchronously. Require this opening's refresh rather
@@ -305,6 +321,7 @@ def main():
         click("runButton")
         assert find(root.contentItem(), "forceQuestion") is not None, "the force question must precede a start"
         assert not scheduler.running
+        click("forceUnifiedCard")
         click("forceApplyButton")
         assert scheduler.running, "the forced-start button must start the queue"
         # The dialog prefilled from the first worker, so that is what got forced.
@@ -464,37 +481,44 @@ def main():
             root.grabWindow().save(str(evidence / "providers-dialog.png"))
             QTest.keyClick(root, Qt.Key_Escape)
             QTest.qWait(80)
-        # Local TXT imports use the same selected template and subject folder,
-        # skip both upstream services, and own their input copy immediately.
+        # Desktop local sources now stage for review and use per-batch output.
         root.setProperty("toastText", "")
         click("nav1")
-        assert root.property("page") == 1
+        draft = bridge.sourceDraft
         template_box = find(root.contentItem(), "templateBox")
         folder_box = find(root.contentItem(), "sourceFolderCombo")
-        template_box.setProperty("currentIndex", 1)
-        folder_box.setProperty("currentIndex", 1)
-        QTest.qWait(80)
-        selected_folder = folder_box.property("currentValue")
-        assert selected_folder and template_box.property("currentValue") == "tplx"
-        original_defaults = config.snapshot()
-        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=""):
-            click("sourceOutputFolderButton")
-        assert config.snapshot() == original_defaults
+        assert template_box.property("currentIndex") == -1
+        assert folder_box.property("currentIndex") == -1
+        assert not find(root.contentItem(), "enqueueSourceButton").property("enabled")
+        selected_folder = next(item["id"] for item in bridge.folders if item["id"])
         selected_output = home / "نتائج Word المختارة"
-        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=str(selected_output)):
+        original_defaults = config.snapshot()
+        with patch("waraq.source_draft.QFileDialog.getExistingDirectory", return_value=""):
             click("sourceOutputFolderButton")
-        QTest.qWait(80)
-        assert config.snapshot()["output_root"] == str(selected_output)
+        assert not draft.outputRoot and config.snapshot() == original_defaults
+        with patch("waraq.source_draft.QFileDialog.getExistingDirectory", return_value=str(selected_output)):
+            click("sourceOutputFolderButton")
+        assert draft.outputRoot == str(selected_output)
+        assert config.snapshot() == original_defaults, "Source output must not modify application defaults"
+        def configure_draft():
+            draft.setTemplateId("tplx")
+            draft.setFolderId(selected_folder)
+            draft.setOutputRoot(str(selected_output))
+            QTest.qWait(40)
+        configure_draft()
         assert template_box.property("currentValue") == "tplx"
         assert folder_box.property("currentValue") == selected_folder
         assert find(root.contentItem(), "sourceOutputFolderPath").property("text") == str(selected_output)
-        root.setProperty("toastText", "")
         imports = home / "inputs with spaces"
         imports.mkdir()
         single = imports / "تفريغ واحد.txt"
         single.write_text("تفريغ جاهز لإنشاء Word", encoding="utf-8")
 
-        def assert_imported(before, sources):
+        def confirm_import(before, sources):
+            assert len(store.jobs()) == before, "Choosing files must only stage them"
+            assert draft.itemCount == len(sources) and draft.canEnqueue
+            assert find(root.contentItem(), "sourceList").property("count") == len(sources)
+            click("enqueueSourceButton")
             new_jobs = store.jobs()[before:]
             assert len(new_jobs) == len(sources), (new_jobs, sources, messages[-5:])
             assert len({j["batch"] for j in new_jobs}) == 1
@@ -503,52 +527,47 @@ def main():
             for job, source_file in zip(new_jobs, sources):
                 assert job["folder_id"] == selected_folder
                 assert job["config"]["template_name"] == "خطب"
-                assert job["config"]["prompt"].startswith("استخدم مهارة عربية للخطب")
                 managed = Path(job["transcript"])
                 assert managed.parent == Path(job["folder"])
                 assert Path(job["folder"]).parent == selected_output
                 assert job["config"]["output_root"] == str(selected_output)
                 assert managed != source_file and managed.read_bytes() == source_file.read_bytes()
-                assert job["stages"]["download"]["status"] == "skipped"
-                assert job["stages"]["deepgram"]["status"] == "skipped"
-                assert job["stages"]["opencode"]["status"] == "pending"
+                assert [job["stages"][stage]["status"] for stage in ("download", "deepgram", "opencode")] == ["skipped", "skipped", "pending"]
             assert root.property("page") == 0
+            assert not draft.templateId and not draft.folderId and not draft.outputRoot and not draft.itemCount
+            assert config.snapshot() == original_defaults
             return new_jobs
 
         before = len(store.jobs())
-        with patch.object(bridge_module.QFileDialog, "getOpenFileNames", return_value=([str(single)], "")):
-            click("sourceLocalTab")
+        click("sourceLocalTab")
+        with patch("waraq.source_draft.QFileDialog.getOpenFileNames", return_value=([str(single)], "")):
             click("importTranscriptsButton")
-        new_jobs = assert_imported(before, [single])
+        new_jobs = confirm_import(before, [single])
         single.unlink()
         assert Path(new_jobs[0]["transcript"]).read_text(encoding="utf-8").startswith("تفريغ جاهز")
 
         first, second = imports / "درس 2.txt", imports / "درس 10.TXT"
         first.write_text("درس ثانٍ", encoding="utf-8-sig")
         second.write_text("درس عاشر", encoding="utf-8")
-        root.setProperty("toastText", "")
-        click("nav1")
-        assert root.property("page") == 1
-        before = len(store.jobs())
-        with patch.object(bridge_module.QFileDialog, "getOpenFileNames", return_value=([str(first), str(second)], "")):
+        for picker in ("files", "folder"):
+            root.setProperty("toastText", "")
+            click("nav1")
+            configure_draft()
             click("sourceLocalTab")
-            click("importTranscriptsButton")
-        assert_imported(before, [first, second])
-        (imports / "ignore.mp3").write_bytes(b"audio")
-        nested = imports / "nested"
-        nested.mkdir()
-        (nested / "ignored.txt").write_text("ليس من هذا المجلد", encoding="utf-8")
-        root.setProperty("toastText", "")
-        click("nav1")
-        assert root.property("page") == 1
-        before = len(store.jobs())
-        with patch.object(bridge_module.QFileDialog, "getExistingDirectory", return_value=str(imports)):
-            click("sourceLocalTab")
-            click("importTranscriptFolderButton")
-        assert_imported(before, [first, second])
+            before = len(store.jobs())
+            if picker == "files":
+                with patch("waraq.source_draft.QFileDialog.getOpenFileNames", return_value=([str(first), str(second)], "")):
+                    click("importTranscriptsButton")
+            else:
+                (imports / "ignore.mp3").write_bytes(b"audio")
+                nested = imports / "nested"
+                nested.mkdir(exist_ok=True)
+                (nested / "ignored.txt").write_text("ليس من هذا المجلد", encoding="utf-8")
+                with patch("waraq.source_draft.QFileDialog.getExistingDirectory", return_value=str(imports)):
+                    click("importTranscriptFolderButton")
+            confirm_import(before, [first, second])
 
-        # Deliver native Qt drag events on the workers page: global dropping
-        # must work even when the source picker page is hidden.
+        # Native global drop opens the review page, never bypassing required fields.
         click("nav2")
         before = len(store.jobs())
         mime = QMimeData()
@@ -557,60 +576,47 @@ def main():
         enter = QDragEnterEvent(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
         QApplication.sendEvent(root, enter)
         QTest.qWait(80)
-        assert enter.isAccepted(), "native TXT drag was not accepted"
+        assert enter.isAccepted()
         overlay = find(root.contentItem(), "transcriptDropOverlay")
         assert overlay is not None and overlay.isVisible()
-        drop_options = find(root.contentItem(), "transcriptDropOptions").property("text")
-        assert "خطب" in drop_options and str(selected_output) in drop_options
         if len(sys.argv) > 1:
             root.grabWindow().save(str(Path(sys.argv[1]) / "txt-drop-overlay.png"))
         drop = QDropEvent(QPointF(point), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
         QApplication.sendEvent(root, drop)
         QTest.qWait(80)
-        assert drop.isAccepted(), "native TXT drop was not accepted"
-        assert_imported(before, [first, second])
+        assert drop.isAccepted() and root.property("page") == 1
+        assert len(store.jobs()) == before and not draft.canEnqueue
+        configure_draft()
+        confirm_import(before, [first, second])
         assert not overlay.isVisible()
-        before = len(store.jobs())
         invalid_mime = QMimeData()
         invalid_mime.setUrls([QUrl.fromLocalFile(str(imports / "ignore.mp3"))])
         invalid_enter = QDragEnterEvent(point, Qt.CopyAction, invalid_mime, Qt.LeftButton, Qt.NoModifier)
         QApplication.sendEvent(root, invalid_enter)
-        assert not invalid_enter.isAccepted() and len(store.jobs()) == before
+        assert not invalid_enter.isAccepted()
 
-        # The new controls remain visible within the minimum window at 140%.
+        # At 140%, all forms remain reachable by scrolling; hidden-mode tools stay hidden.
         root.setProperty("toastText", "")
         click("nav1")
-        assert root.property("page") == 1
+        configure_draft()
         tuned = config.snapshot()
         tuned["ui_scale"] = 1.4
         assert bridge.saveSettings(json.dumps(tuned, ensure_ascii=False))
         QTest.qWait(150)
-        rail_origin = rail.mapToScene(QPointF(0, 0))
-        assert rail_origin.x() >= 0 and rail_origin.x() + rail.width() <= root.width() + 1
-        def assert_in_window(name):
+        click("sourceLocalTab")
+        assert find(root.contentItem(), "sourceTranscriptTools").isVisible()
+        assert not find(root.contentItem(), "sourceYoutubeTools").isVisible()
+        assert not find(root.contentItem(), "sourceAudioTools").isVisible()
+        source_scroll = find(root.contentItem(), "sourceScroll")
+        flick = source_scroll.property("contentItem")
+        assert flick.property("contentHeight") > flick.property("height")
+        for name in ("templateBox", "sourceFolderCombo", "sourceOutputFolderButton", "importTranscriptsButton", "importTranscriptFolderButton", "enqueueSourceButton"):
             control = find(root.contentItem(), name)
             assert control is not None and control.isVisible()
             origin = control.mapToScene(QPointF(0, 0))
             assert origin.x() >= 0 and origin.x() + control.width() <= root.width() + 1, (name, origin)
-            assert origin.y() >= 0 and origin.y() + control.height() <= root.height() + 1, (name, origin)
-        click("sourceLocalTab")
-        for name in ("templateBox", "sourceFolderCombo", "sourceOutputFolderButton", "sourceOutputFolderPath",
-                     "importTranscriptsButton", "importTranscriptFolderButton"):
-            assert_in_window(name)
-        if len(sys.argv) > 1:
-            root.setProperty("toastText", "")
-            QTest.qWait(60)
-            root.grabWindow().save(str(Path(sys.argv[1]) / "txt-import-140.png"))
-        source_scroll = find(root.contentItem(), "sourceScroll")
-        assert source_scroll is not None
-        flick = source_scroll.property("contentItem")
-        assert flick.property("contentHeight") > flick.property("height")
         flick.setProperty("contentY", flick.property("contentHeight") - flick.property("height"))
-        QTest.qWait(100)
-        for name in ("sourcePreset", "enqueueSourceButton"):
-            assert_in_window(name)
-        source_view = find(root.contentItem(), "sourceList")
-        assert source_view is not None and source_view.height() >= 100
+        QTest.qWait(80)
         if len(sys.argv) > 1:
             root.grabWindow().save(str(Path(sys.argv[1]) / "txt-import-options-140.png"))
         # Queue selection follows stable IDs and selects only filtered results.

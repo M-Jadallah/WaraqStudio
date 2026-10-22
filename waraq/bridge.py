@@ -21,6 +21,7 @@ from .remote import RemoteAccess
 from .remote_commands import RemoteCommands
 from .internet import InternetAccess
 from .store import STAGES
+from .source_draft import SourceDraft
 
 LABELS = {"pending": "في الانتظار", "running": "قيد التنفيذ", "completed": "مكتمل", "skipped": "متجاوز",
           "failed": "فشل", "blocked": "يتطلب إجراء", "uncertain": "نتيجة غير مؤكدة", "paused": "متوقف", "cancelled": "ملغى"}
@@ -112,6 +113,7 @@ class Bridge(QObject):
         self._files_model = DictListModel(parent=self)
         self._providers_model = DictListModel(parent=self)
         self._accounts_model = DictListModel(parent=self)
+        self._source_draft = SourceDraft(self)
         self._results_query = ""
         self._files_query = ""
         self._files_kind = "all"
@@ -205,6 +207,9 @@ class Bridge(QObject):
 
     @Property(QObject, constant=True)
     def sourceModel(self): return self._source_model
+
+    @Property(QObject, constant=True)
+    def sourceDraft(self): return self._source_draft
 
     @Property(QObject, constant=True)
     def resultsModel(self): return self._results_model
@@ -577,6 +582,7 @@ class Bridge(QObject):
 
     @Slot()
     def closeAccounts(self):
+        self._source_draft.close()
         self._accounts_closing = True
         self._account_login_choice = {}
         self._account_usage_timer.stop()
@@ -1584,7 +1590,8 @@ class Bridge(QObject):
     @Slot(result=bool)
     def prepareClose(self):
         from PySide6.QtWidgets import QMessageBox
-        if not self.scheduler.idle() or self._busy or self.remote.busy or self.internet_commands.busy or self.internet.busy or self.accountBusy:
+        if (not self.scheduler.idle() or self._busy or self._source_draft.busy or self._source_draft.enqueueBusy
+                or self.remote.busy or self.internet_commands.busy or self.internet.busy or self.accountBusy):
             answer = QMessageBox.question(None, "إغلاق ورق", "توجد عمليات نشطة. الإغلاق يوقف العمليات المحلية وقد يترك طلب Deepgram بنتيجة غير مؤكدة. هل تريد الإغلاق؟")
             if answer != QMessageBox.StandardButton.Yes:
                 return False

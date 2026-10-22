@@ -6,6 +6,9 @@ The approved idle fix records six explicit exceptions and their previous hashes;
 all other protected modules, QML controller functions and actions remain guarded.
 The requested-stage display change separately records the previous Bridge hash;
 only its job-step projection changes, with execution and UI actions preserved.
+The approved reviewed-source/worker-choice change records its former Bridge
+hash, four controller functions, replaced source calls and one retired button;
+all other execution modules, actions and controller functions stay guarded.
 """
 import hashlib
 import json
@@ -139,7 +142,10 @@ def test_live_models_and_automation_names_survive_redesign():
     for name in baseline["object_names"]:
         assert f'objectName: "{name}"' in source, name
     for name in ("jobsModel", "workersModel", "sourceModel", "resultsModel", "filesModel", "providersModel"):
-        assert f"model: backend.{name}" in source, name
+        if name == "sourceModel":
+            assert "model: win.sourceDraft.itemsModel" in source
+        else:
+            assert f"model: backend.{name}" in source, name
 
 
 def test_text_contrast_for_both_palettes():

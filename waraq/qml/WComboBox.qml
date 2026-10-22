@@ -4,6 +4,7 @@ import QtQuick.Controls
 ComboBox {
     id: control
     property QtObject theme: fallback
+    property string placeholderText: ""
     Theme { id: fallback }
     font.family: control.theme.fontFamily
     font.weight: control.theme.fontWeight
@@ -23,7 +24,7 @@ ComboBox {
         Rectangle { x: 5; y: 3; width: 7; height: 2; rotation: -45; color: control.theme.muted }
     }
     contentItem: TextField {
-        text: control.editable ? control.editText : control.displayText
+        text: control.editable ? control.editText : (control.currentIndex < 0 ? control.placeholderText : control.displayText)
         enabled: control.editable
         autoScroll: control.editable
         readOnly: control.down
@@ -31,7 +32,7 @@ ComboBox {
         validator: control.validator
         selectByMouse: true
         padding: 0
-        font: control.font; color: control.theme.ink
+        font: control.font; color: !control.editable && control.currentIndex < 0 ? control.theme.muted : control.theme.ink
         selectionColor: control.theme.accent
         selectedTextColor: control.theme.accentInk
         verticalAlignment: Text.AlignVCenter; horizontalAlignment: control.editable ? Text.AlignLeft : Text.AlignRight

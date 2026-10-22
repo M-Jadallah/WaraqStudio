@@ -7,7 +7,7 @@
     "settings.template.json": "09bc2d20d9461d4e743b53cddd0686923750d85ab26b938c87b3466cfa0127d0",
     "waraq/__init__.py": "f02fe3feb3e90962b79964eb8a0cbb0085790ed6174f4763f15e065c004f9a51",
     "waraq/app_update.py": "b6d244c2497aa2c7eb84694c04bf7b3b632faddc51c26a471d884ccba7551fcb",
-    "waraq/bridge.py": "4e4f6c50029e0c0fa3bb158840db1ede27ad6f09ba5c9e56d408cae3e89e947b",
+    "waraq/bridge.py": "a8936fe1bd760290fcbcb5f77fd651d7eaa053cd14e6604b141859b9681620a4",
     "waraq/catalog.py": "d17e04d9dd7195fa2a9fbcdac75efbd30b301b77c4123cc289aadecfc195dada",
     "waraq/config.py": "af9cf65ea64003abd49f4cd985cfd30bccc033cb464a7737786c92e775dfc590",
     "waraq/embedded_accounts.py": "98162e5efa55adf6fec912e581d6c10b37322724fd0b181bbbad2efdc11e6ca6",
@@ -26,8 +26,6 @@
     "waraq/youtube_update.py": "ce0e16cba920fe975628e650234bb8a05740fbbb86e38644c76c97906480fa69"
   },
   "backend_calls": [
-    "backend . choosePath ( \"folder\" )",
-    "backend . saveSettings ( JSON . stringify ( updated ) )",
     "backend . prepareClose ( )",
     "backend . deleteJobs ( win . selectedQueueIds . slice ( ) )",
     "backend . saveSettings ( JSON . stringify ( settings ) )",
@@ -42,19 +40,6 @@
     "backend . stopInternet ( )",
     "backend . startInternet ( )",
     "backend . exportReport ( )",
-    "backend . importTranscripts ( win . transcriptTemplateId ( ) , sourceFolderCombo . currentValue | | \"\" )",
-    "backend . importTranscriptFolder ( win . transcriptTemplateId ( ) , sourceFolderCombo . currentValue | | \"\" )",
-    "backend . discover ( urlField . text , forceRefresh . checked )",
-    "backend . discover ( text , forceRefresh . checked )",
-    "backend . importLocal ( sourceFolderCombo . currentValue | | \"\" , win . transcriptTemplateId ( ) )",
-    "backend . cancelDiscovery ( )",
-    "backend . selectRange ( rangeField . text )",
-    "backend . selectRange ( \"none\" )",
-    "backend . selectRange ( \"all\" )",
-    "backend . moveSource ( index , 1 )",
-    "backend . moveSource ( index , - 1 )",
-    "backend . selectSource ( index , checked )",
-    "backend . enqueue ( [ \"full\" , \"transcript\" , \"download\" , \"custom\" ] [ preset . currentIndex ] , backend . templates . length > 0 ? templateBox . currentValue : \"\" , sourceFolderCombo . currentValue | | \"\" )",
     "backend . recoverAccountEngine ( )",
     "backend . acknowledgeAccountMigration ( )",
     "backend . refreshAllAccountUsage ( )",
@@ -117,7 +102,6 @@
     "backend . saveUpdateToken ( updateTokenField . text . trim ( ) )",
     "backend . saveUpdateToken ( \"\" )",
     "backend . updateYoutube ( )",
-    "backend . importDroppedTranscripts ( urls , win . transcriptTemplateId ( ) , sourceFolderCombo . currentValue | | \"\" )",
     "backend . forgetInternetDevice ( )",
     "backend . createFolder ( folderName . text )",
     "backend . assignJobFolder ( selectedJob . id , currentValue | | \"\" )",
@@ -148,8 +132,8 @@
     "usageWindow": "function usageWindow ( label , value ) { value = value | | { } var known = [ \"available\" , \"stale\" ] . indexOf ( value . status ) > = 0 & & typeof value . remainingPercent = = = \"number\" & & isFinite ( value . remainingPercent ) return label + \" · المتبقي: \" + ( known ? value . remainingPercent + \"٪\" : \"غير معروف\" ) + ( value . status = = = \"stale\" ? \" (قراءة قديمة)\" : \"\" ) + \" · موعد التجدد (توقيت الجهاز): \" + win . usageDate ( value . resetsAt ) }",
     "usageMessage": "function usageMessage ( usage , refreshing ) { usage = usage | | { } var messages = { unsupported : \"قراءة الحصة غير مدعومة لطريقة الدخول الحالية.\" , unsupported_method : \"قراءة الحصة غير مدعومة لطريقة الدخول الحالية.\" , signed_out : \"سجّل الدخول لقراءة الحصة.\" , auth_required : \"يلزم تجديد تسجيل الدخول لقراءة الحصة.\" , authentication_required : \"يلزم تجديد تسجيل الدخول لقراءة الحصة.\" , network_error : \"تعذّر الاتصال لقراءة الحصة. يمكنك إعادة المحاولة.\" , rate_limited : \"خدمة الحصص طلبت الانتظار قبل إعادة المحاولة.\" , timeout : \"انتهت مهلة قراءة الحصة. يمكنك إعادة المحاولة.\" , invalid_response : \"تعذّر تفسير بيانات الحصة.\" , not_fetched : \"لم تُقرأ الحصة بعد.\" , not_checked : \"لم تُقرأ الحصة بعد.\" , token_sharing_unsupported : \"قراءة الحصة غير مدعومة لتسجيل Sign in with ChatGPT الحالي.\" , method_unsupported : \"قراءة الحصة غير مدعومة لطريقة الدخول الحالية.\" , native_version_unverified : \"لم يُتحقق من دعم قراءة الحصة في إصدار OpenCode المثبّت.\" , usage_available : \"\" , usage_partial : \"بعض نوافذ الحصة غير متاحة.\" , windows_missing : \"لم تُرجع الخدمة نوافذ الحصة.\" , usage_windows_unavailable : \"نوافذ الحصة غير متاحة.\" , usage_read_failed : \"تعذّرت قراءة الحصة. أعد المحاولة لاحقًا.\" , usage_unavailable : \"الحصة غير متاحة حاليًا.\" , usage_cancelled : \"أُلغي تحديث الحصة.\" , cancelled : \"أُلغي تحديث الحصة.\" , usage_refresh_deferred : \"تحديث الحصة مؤجّل حتى يصبح الحساب متاحًا.\" , account_not_ready : \"الحساب غير جاهز لقراءة الحصة.\" , usage_runtime_unsupported : \"إصدار OpenCode الحالي لا يدعم قراءة الحصة.\" , legacy_supported : \"طريقة الدخول تدعم قراءة الحصة.\" , response_too_large : \"تعذّر قبول استجابة خدمة الحصص.\" , unauthorized : \"يلزم تجديد تسجيل الدخول لقراءة الحصة.\" , endpoint_unavailable : \"قراءة الحصة غير مدعومة حاليًا لدى الخدمة.\" , throttled : \"خدمة الحصص طلبت الانتظار قبل إعادة المحاولة.\" , http_error : \"تعذّرت قراءة الحصة من الخدمة.\" , connection_failed : \"تعذّر الاتصال بخدمة الحصص.\" , binding_invalid : \"تغيّر تسجيل الحساب؛ يلزم التحقق من الدخول.\" , runtime_changed : \"تغيّرت جلسة OpenCode؛ أعد تحديث الحصة.\" , identity_unavailable : \"تعذّر التحقق من هوية الحساب لقراءة الحصة.\" , expired_pending_idle : \"انتهت صلاحية الدخول؛ يُؤجّل تجديده حتى اكتمال مهام الحساب.\" , binding_changed : \"تغيّرت هوية الحساب؛ أعد تحديث الحصة.\" , native_unavailable : \"OpenCode غير متاح لقراءة الحصة.\" , maintenance_unreserved : \"تحديث الحصة مؤجّل حتى يصبح الحساب متاحًا.\" , runtime_unavailable : \"جلسة OpenCode غير متاحة لقراءة الحصة.\" , account_busy : \"تحديث الحصة مؤجّل حتى اكتمال مهام الحساب.\" , activity_unverified : \"يلزم التحقق من توقف جلسة الحساب السابقة.\" , native_refreshed : \"جُدّد الدخول؛ يمكن تحديث الحصة.\" , refresh_unavailable : \"تعذّر تجديد الدخول لقراءة الحصة.\" , runtime_pending_idle : \"تحديث الحصة مؤجّل حتى اكتمال مهام الحساب.\" } var message = messages [ usage . messageCode ] | | ( usage . status = = = \"unsupported\" ? messages . unsupported : usage . status = = = \"available\" ? \"\" : \"الحصة غير معروفة حاليًا؛ أعد المحاولة لاحقًا.\" ) return ( refreshing ? \"جارٍ تحديث الحصة… \" : \"\" ) + ( usage . stale ? \"قراءة قديمة. \" : \"\" ) + message }",
     "usageRefreshReason": "function usageRefreshReason ( usage ) { usage = usage | | { } var reasons = { refreshing : \"تحديث الحصة جارٍ بالفعل.\" , managed_accounts_disabled : \"فعّل استخدام حسابات ChatGPT المُدارة لتحديث الحصة.\" , account_not_ready : \"الحساب غير جاهز؛ تحقق من تسجيل الدخول وحالة الجلسة.\" , usage_unsupported : \"لا تدعم طريقة الدخول أو نسخة OpenCode الحالية قراءة الحصة.\" , usage_closed : \"أُوقف تحديث الحصص أثناء إغلاق التطبيق.\" , usage_unavailable : \"تحديث الحصة غير متاح حاليًا.\" } return usage . refreshBlockReason = = = \"refresh_wait\" ? \"يمكن إعادة التحديث بعد \" + ( usage . refreshWaitSeconds | | 0 ) + \" ثانية.\" : reasons [ usage . refreshBlockReason ] | | \"\" }",
-    "transcriptTemplateId": "function transcriptTemplateId ( ) { return backend . templates . length > 0 ? ( templateBox . currentValue | | \"\" ) : \"\" }",
-    "chooseSourceOutputFolder": "function chooseSourceOutputFolder ( ) { var path = backend . choosePath ( \"folder\" ) if ( ! path ) return var templateId = win . transcriptTemplateId ( ) var folderId = sourceFolderCombo . currentValue | | \"\" var updated = JSON . parse ( backend . settingsJson ) updated . output_root = path if ( backend . saveSettings ( JSON . stringify ( updated ) ) ) { Qt . callLater ( function ( ) { templateBox . currentIndex = Math . max ( 0 , backend . templates . findIndex ( function ( t ) { return t . id = = = templateId } ) ) sourceFolderCombo . currentIndex = Math . max ( 0 , backend . folders . findIndex ( function ( f ) { return f . id = = = folderId } ) ) } ) } }",
+    "transcriptTemplateId": "function transcriptTemplateId ( ) { return win . sourceDraft . templateId }",
+    "chooseSourceOutputFolder": "function chooseSourceOutputFolder ( ) { win . sourceDraft . chooseOutputFolder ( ) }",
     "hasLocalTranscript": "function hasLocalTranscript ( urls ) { for ( var i = 0 ; i < urls . length ; i + + ) { if ( / ^ file : \\ / \\ / . * \\ . txt$ / i . test ( urls [ i ] . toString ( ) ) ) return true } return false }",
     "matches": "function matches ( job ) { return ( filter = = = \"all\" | | job . status = = = filter | | ( filter = = = \"attention\" & & [ \"blocked\" , \"failed\" , \"uncertain\" ] . indexOf ( job . status ) > = 0 ) ) & & ( search . length = = = 0 | | job . title . toLowerCase ( ) . indexOf ( search . toLowerCase ( ) ) > = 0 ) }",
     "visibleQueueIds": "function visibleQueueIds ( ) { return win . queueSnapshot . filter ( function ( job ) { return win . matches ( job ) } ) . map ( function ( job ) { return job . id } ) }",
@@ -164,8 +148,8 @@
     "workerLine": "function workerLine ( w ) { if ( w . stage = = = \"download\" ) return \"\" if ( w . stage = = = \"deepgram\" ) return ( w . role = = = \"backup\" ? \"احتياطي · \" : \"أساسي · \" ) + ( w . hasKey ? \"المفتاح محفوظ في مخزن الاعتماد\" : \"لا مفتاح محفوظ لهذا العامل\" ) var parts = [ w . providerLabel , w . modelResolved ] if ( w . accountName ) parts . push ( \"الحساب: \" + w . accountName ) if ( w . accountStatus ) parts . push ( ( { running : \"قيد التنفيذ\" , waiting : \"بانتظار حساب متاح\" , cooldown : \"بانتظار تجدد الحد\" } ) [ w . accountStatus ] | | w . accountStatus ) if ( ( w . variant | | \"\" ) . length > 0 ) parts . push ( \"تفكير \" + w . variant ) parts . push ( ! w . keyEnv ? \"حسابات ChatGPT في ورق\" : ( w . hasKey ? \"المفتاح محفوظ\" : \"لا مفتاح محفوظ\" ) ) return parts . join ( \"  ·  \" ) }",
     "providerName": "function providerName ( id ) { var info = backend . providers . find ( function ( p ) { return p . id = = = id } ) return info ? info . name : id }",
     "forceSummary": "function forceSummary ( ) { if ( ! lastForce . provider ) return \"بدون فرض على عمال OpenCode\" var text = \"مفروض: \" + win . providerName ( lastForce . provider ) + \"  ·  \" + win . resolvedModel ( lastForce . provider , lastForce . model ) return lastForce . variant ? text + \"  ·  تفكير \" + lastForce . variant : text }",
-    "openForceDialog": "function openForceDialog ( starting ) { forceDialog . starting = starting var ids = backend . providers . map ( function ( p ) { return p . id } ) var provider = lastForce . provider | | ( settings . opencode_workers [ 0 ] ? ( settings . opencode_workers [ 0 ] . provider | | \"login\" ) : \"login\" ) forceProvider . currentIndex = Math . max ( 0 , ids . indexOf ( provider ) ) var source = settings . opencode_workers . find ( function ( w ) { return ( w . provider | | \"login\" ) = = = provider } ) | | settings . opencode_workers [ 0 ] | | { } forceDialog . modelDraft = lastForce . provider ? lastForce . model : ( source . model | | \"\" ) forceModel . editText = forceDialog . modelDraft forceVariant . text = lastForce . provider ? lastForce . variant : ( source . variant | | \"\" ) forceDialog . open ( ) }",
-    "applyForce": "function applyForce ( force , start ) { var provider = force ? ( forceProvider . currentValue | | \"\" ) : \"\" lastForce = force ? { provider : provider , model : forceModel . editText . trim ( ) , variant : forceVariant . text } : { provider : \"\" , model : \"\" , variant : \"\" } backend . setProviderOverride ( lastForce . provider , lastForce . model , lastForce . variant ) forceDialog . close ( ) if ( start ) backend . toggleRunning ( ) }",
+    "openForceDialog": "function openForceDialog ( starting ) { forceDialog . starting = starting forceDialog . committing = false forceDialog . overrideDraft = ! ! lastForce . provider forceDialog . draftInitialized = ! ! lastForce . provider forceDialog . providerDraft = lastForce . provider | | \"\" forceDialog . modelDraft = lastForce . model | | \"\" forceDialog . variantDraft = lastForce . variant | | \"\" forceDialog . providerHint = \"\" skipForceBox . checked = win . skipForceQuestion forceDialog . restoreFields ( ) forceDialog . open ( ) }",
+    "applyForce": "function applyForce ( force , start ) { if ( forceDialog . committing | | ! forceDialog . opened ) return var provider = force ? forceDialog . providerDraft : \"\" if ( force & & ! provider ) return forceDialog . committing = true lastForce = force ? { provider : provider , model : forceDialog . modelDraft . trim ( ) , variant : forceDialog . variantDraft . trim ( ) } : { provider : \"\" , model : \"\" , variant : \"\" } win . skipForceQuestion = skipForceBox . checked backend . setProviderOverride ( lastForce . provider , lastForce . model , lastForce . variant ) forceDialog . close ( ) if ( start & & ! backend . running ) backend . toggleRunning ( ) }",
     "runClicked": "function runClicked ( ) { if ( backend . running ) { backend . toggleRunning ( ) ; return } if ( win . skipForceQuestion ) { backend . toggleRunning ( ) ; return } win . openForceDialog ( true ) }",
     "kindLabel": "function kindLabel ( kind ) { return kind = = = \"document\" ? \"Word\" : kind = = = \"transcript\" ? \"تفريغ\" : \"صوت\" }",
     "fileSize": "function fileSize ( bytes ) { if ( bytes > = 1048576 ) return ( bytes / 1048576 ) . toFixed ( 1 ) + \" م.ب\" if ( bytes > = 1024 ) return Math . round ( bytes / 1024 ) + \" ك.ب\" return bytes + \" بايت\" }",
@@ -247,7 +231,6 @@
     "fileList",
     "forceApplyButton",
     "forceButton",
-    "forceDefaultButton",
     "forceModelField",
     "forceProviderBox",
     "forceQuestion",
@@ -335,7 +318,13 @@
     "workerProviderBox",
     "workerStatus",
     "workersPageScroll",
-    "youtubeUpdateButton"
+    "youtubeUpdateButton",
+    "forceWorkersCard",
+    "forceUnifiedCard",
+    "sourceSettingsCard",
+    "sourceInputCard",
+    "sourceAudioTab",
+    "sourceOutputFolderCombo"
   ],
   "intentional_changes": {
     "main.py": {
@@ -368,5 +357,38 @@
     "git_reference": "570a69f20f71a857facb88174a74d590f6576183",
     "previous_bridge_sha256": "c6ebc92210c5c45820534eda13c14f6ef8ab967c53251a22686f600afac25c72",
     "reason": "Filter displayed job steps by the saved requested stages and local source applicability; stage execution, stored records and UI actions are unchanged."
+  },
+  "source_draft_and_force_choices_change": {
+    "base": "a77b85ca9392fc46110d8e43459c85ccc652168a",
+    "reason": "Approved two-card worker choices and mandatory reviewed per-batch desktop source draft; legacy phone/import/execution APIs preserved.",
+    "previous_bridge_sha256": "4e4f6c50029e0c0fa3bb158840db1ede27ad6f09ba5c9e56d408cae3e89e947b",
+    "previous_controller_functions": {
+      "transcriptTemplateId": "function transcriptTemplateId ( ) { return backend . templates . length > 0 ? ( templateBox . currentValue | | \"\" ) : \"\" }",
+      "chooseSourceOutputFolder": "function chooseSourceOutputFolder ( ) { var path = backend . choosePath ( \"folder\" ) if ( ! path ) return var templateId = win . transcriptTemplateId ( ) var folderId = sourceFolderCombo . currentValue | | \"\" var updated = JSON . parse ( backend . settingsJson ) updated . output_root = path if ( backend . saveSettings ( JSON . stringify ( updated ) ) ) { Qt . callLater ( function ( ) { templateBox . currentIndex = Math . max ( 0 , backend . templates . findIndex ( function ( t ) { return t . id = = = templateId } ) ) sourceFolderCombo . currentIndex = Math . max ( 0 , backend . folders . findIndex ( function ( f ) { return f . id = = = folderId } ) ) } ) } }",
+      "openForceDialog": "function openForceDialog ( starting ) { forceDialog . starting = starting var ids = backend . providers . map ( function ( p ) { return p . id } ) var provider = lastForce . provider | | ( settings . opencode_workers [ 0 ] ? ( settings . opencode_workers [ 0 ] . provider | | \"login\" ) : \"login\" ) forceProvider . currentIndex = Math . max ( 0 , ids . indexOf ( provider ) ) var source = settings . opencode_workers . find ( function ( w ) { return ( w . provider | | \"login\" ) = = = provider } ) | | settings . opencode_workers [ 0 ] | | { } forceDialog . modelDraft = lastForce . provider ? lastForce . model : ( source . model | | \"\" ) forceModel . editText = forceDialog . modelDraft forceVariant . text = lastForce . provider ? lastForce . variant : ( source . variant | | \"\" ) forceDialog . open ( ) }",
+      "applyForce": "function applyForce ( force , start ) { var provider = force ? ( forceProvider . currentValue | | \"\" ) : \"\" lastForce = force ? { provider : provider , model : forceModel . editText . trim ( ) , variant : forceVariant . text } : { provider : \"\" , model : \"\" , variant : \"\" } backend . setProviderOverride ( lastForce . provider , lastForce . model , lastForce . variant ) forceDialog . close ( ) if ( start ) backend . toggleRunning ( ) }"
+    },
+    "replaced_source_calls": [
+      "backend . choosePath ( \"folder\" )",
+      "backend . saveSettings ( JSON . stringify ( updated ) )",
+      "backend . importTranscripts ( win . transcriptTemplateId ( ) , sourceFolderCombo . currentValue | | \"\" )",
+      "backend . importTranscriptFolder ( win . transcriptTemplateId ( ) , sourceFolderCombo . currentValue | | \"\" )",
+      "backend . discover ( urlField . text , forceRefresh . checked )",
+      "backend . discover ( text , forceRefresh . checked )",
+      "backend . importLocal ( sourceFolderCombo . currentValue | | \"\" , win . transcriptTemplateId ( ) )",
+      "backend . cancelDiscovery ( )",
+      "backend . selectRange ( rangeField . text )",
+      "backend . selectRange ( \"none\" )",
+      "backend . selectRange ( \"all\" )",
+      "backend . moveSource ( index , 1 )",
+      "backend . moveSource ( index , - 1 )",
+      "backend . selectSource ( index , checked )",
+      "backend . enqueue ( [ \"full\" , \"transcript\" , \"download\" , \"custom\" ] [ preset . currentIndex ] , backend . templates . length > 0 ? templateBox . currentValue : \"\" , sourceFolderCombo . currentValue | | \"\" )",
+      "backend . importDroppedTranscripts ( urls , win . transcriptTemplateId ( ) , sourceFolderCombo . currentValue | | \"\" )"
+    ],
+    "removed_object_names": [
+      "forceDefaultButton"
+    ],
+    "source_model": "win.sourceDraft.itemsModel"
   }
 }

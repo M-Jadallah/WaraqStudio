@@ -176,7 +176,7 @@ def main():
 
         # Real input preservation across source and settings tabs, not just object existence.
         click("nav1")
-        find("urlField").setProperty("text", "https://example.invalid/retained")
+        bridge.sourceDraft.setUrl("https://example.invalid/retained")
         selected = [row["video_id"] for row in bridge.source if row["selected"]]
         click("sourceLocalTab")
         assert root.property("sourceTab") == 1
@@ -292,7 +292,7 @@ def main():
                 assert popup.property("x") + popup.property("width") <= root.width() + 1, name
                 assert popup.property("y") + popup.property("height") <= root.height() + 1, (name, popup.property("height"))
                 if name == "forceDialog":
-                    for action_name in ("forceDefaultButton", "forceApplyButton"):
+                    for action_name in ("forceBackButton", "forceApplyButton"):
                         action = find(action_name)
                         point = action.mapToScene(action.boundingRect().center())
                         assert popup.property("y") <= point.y() <= popup.property("y") + popup.property("height"), action_name

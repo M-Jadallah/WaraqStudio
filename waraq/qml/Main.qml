@@ -29,7 +29,8 @@ ApplicationWindow {
     readonly property real contentUnits: (width - navRail.width - 32) / uiScale
     readonly property bool shortOperations: page === 0 && height / uiScale < 600
     readonly property int serviceColumns: contentUnits >= 1100 ? 3 : contentUnits >= 850 ? 2 : 1
-    property int sourceTab: 0
+    readonly property QtObject sourceDraft: backend.sourceDraft
+    readonly property int sourceTab: sourceDraft.kind === "youtube" ? 0 : sourceDraft.kind === "transcript" ? 1 : 2
     property int settingsTab: 0
     property string toastText: ""
     property bool toastError: false
@@ -125,22 +126,25 @@ ApplicationWindow {
         return usage.refreshBlockReason === "refresh_wait" ? "يمكن إعادة التحديث بعد " + (usage.refreshWaitSeconds || 0) + " ثانية."
             : reasons[usage.refreshBlockReason] || ""
     }
-    function transcriptTemplateId() { return backend.templates.length > 0 ? (templateBox.currentValue || "") : "" }
+    function transcriptTemplateId() { return win.sourceDraft.templateId }
+    function sourceChoiceIndex(items, id) {
+        return id ? items.findIndex(function(item) { return item.id === id }) : -1
+    }
+    function revealSourceFocus() {
+        var target = win.activeFocusItem
+        if (win.page !== 1 || !target || !sourceScroll.visible) return
+        var ancestor = target
+        while (ancestor && ancestor !== sourceScroll) ancestor = ancestor.parent
+        if (ancestor !== sourceScroll) return
+        var flick = sourceScroll.contentItem
+        var top = target.mapToItem(sourceScroll, Qt.point(0, 0)).y
+        var delta = top < 8 ? top - 8 : top + target.height > sourceScroll.height - 8
+                    ? top + target.height - sourceScroll.height + 8 : 0
+        if (delta) flick.contentY = Math.max(0, Math.min(flick.contentY + delta, Math.max(0, flick.contentHeight - flick.height)))
+    }
+    onActiveFocusItemChanged: Qt.callLater(win.revealSourceFocus)
     function chooseSourceOutputFolder() {
-        var path = backend.choosePath("folder")
-        if (!path) return
-        var templateId = win.transcriptTemplateId()
-        var folderId = sourceFolderCombo.currentValue || ""
-        var updated = JSON.parse(backend.settingsJson)
-        updated.output_root = path
-        if (backend.saveSettings(JSON.stringify(updated))) {
-            // Saving defaults republishes the template model; keep the user's
-            // chosen template and subject when the ComboBoxes settle.
-            Qt.callLater(function() {
-                templateBox.currentIndex = Math.max(0, backend.templates.findIndex(function(t) { return t.id === templateId }))
-                sourceFolderCombo.currentIndex = Math.max(0, backend.folders.findIndex(function(f) { return f.id === folderId }))
-            })
-        }
+        win.sourceDraft.chooseOutputFolder()
     }
     function hasLocalTranscript(urls) {
         for (var i = 0; i < urls.length; i++) {
@@ -235,22 +239,28 @@ ApplicationWindow {
     }
     function openForceDialog(starting) {
         forceDialog.starting = starting
-        var ids = backend.providers.map(function(p) { return p.id })
-        var provider = lastForce.provider || (settings.opencode_workers[0] ? (settings.opencode_workers[0].provider || "login") : "login")
-        forceProvider.currentIndex = Math.max(0, ids.indexOf(provider))
-        var source = settings.opencode_workers.find(function(w) { return (w.provider || "login") === provider }) || settings.opencode_workers[0] || {}
-        forceDialog.modelDraft = lastForce.provider ? lastForce.model : (source.model || "")
-        forceModel.editText = forceDialog.modelDraft
-        forceVariant.text = lastForce.provider ? lastForce.variant : (source.variant || "")
+        forceDialog.committing = false
+        forceDialog.overrideDraft = !!lastForce.provider
+        forceDialog.draftInitialized = !!lastForce.provider
+        forceDialog.providerDraft = lastForce.provider || ""
+        forceDialog.modelDraft = lastForce.model || ""
+        forceDialog.variantDraft = lastForce.variant || ""
+        forceDialog.providerHint = ""
+        skipForceBox.checked = win.skipForceQuestion
+        forceDialog.restoreFields()
         forceDialog.open()
     }
     function applyForce(force, start) {
-        var provider = force ? (forceProvider.currentValue || "") : ""
-        lastForce = force ? {provider: provider, model: forceModel.editText.trim(), variant: forceVariant.text}
+        if (forceDialog.committing || !forceDialog.opened) return
+        var provider = force ? forceDialog.providerDraft : ""
+        if (force && !provider) return
+        forceDialog.committing = true
+        lastForce = force ? {provider: provider, model: forceDialog.modelDraft.trim(), variant: forceDialog.variantDraft.trim()}
                           : {provider: "", model: "", variant: ""}
+        win.skipForceQuestion = skipForceBox.checked
         backend.setProviderOverride(lastForce.provider, lastForce.model, lastForce.variant)
         forceDialog.close()
-        if (start) backend.toggleRunning()
+        if (start && !backend.running) backend.toggleRunning()
     }
     function runClicked() {
         if (backend.running) { backend.toggleRunning(); return }
@@ -855,123 +865,230 @@ ApplicationWindow {
                     }
                 }
 
-                // Source selection
+                // Desktop sources are staged independently of legacy/phone imports.
                 ScrollView {
-                    id: sourceScroll
-                    objectName: "sourceScroll"
-                    Layout.minimumWidth: 0
-                    clip: true
+                    id: sourceScroll; objectName: "sourceScroll"
+                    Layout.minimumWidth: 0; clip: true
                     contentWidth: availableWidth
                     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                     Flow {
-                        layoutDirection: Qt.RightToLeft; spacing: 16
                         id: sourcePage
-                        width: sourceScroll.availableWidth
-
-                        Box {
+                        width: sourceScroll.availableWidth; spacing: 16
+                        layoutDirection: Qt.RightToLeft
+                        ColumnLayout {
                             id: sourceOptionsPanel
                             width: win.contentUnits >= 850 ? 400 : sourcePage.width
-                            height: sourceImportContent.implicitHeight + 2 * win.rs(14)
-                            ColumnLayout {
-                                id: sourceImportContent
-                                anchors.fill: parent; anchors.margins: win.rs(14); spacing: win.rs(8)
-                                LabelText { text: "إعدادات الناتج"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
-                                SubText { text: "اختر القالب ومجلد الناتج قبل إضافة التفريغات أو فيديوهات YouTube."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
-                                GridLayout {
-                                    Layout.fillWidth: true
-                                    columns: 2
-                                    columnSpacing: win.rs(8); rowSpacing: win.rs(6)
-                                    LabelText { text: "قالب البرومبت"; Layout.row: 0; Layout.column: 0 }
-                                    AppCombo { id: templateBox; objectName: "templateBox"; model: backend.templates; textRole: "name"; valueRole: "id"; Layout.row: 0; Layout.column: 1; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200; Accessible.name: "قالب البرومبت" }
-                                    LabelText { text: "مجلد المادة / الدرس"; Layout.row: parent.columns === 2 ? 1 : 0; Layout.column: parent.columns === 2 ? 0 : 2 }
+                            spacing: 16
+                            Box {
+                                objectName: "sourceSettingsCard"
+                                Layout.fillWidth: true
+                                implicitHeight: sourceSettingsBody.implicitHeight + 32
+                                ColumnLayout {
+                                    id: sourceSettingsBody
+                                    anchors.fill: parent; anchors.margins: 16; spacing: 10
                                     RowLayout {
-                                        Layout.row: parent.columns === 2 ? 1 : 0; Layout.column: parent.columns === 2 ? 1 : 3
-                                        Layout.fillWidth: true; Layout.minimumWidth: 80; spacing: win.rs(8)
-                                        AppCombo { id: sourceFolderCombo; objectName: "sourceFolderCombo"; model: backend.folders; textRole: "name"; valueRole: "id"; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200; Accessible.name: "مجلد المادة أو الدرس" }
-                                        AppButton { text: "مجلد جديد"; implicitHeight: win.rh(36); onClicked: folderDialog.open() }
+                                        Layout.fillWidth: true
+                                        Rectangle {
+                                            color: visualTheme.gold; radius: 5
+                                            implicitWidth: requiredLabel.implicitWidth + 16; implicitHeight: requiredLabel.implicitHeight + 8
+                                            LabelText { id: requiredLabel; anchors.centerIn: parent; text: "مطلوب"; color: visualTheme.goldInk; font.pixelSize: win.fs(12) }
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                        LabelText { text: "١  إعدادات النتائج"; font.pixelSize: win.fs(19) }
                                     }
+                                    SubText { text: "اختر القالب والمجلدات لتنظيم نتائج هذه الدفعة."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { text: "قالب البرومبت *"; Layout.fillWidth: true }
+                                    AppCombo {
+                                        id: templateBox; objectName: "templateBox"
+                                        Layout.fillWidth: true; Layout.minimumWidth: 0
+                                        model: backend.templates; textRole: "name"; valueRole: "id"
+                                        placeholderText: "اختر القالب"
+                                        currentIndex: win.sourceChoiceIndex(model, win.sourceDraft.templateId)
+                                        onActivated: win.sourceDraft.setTemplateId(currentValue)
+                                        Accessible.name: "قالب البرومبت، مطلوب"
+                                    }
+                                    SubText { text: win.sourceDraft.fieldErrors.templateId || ""; visible: text.length > 0; color: visualTheme.danger; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { text: "مجلد المادة / الدرس *"; Layout.fillWidth: true }
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 8
+                                        AppButton { objectName: "sourceNewFolderButton"; text: "مجلد جديد"; onClicked: folderDialog.open() }
+                                        AppCombo {
+                                            id: sourceFolderCombo; objectName: "sourceFolderCombo"
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                                            model: backend.folders.filter(function(item) { return !!item.id }); textRole: "name"; valueRole: "id"
+                                            placeholderText: "اختر المجلد"
+                                            currentIndex: win.sourceChoiceIndex(model, win.sourceDraft.folderId)
+                                            onActivated: win.sourceDraft.setFolderId(currentValue)
+                                            Accessible.name: "مجلد المادة أو الدرس، مطلوب"
+                                        }
+                                    }
+                                    SubText { text: win.sourceDraft.fieldErrors.folderId || ""; visible: text.length > 0; color: visualTheme.danger; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    LabelText { text: "مجلد النتائج *"; Layout.fillWidth: true }
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 8
+                                        AppButton { objectName: "sourceOutputFolderButton"; text: "استعراض"; onClicked: win.chooseSourceOutputFolder() }
+                                        AppCombo {
+                                            id: sourceOutputCombo; objectName: "sourceOutputFolderCombo"
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                                            model: win.sourceDraft.outputChoices.concat([{id: "__browse__", name: "اختيار مجلد آخر…"}]); textRole: "name"; valueRole: "id"
+                                            placeholderText: "اختر مجلد النتائج"
+                                            currentIndex: win.sourceChoiceIndex(model, win.sourceDraft.outputRoot)
+                                            onActivated: {
+                                                if (currentValue === "__browse__") {
+                                                    win.sourceDraft.chooseOutputFolder()
+                                                    win.sourceDraft.setOutputRoot(win.sourceDraft.outputRoot)
+                                                } else win.sourceDraft.setOutputRoot(currentValue)
+                                            }
+                                            Accessible.name: "مجلد نتائج الدفعة، مطلوب"
+                                        }
+                                    }
+                                    SubText { objectName: "sourceOutputFolderPath"; text: win.sourceDraft.outputRoot; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; Accessible.name: "مسار نتائج هذه الدفعة" }
+                                    SubText { text: win.sourceDraft.fieldErrors.outputRoot || ""; visible: text.length > 0; color: visualTheme.danger; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    Rule {}
+                                    SubText { text: "هذه الاختيارات تخص الدفعة فقط. أكملها قبل الإضافة إلى الطابور."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                                 }
+                            }
+                            Box {
+                                objectName: "sourceInputCard"
+                                Layout.fillWidth: true; implicitHeight: sourceInputBody.implicitHeight + 32
                                 ColumnLayout {
-                                    Layout.fillWidth: true; spacing: win.rs(8)
-                                    AppButton { objectName: "sourceOutputFolderButton"; text: "اختيار المجلد"; implicitHeight: win.rh(36); onClicked: win.chooseSourceOutputFolder() }
-                                    AppField { objectName: "sourceOutputFolderPath"; Layout.fillWidth: true; Layout.minimumWidth: 80; text: win.savedOutputRoot; readOnly: true; selectByMouse: true; Accessible.name: "مسار مجلد النتائج الافتراضي" }
-                                    LabelText { text: "مجلد النتائج الافتراضي"; font.pixelSize: win.fs(13) }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    AppButton { objectName: "sourceYoutubeTab"; text: "YouTube"; primary: win.sourceTab === 0; Layout.fillWidth: true; onClicked: win.sourceTab = 0 }
-                                    AppButton { objectName: "sourceLocalTab"; text: "TXT / صوت"; primary: win.sourceTab === 1; Layout.fillWidth: true; onClicked: win.sourceTab = 1 }
-                                }
-                                LabelText { visible: win.sourceTab === 1; text: "تفريغات جاهزة إلى Word"; font.weight: visualTheme.fontWeight; Layout.fillWidth: true }
-                                ActionRow {
-                                    visible: win.sourceTab === 1
-                                    AppButton { objectName: "importTranscriptsButton"; text: "إضافة ملفات TXT"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscripts(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
-                                    AppButton { objectName: "importTranscriptFolderButton"; text: "إضافة مجلد تفريغات"; implicitHeight: win.rh(36); onClicked: { if (backend.importTranscriptFolder(win.transcriptTemplateId(), sourceFolderCombo.currentValue || "") > 0) win.page = 0 } }
-                                    AppButton { text: "إدارة القوالب"; implicitHeight: win.rh(36); onClicked: win.openTemplates() }
-                                }
-                                SubText { visible: win.sourceTab === 1; text: "يمكنك أيضًا إفلات ملفات TXT في التطبيق. تُنتج Word بالقالب والمجلد المحددين أعلاه، دون تنزيل أو تفريغ صوتي. مسار النتائج هو الافتراضي للمهام الجديدة؛ مجلد المادة ينظّم نسخ المكتبة."; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignRight }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: win.line }
-                                LabelText { visible: win.sourceTab === 0; text: "رابط YouTube"; font.weight: visualTheme.fontWeight; Layout.fillWidth: true }
-                                ColumnLayout {
-                                    visible: win.sourceTab === 0; Layout.fillWidth: true; spacing: 10
-                                    AppButton { objectName: "discoverButton"; text: backend.busy ? "جارٍ القراءة…" : "قراءة المصدر"; primary: true; enabled: !backend.busy && urlField.text.length > 0; onClicked: backend.discover(urlField.text, forceRefresh.checked) }
-                                    AppField { id: urlField; objectName: "urlField"; Layout.fillWidth: true; Layout.minimumWidth: 0; placeholderText: "https://www.youtube.com/playlist?list=…"; Accessible.name: "رابط YouTube"; onAccepted: if (!backend.busy) backend.discover(text, forceRefresh.checked) }
-                                }
-                                ActionRow {
-                                    AppButton { visible: win.sourceTab === 1; objectName: "importLocalButton"; text: "استيراد صوت"; implicitHeight: win.rh(36); onClicked: backend.importLocal(sourceFolderCombo.currentValue || "", win.transcriptTemplateId()) }
-                                    AppButton { text: "إلغاء القراءة"; visible: backend.busy; implicitHeight: 32; onClicked: backend.cancelDiscovery() }
-                                    AppCheck { visible: win.sourceTab === 0; id: forceRefresh; text: "تحديث المعلومات المحفوظة"; palette.windowText: win.muted }
+                                    id: sourceInputBody
+                                    anchors.fill: parent; anchors.margins: 16; spacing: 12
+                                    LabelText { text: "٢  نوع المدخل"; font.pixelSize: win.fs(19); Layout.fillWidth: true }
+                                    GridLayout {
+                                        Layout.fillWidth: true; columns: width >= 350 ? 3 : 1; columnSpacing: 8; rowSpacing: 8; layoutDirection: Qt.RightToLeft
+                                        AppButton { objectName: "sourceYoutubeTab"; text: "رابط YouTube"; primary: win.sourceTab === 0; Layout.fillWidth: true; Layout.minimumWidth: 0; Accessible.role: Accessible.RadioButton; Accessible.checkable: true; Accessible.checked: win.sourceTab === 0; onClicked: { win.sourceDraft.setKind("youtube"); win.sourceSearch = "" } }
+                                        AppButton { objectName: "sourceLocalTab"; text: "تفريغ TXT"; primary: win.sourceTab === 1; Layout.fillWidth: true; Layout.minimumWidth: 0; Accessible.role: Accessible.RadioButton; Accessible.checkable: true; Accessible.checked: win.sourceTab === 1; onClicked: { win.sourceDraft.setKind("transcript"); win.sourceSearch = "" } }
+                                        AppButton { objectName: "sourceAudioTab"; text: "ملف صوتي"; primary: win.sourceTab === 2; Layout.fillWidth: true; Layout.minimumWidth: 0; Accessible.role: Accessible.RadioButton; Accessible.checkable: true; Accessible.checked: win.sourceTab === 2; onClicked: { win.sourceDraft.setKind("audio"); win.sourceSearch = "" } }
+                                    }
+                                    ColumnLayout {
+                                        objectName: "sourceYoutubeTools"; visible: win.sourceTab === 0; Layout.fillWidth: true; spacing: 10
+                                        LabelText { text: "رابط YouTube"; Layout.fillWidth: true }
+                                        AppField {
+                                            id: urlField; objectName: "urlField"
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                                            text: win.sourceDraft.url
+                                            placeholderText: "ألصق رابط الفيديو أو قائمة التشغيل"
+                                            horizontalAlignment: Text.AlignLeft
+                                            Accessible.name: "رابط YouTube"
+                                            onTextEdited: win.sourceDraft.setUrl(text)
+                                            onAccepted: if (!win.sourceDraft.busy && text.trim()) win.sourceDraft.discover(text, forceRefresh.checked)
+                                        }
+                                        ActionRow {
+                                            AppButton { objectName: "discoverButton"; text: win.sourceDraft.busy ? "جارٍ القراءة…" : "قراءة المصدر"; primary: true; enabled: !win.sourceDraft.busy && urlField.text.trim().length > 0; onClicked: win.sourceDraft.discover(urlField.text, forceRefresh.checked) }
+                                            AppButton { objectName: "cancelDiscoveryButton"; text: "إلغاء القراءة"; visible: win.sourceDraft.busy; onClicked: win.sourceDraft.cancelDiscovery() }
+                                        }
+                                        AppCheck { id: forceRefresh; text: "تحديث المعلومات المحفوظة"; palette.windowText: win.muted; Layout.fillWidth: true }
+                                    }
+                                    ColumnLayout {
+                                        objectName: "sourceTranscriptTools"; visible: win.sourceTab === 1; Layout.fillWidth: true; spacing: 12
+                                        Box {
+                                            Layout.fillWidth: true; implicitHeight: transcriptInstructions.implicitHeight + 32
+                                            border.color: win.accent; color: visualTheme.inset
+                                            ColumnLayout {
+                                                id: transcriptInstructions; anchors.fill: parent; anchors.margins: 16; spacing: 8
+                                                LabelText { text: "أضف ملفات التفريغ"; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter }
+                                                SubText { text: "اسحب ملفات TXT هنا، أو اختر ملفات أو مجلدًا لمراجعتها أولًا."; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                                            }
+                                        }
+                                        ActionRow {
+                                            AppButton { objectName: "importTranscriptsButton"; text: "اختيار ملفات TXT"; onClicked: win.sourceDraft.chooseFiles() }
+                                            AppButton { objectName: "importTranscriptFolderButton"; text: "اختيار مجلد تفريغات"; onClicked: win.sourceDraft.chooseFolder() }
+                                        }
+                                        SubText { text: "تفريغ جاهز ← Word · لن تُضاف الملفات قبل تأكيدك."; color: win.accent; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    }
+                                    ColumnLayout {
+                                        objectName: "sourceAudioTools"; visible: win.sourceTab === 2; Layout.fillWidth: true; spacing: 10
+                                        LabelText { text: "ملفات الصوت المحلية"; Layout.fillWidth: true }
+                                        AppButton { objectName: "importLocalButton"; text: "اختيار ملفات صوتية"; Layout.fillWidth: true; onClicked: win.sourceDraft.chooseFiles() }
+                                        SubText { text: "MP3 · WAV · M4A · FLAC · OGG"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                        SubText { text: "تفريغ صوتي ← Word · تُتجاوز مرحلة التنزيل."; color: win.accent; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    }
                                 }
                             }
                         }
                         ColumnLayout {
+                            id: sourceReviewPanel
                             width: win.contentUnits >= 850 ? Math.max(0, sourcePage.width - sourceOptionsPanel.width - 16) : sourcePage.width
-                            height: Math.max(480 * win.uiScale, sourceScroll.availableHeight - 4)
+                            height: Math.max(510 * win.uiScale, sourceScroll.availableHeight - 4)
                             spacing: 12
-                        ActionRow {
-                            AppButton { text: "تطبيق النطاق"; onClicked: backend.selectRange(rangeField.text) }
-                            AppField { id: rangeField; width: 140; placeholderText: "1-10,15"; Accessible.name: "نطاق الفيديوهات" }
-                            AppButton { text: "إلغاء التحديد"; onClicked: backend.selectRange("none") }
-                            AppButton { text: "تحديد الكل"; onClicked: backend.selectRange("all") }
-                            LabelText { text: backend.sourceTitle || "الفيديوهات المختارة"; width: Math.min(280, parent.width); font.pixelSize: win.fs(18) }
-                        }
-                        AppField { Layout.fillWidth: true; placeholderText: "بحث في أسماء فيديوهات القائمة"; horizontalAlignment: Text.AlignRight; onTextChanged: win.sourceSearch = text; Accessible.name: "بحث في القائمة" }
-                        Box {
-                            Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: win.rh(160)
-                            PinList {
-                                id: sourceList
-                                objectName: "sourceList"
-                                anchors.fill: parent; anchors.margins: win.rs(8); clip: true
-                                model: backend.sourceModel
-                                ScrollBar.vertical: AppScroll {}
-                                delegate: Item {
-                                    width: sourceList.width; height: win.sourceSearch === "" || row.title.indexOf(win.sourceSearch) >= 0 ? win.rh(54) : 0
-                                    visible: height > 0
-                                    RowLayout {
-                                        anchors.fill: parent; anchors.leftMargin: win.rs(8); anchors.rightMargin: win.rs(8); spacing: win.rs(8)
-                                        AppButton { text: "للأسفل"; implicitWidth: 60; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: index < sourceList.count - 1; onClicked: backend.moveSource(index, 1) }
-                                        AppButton { text: "للأعلى"; implicitWidth: 60; implicitHeight: Math.max(22, Math.round(28 * win.density)); enabled: index > 0; onClicked: backend.moveSource(index, -1) }
-                                        SubText { text: row.available ? (row.duration ? Math.round(row.duration / 60) + " دقيقة" : "") : "غير متاح"; Layout.preferredWidth: 85 }
-                                        LabelText { text: row.title; Layout.fillWidth: true }
-                                        SubText { text: "#" + row.position }
-                                        AppCheck { checked: row.selected; enabled: row.available; onClicked: backend.selectSource(index, checked); Accessible.name: "تحديد " + row.title }
-                                    }
-                                    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
-                                }
-                                SubText { anchors.centerIn: parent; text: backend.busy ? "تُقرأ المعلومات مع مراعاة فواصل طلبات YouTube…" : "ستظهر قائمة الفيديوهات هنا"; visible: sourceList.count === 0 }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                SubText { text: win.sourceDraft.selectedCount + " / " + win.sourceDraft.itemCount; Accessible.name: "عدد العناصر المحددة" }
+                                Item { Layout.fillWidth: true }
+                                LabelText { text: win.sourceDraft.title || (win.sourceTab === 0 ? "العناصر المختارة" : "الملفات المحددة"); Layout.fillWidth: true; font.pixelSize: win.fs(19); elide: Text.ElideRight }
                             }
-                        }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: win.rs(8)
-                            LabelText { text: "مراحل معالجة الفيديو / الصوت" }
-                            AppCombo { id: preset; objectName: "sourcePreset"; model: ["الدورة الكاملة حتى Word", "تنزيل وتفريغ فقط", "تنزيل فقط", "القالب المخصص من الإعدادات"]; Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 230; Accessible.name: "مراحل المعالجة" }
-                        }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            AppButton { objectName: "enqueueSourceButton"; text: "إضافة إلى الطابور"; gold: true; enabled: backend.hasSourceSelection; onClicked: { backend.enqueue(["full","transcript","download","custom"][preset.currentIndex], backend.templates.length > 0 ? templateBox.currentValue : "", sourceFolderCombo.currentValue || ""); win.page = 0 } }
-                            Item { Layout.fillWidth: true }
-                        }
+                            RowLayout {
+                                visible: win.sourceDraft.busy && win.sourceTab !== 0; Layout.fillWidth: true
+                                AppButton { objectName: "sourceBackgroundCancel"; text: "إلغاء القراءة"; onClicked: win.sourceDraft.cancelDiscovery() }
+                                SubText { text: "قراءة YouTube جارية في الخلفية"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                            }
+                            ActionRow {
+                                AppButton { objectName: "sourceSelectAll"; text: "تحديد الكل"; onClicked: win.sourceDraft.selectRange("all") }
+                                AppButton { objectName: "sourceSelectNone"; text: "إلغاء التحديد"; onClicked: win.sourceDraft.selectRange("none") }
+                                AppField { id: rangeField; objectName: "sourceRangeField"; width: Math.min(140, sourceReviewPanel.width); placeholderText: "1-10,15"; Accessible.name: "نطاق العناصر" }
+                                AppButton { objectName: "sourceApplyRange"; text: "تطبيق النطاق"; onClicked: win.sourceDraft.selectRange(rangeField.text) }
+                            }
+                            AppField { objectName: "sourceSearchField"; Layout.fillWidth: true; Layout.minimumWidth: 0; text: win.sourceSearch; placeholderText: "بحث في أسماء العناصر"; horizontalAlignment: Text.AlignRight; onTextEdited: win.sourceSearch = text; Accessible.name: "بحث في القائمة" }
+                            Box {
+                                Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: win.rh(220)
+                                PinList {
+                                    id: sourceList; objectName: "sourceList"
+                                    anchors.fill: parent; anchors.margins: 8; clip: true
+                                    model: win.sourceDraft.itemsModel
+                                    ScrollBar.vertical: AppScroll {}
+                                    delegate: Item {
+                                        width: sourceList.width
+                                        height: win.sourceSearch === "" || row.title.toLowerCase().indexOf(win.sourceSearch.toLowerCase()) >= 0 ? Math.max(win.rh(62), sourceRow.implicitHeight + 12) : 0
+                                        visible: height > 0
+                                        RowLayout {
+                                            id: sourceRow; anchors.fill: parent; anchors.margins: 6; spacing: 6
+                                            ColumnLayout {
+                                                spacing: 2
+                                                AppButton { text: "للأعلى"; implicitWidth: Math.round(76 * win.uiScale); implicitHeight: win.rh(26); enabled: index > 0; onClicked: win.sourceDraft.moveItem(index, -1); Accessible.name: "نقل " + row.title + " للأعلى" }
+                                                AppButton { text: "للأسفل"; implicitWidth: Math.round(76 * win.uiScale); implicitHeight: win.rh(26); enabled: index < sourceList.count - 1; onClicked: win.sourceDraft.moveItem(index, 1); Accessible.name: "نقل " + row.title + " للأسفل" }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: 3
+                                                LabelText { text: row.title; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                SubText { text: row.available ? (row.input_path || (row.duration ? Math.round(row.duration / 60) + " دقيقة" : "")) : "غير متاح"; Layout.fillWidth: true; elide: Text.ElideMiddle }
+                                            }
+                                            SubText { text: "#" + row.position }
+                                            AppCheck { checked: row.selected; enabled: row.available; onClicked: win.sourceDraft.selectItem(index, checked); Accessible.name: "تحديد " + row.title }
+                                        }
+                                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: win.line }
+                                    }
+                                }
+                                ColumnLayout {
+                                    anchors.centerIn: parent; width: Math.max(0, parent.width - 36); spacing: 12
+                                    visible: sourceList.count === 0
+                                    LabelText { text: win.sourceDraft.busy ? "جارٍ قراءة المصدر…" : win.sourceTab === 0 ? "ستظهر الفيديوهات هنا" : "لم تُضف ملفات بعد"; font.pixelSize: win.fs(19); Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                                    SubText { text: win.sourceTab === 0 ? "اختر مصدرًا وأضف العناصر لعرضها في القائمة" : "اختر الملفات لمراجعتها قبل إضافتها إلى الطابور"; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                                }
+                            }
+                            ColumnLayout {
+                                visible: win.sourceTab === 0; Layout.fillWidth: true; spacing: 6
+                                LabelText { text: "مراحل المعالجة *"; Layout.fillWidth: true }
+                                AppCombo {
+                                    id: preset; objectName: "sourcePreset"; Layout.fillWidth: true; Layout.minimumWidth: 0
+                                    model: [{id:"full",name:"الدورة الكاملة حتى Word"},{id:"transcript",name:"تنزيل وتفريغ فقط"},{id:"download",name:"تنزيل فقط"},{id:"custom",name:"القالب المخصص من الإعدادات"}]
+                                    textRole: "name"; valueRole: "id"; placeholderText: "اختر مراحل المعالجة"
+                                    currentIndex: win.sourceChoiceIndex(model, win.sourceDraft.preset)
+                                    onActivated: win.sourceDraft.setPreset(currentValue)
+                                    Accessible.name: "مراحل معالجة YouTube، مطلوب"
+                                }
+                                SubText { text: win.sourceDraft.fieldErrors.preset || ""; visible: text.length > 0; color: visualTheme.danger; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                            }
+                            SubText { objectName: "sourceValidationMessage"; text: win.sourceDraft.validationMessage; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                            AppButton {
+                                objectName: "enqueueSourceButton"; text: win.sourceDraft.enqueueBusy ? "جارٍ الإضافة…" : "إضافة إلى الطابور"; gold: true
+                                enabled: win.sourceDraft.canEnqueue && !win.sourceDraft.enqueueBusy
+                                Layout.alignment: Qt.AlignLeft
+                                onClicked: {
+                                    var result = win.sourceDraft.enqueue()
+                                    if (result.ok) { win.sourceSearch = ""; rangeField.text = ""; forceRefresh.checked = false; win.page = 0 }
+                                }
+                            }
                         }
                     }
                 }
@@ -1891,8 +2008,8 @@ ApplicationWindow {
             if (!drop.hasUrls || !win.hasLocalTranscript(drop.urls)) { drop.accepted = false; return }
             var urls = []
             for (var i = 0; i < drop.urls.length; i++) urls.push(drop.urls[i].toString())
-            var added = backend.importDroppedTranscripts(urls, win.transcriptTemplateId(), sourceFolderCombo.currentValue || "")
-            if (added > 0) { drop.accept(Qt.CopyAction); win.page = 0 }
+            var added = win.sourceDraft.stageDroppedUrls(urls)
+            if (added > 0) { drop.accept(Qt.CopyAction); win.sourceSearch = ""; win.page = 1 }
             else drop.accepted = false
         }
         Rectangle {
@@ -1904,9 +2021,9 @@ ApplicationWindow {
             border.color: win.accent; border.width: 3
             ColumnLayout {
                 anchors.centerIn: parent; width: Math.min(660, parent.width - 80); spacing: win.rs(16)
-                LabelText { text: "أفلت تفريغات TXT لإضافتها إلى الطابور"; font.pixelSize: win.fs(24); Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
-                SubText { text: "تُنسخ الملفات تلقائيًا إلى مجلد العمل لإنتاج Word عبر OpenCode. يُستخدم القالب ومجلد الدرس المحددان في صفحة إضافة مصدر، وتُتجاهل الملفات الأخرى."; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
-                SubText { objectName: "transcriptDropOptions"; text: "القالب: " + templateBox.currentText + "  ·  المادة: " + sourceFolderCombo.currentText + "\nمجلد النتائج: " + win.savedOutputRoot; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WrapAnywhere }
+                LabelText { text: "أفلت الملفات لمراجعتها قبل الإضافة إلى الطابور"; font.pixelSize: win.fs(24); Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
+                SubText { text: "تُعرض تفريغات TXT في صفحة إضافة مصدر. اختر القالب والمجلدات، ثم أكّد إضافة الملفات المحددة."; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
+                SubText { objectName: "transcriptDropOptions"; text: "لن تُنشأ مهام قبل التأكيد. " + win.sourceDraft.validationMessage; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WrapAnywhere }
             }
         }
     }
@@ -1939,7 +2056,7 @@ ApplicationWindow {
             SubText { text: "اجمع مواضيع المادة أو الدرس في مجلد واحد. سيظهر التنظيم في المكتبة وفي تصدير Word."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
             AppField { id: folderName; Layout.fillWidth: true; placeholderText: "اسم المادة أو الدرس"; Accessible.name: "اسم المجلد الجديد" }
         }
-        onAccepted: { var ident = backend.createFolder(folderName.text); if (ident) { var items = backend.folders; for (var i=0; i<items.length; i++) if (items[i].id === ident) sourceFolderCombo.currentIndex = i; folderName.text = "" } }
+        onAccepted: { var ident = backend.createFolder(folderName.text); if (ident) { win.sourceDraft.setFolderId(ident); folderName.text = "" } }
     }
     AppDialog {
         id: jobDialog; objectName: "jobDialog"
@@ -2322,65 +2439,210 @@ ApplicationWindow {
     AppDialog {
         id: forceDialog; objectName: "forceDialog"
         property bool starting: true
+        property bool overrideDraft: false
+        property bool draftInitialized: false
+        property bool committing: false
+        property string providerDraft: ""
         property string modelDraft: ""
-        anchors.centerIn: parent; width: Math.min(640, win.width - 48); height: Math.min(460, win.height - 48); modal: true
-        title: "فرض إعداد على عمال OpenCode"
-        onOpened: backend.refreshModelCatalogs()
-        background: Rectangle { color: win.panel; radius: 10; border.color: win.line }
-        footer: GridLayout { objectName: "forceDialogActions"; columns: win.contentUnits < 850 ? 1 : 2;
-                width: parent.width; columnSpacing: 10
-                AppButton {
-                    objectName: "forceDefaultButton"
-                    text: forceDialog.starting ? "تشغيل بالإعداد الافتراضي للعمال" : "إلغاء الفرض"
-                    onClicked: { win.skipForceQuestion = skipForceBox.checked; win.applyForce(false, forceDialog.starting) }
-                }
-                AppButton {
-                    objectName: "forceApplyButton"
-                    text: forceDialog.starting ? "تشغيل بالإعداد المفروض" : "تطبيق الفرض"
-                    primary: true
-                    onClicked: { win.skipForceQuestion = skipForceBox.checked; win.applyForce(true, forceDialog.starting) }
-                }
-                Item { Layout.fillWidth: true }
-                AppButton { text: "رجوع"; onClicked: forceDialog.close() }
+        property string variantDraft: ""
+        property string providerHint: ""
+        readonly property bool narrowBody: availableWidth / win.uiScale < 600
+        function restoreFields() {
+            forceModel.editText = modelDraft
+            forceVariant.currentIndex = forceVariant.model.findIndex(function(item) { return item.id === forceDialog.variantDraft })
+            forceVariant.editText = variantDraft || "افتراضي المزود"
+        }
+        function chooseMode(force) {
+            if (force && !draftInitialized) {
+                var worker = win.settings.opencode_workers[0] || {}
+                providerDraft = worker.provider || "login"
+                modelDraft = worker.model || ""
+                variantDraft = worker.variant || ""
+                draftInitialized = true
             }
+            overrideDraft = force
+            restoreFields()
+        }
+        function chooseProvider(provider) {
+            if (provider === providerDraft) return
+            var prefix = modelDraft.indexOf("/") > 0 ? modelDraft.split("/")[0] : ""
+            var knownPrefix = prefix && (prefix === providerDraft || backend.providers.some(function(item) { return item.id === prefix }))
+            providerHint = ""
+            if (knownPrefix && provider !== "login" && provider !== "custom" && prefix !== provider) {
+                modelDraft = ""
+                providerHint = "اختر نموذجًا للمزود الجديد؛ أُزيل النموذج المرتبط بالمزود السابق."
+            }
+            providerDraft = provider
+            restoreFields()
+        }
+        anchors.centerIn: parent
+        width: Math.min(840 * win.uiScale, win.width - 32)
+        height: Math.min(650 * win.uiScale, win.height - 32)
+        modal: true
+        title: "إعداد عمال OpenCode"
+        onOpened: {
+            restoreFields()
+            forceBody.contentItem.contentY = 0
+            if (overrideDraft) forceUnifiedCard.forceActiveFocus()
+            else forceWorkersCard.forceActiveFocus()
+            backend.refreshModelCatalogs()
+        }
+        background: Rectangle { color: win.panel; radius: 10; border.color: win.line }
+        footer: Item {
+            objectName: "forceDialogActions"
+            implicitHeight: forceFooter.implicitHeight + 24 * win.uiScale
+            ColumnLayout {
+                id: forceFooter
+                anchors.fill: parent; anchors.margins: 12 * win.uiScale
+                spacing: 10 * win.uiScale
+                AppCheck {
+                    id: skipForceBox; objectName: "skipForceBox"
+                    text: "تخطَّ هذا السؤال في هذه الجلسة"
+                    Layout.fillWidth: true
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    layoutDirection: Qt.RightToLeft
+                    spacing: 10 * win.uiScale
+                    AppButton {
+                        objectName: "forceApplyButton"
+                        text: forceDialog.starting ? "تشغيل الطابور" : (forceDialog.overrideDraft ? "تطبيق الفرض" : "إلغاء الفرض")
+                        primary: true
+                        enabled: !forceDialog.committing && (!forceDialog.overrideDraft || forceProvider.currentIndex >= 0)
+                        onClicked: win.applyForce(forceDialog.overrideDraft, forceDialog.starting)
+                    }
+                    Item { Layout.fillWidth: true }
+                    AppButton { objectName: "forceBackButton"; text: "رجوع"; onClicked: forceDialog.close() }
+                }
+            }
+        }
         contentItem: WDialogBody {
-            bodySpacing: 12
+            id: forceBody; objectName: "forceDialogBody"
+            bodySpacing: 18 * win.uiScale
+            function revealFocus(item) {
+                if (!item || !forceDialog.opened) return
+                var inside = item
+                while (inside && inside !== forceBody) inside = inside.parent
+                if (!inside) return
+                var point = item.mapToItem(forceBody, 0, 0)
+                var padding = 6 * win.uiScale
+                var offset = point.y < padding ? point.y - padding
+                    : point.y + item.height > forceBody.availableHeight - padding ? point.y + item.height - forceBody.availableHeight + padding : 0
+                if (offset) contentItem.contentY = Math.max(0, Math.min(contentItem.contentHeight - contentItem.height, contentItem.contentY + offset))
+            }
+            Connections {
+                target: win
+                function onActiveFocusItemChanged() {
+                    var item = win.activeFocusItem
+                    Qt.callLater(function() { forceBody.revealFocus(item) })
+                }
+            }
             LabelText {
                 objectName: "forceQuestion"
-                Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: win.fs(17)
-                text: forceDialog.starting
-                      ? "قبل تشغيل الطابور: هل تفرض مزودًا ونموذجًا ومستوى تفكير على كل عمال OpenCode، أم يبقى كل عامل على إعداده؟"
-                      : "اختر الإعداد المفروض على كل عمال OpenCode، أو ألغِ الفرض ليعود كل عامل إلى إعداده."
-            }
-            GridLayout { layoutDirection: Qt.RightToLeft; columns: win.contentUnits < 850 ? 1 : 2;
                 Layout.fillWidth: true
-                LabelText { text: "المزود" }
-                AppCombo { id: forceProvider; objectName: "forceProviderBox"; Layout.fillWidth: true; model: backend.providers; textRole: "name"; valueRole: "id" }
+                wrapMode: Text.WordWrap; font.pixelSize: win.fs(18)
+                text: forceDialog.starting ? "كيف تريد تشغيل الطابور؟" : "كيف تريد إعداد عمال OpenCode؟"
             }
-            GridLayout { layoutDirection: Qt.RightToLeft; columns: win.contentUnits < 850 ? 1 : 2;
+            GridLayout {
+                objectName: "forceChoices"
                 Layout.fillWidth: true
-                LabelText { text: "النموذج" }
-                AppCombo {
-                    id: forceModel; objectName: "forceModelField"; Layout.fillWidth: true; editable: true
-                    model: win.opencodeModelOptions(forceProvider.currentValue, "")
-                    onModelChanged: Qt.callLater(function() { if (forceDialog.opened) forceModel.editText = forceDialog.modelDraft })
-                    onActivated: forceDialog.modelDraft = editText
-                    onAccepted: forceDialog.modelDraft = editText
-                    Accessible.name: "نموذج OpenCode المفروض"
+                layoutDirection: Qt.RightToLeft
+                columns: forceDialog.narrowBody ? 1 : 2
+                columnSpacing: 14 * win.uiScale; rowSpacing: 12 * win.uiScale
+                WChoiceCard {
+                    id: forceUnifiedCard; objectName: "forceUnifiedCard"
+                    theme: visualTheme; Layout.fillWidth: true; Layout.minimumWidth: 0
+                    text: "فرض إعداد موحد"
+                    description: "نفس الإعدادات لجميع العمال"
+                    checked: forceDialog.overrideDraft
+                    onClicked: forceDialog.chooseMode(true)
+                    onStepRequested: { forceDialog.chooseMode(false); forceWorkersCard.forceActiveFocus() }
+                }
+                WChoiceCard {
+                    id: forceWorkersCard; objectName: "forceWorkersCard"
+                    theme: visualTheme; Layout.fillWidth: true; Layout.minimumWidth: 0
+                    text: "إعدادات كل عامل"
+                    description: "استخدام الإعدادات الحالية"
+                    checked: !forceDialog.overrideDraft
+                    onClicked: forceDialog.chooseMode(false)
+                    onStepRequested: { forceDialog.chooseMode(true); forceUnifiedCard.forceActiveFocus() }
                 }
             }
-            GridLayout { layoutDirection: Qt.RightToLeft; columns: win.contentUnits < 850 ? 1 : 2;
+            Box {
+                objectName: "forceFieldsPanel"
+                visible: forceDialog.overrideDraft
                 Layout.fillWidth: true
-                LabelText { text: "مستوى التفكير" }
-                AppField { id: forceVariant; objectName: "forceVariantField"; Layout.fillWidth: true; horizontalAlignment: Text.AlignRight; placeholderText: "high أو max أو اتركه فارغًا" }
+                implicitHeight: forceFields.implicitHeight + 32 * win.uiScale
+                ColumnLayout {
+                    id: forceFields
+                    anchors.fill: parent; anchors.margins: 16 * win.uiScale
+                    spacing: 10 * win.uiScale
+                    LabelText { text: "الإعداد الموحد"; font.pixelSize: win.fs(16); Layout.fillWidth: true }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        layoutDirection: Qt.RightToLeft
+                        columns: forceDialog.narrowBody ? 1 : 2
+                        columnSpacing: 18 * win.uiScale; rowSpacing: 10 * win.uiScale
+                        ColumnLayout {
+                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                            LabelText { text: "المزود"; Layout.fillWidth: true }
+                            AppCombo {
+                                id: forceProvider; objectName: "forceProviderBox"
+                                Layout.fillWidth: true; Layout.minimumWidth: 0
+                                model: backend.providers; textRole: "name"; valueRole: "id"
+                                currentIndex: backend.providers.findIndex(function(item) { return item.id === forceDialog.providerDraft })
+                                onActivated: forceDialog.chooseProvider(currentValue || "")
+                                Accessible.name: "المزود المفروض على عمال OpenCode"
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                            LabelText { text: "مستوى التفكير"; Layout.fillWidth: true }
+                            AppCombo {
+                                id: forceVariant; objectName: "forceVariantField"
+                                Layout.fillWidth: true; Layout.minimumWidth: 0; editable: true
+                                model: [{id: "", name: "افتراضي المزود"}, {id: "high", name: "high"}, {id: "max", name: "max"}]
+                                textRole: "name"; valueRole: "id"
+                                onActivated: { forceDialog.variantDraft = currentValue || ""; editText = currentText }
+                                onAccepted: forceDialog.variantDraft = editText === "افتراضي المزود" ? "" : editText.trim()
+                                Accessible.name: "مستوى التفكير المفروض أو افتراضي المزود"
+                                Connections {
+                                    target: forceVariant.contentItem
+                                    function onTextEdited() {
+                                        forceDialog.variantDraft = forceVariant.contentItem.text === "افتراضي المزود" ? "" : forceVariant.contentItem.text
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    LabelText { text: "النموذج"; Layout.fillWidth: true }
+                    AppCombo {
+                        id: forceModel; objectName: "forceModelField"
+                        Layout.fillWidth: true; Layout.minimumWidth: 0; editable: true
+                        model: win.opencodeModelOptions(forceDialog.providerDraft, "")
+                        onModelChanged: Qt.callLater(function() { if (forceDialog.visible) forceModel.editText = forceDialog.modelDraft })
+                        onActivated: forceDialog.modelDraft = editText
+                        onAccepted: forceDialog.modelDraft = editText
+                        Accessible.name: "نموذج OpenCode المفروض؛ اختر نموذجًا أو اكتب معرّفه"
+                        Connections {
+                            target: forceModel.contentItem
+                            function onTextEdited() { forceDialog.modelDraft = forceModel.contentItem.text }
+                        }
+                    }
+                    SubText {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                        text: forceDialog.providerHint || "اختر من الكتالوج أو اكتب معرّف نموذج مخصص. اتركه فارغًا لاستخدام النموذج الافتراضي."
+                        color: forceDialog.providerHint ? visualTheme.warning : win.muted
+                    }
+                }
             }
             SubText {
                 Layout.fillWidth: true; wrapMode: Text.WordWrap
-                text: "الفرض لجلسة واحدة ولا يُحفظ. عامل بلا مفتاح للمزود المفروض يُتخطى برسالة واضحة في صفحة العمال."
+                text: forceDialog.overrideDraft
+                      ? "الفرض لجلسة واحدة ولا يُحفظ. عامل بلا مفتاح للمزود المفروض يُتخطى برسالة واضحة في صفحة العمال."
+                      : "سيعمل كل عامل بإعداداته الحالية. لن تُغيّر إعدادات العمال المحفوظة."
             }
-            AppCheck { id: skipForceBox; objectName: "skipForceBox"; text: "تخطَّ هذا السؤال في هذه الجلسة"; palette.windowText: win.ink; Layout.alignment: Qt.AlignRight }
             Item { Layout.fillHeight: true }
-
         }
     }
     AppDialog {

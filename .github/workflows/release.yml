@@ -79,6 +79,12 @@ jobs:
           WARAQ_UI_CATALOG_DELAY_MS: "300"
         run: python -u tests/verify_ui.py
 
+      - name: Reviewed source drafts and worker-choice dialogs
+        timeout-minutes: 3
+        run: |
+          python tests/verify_source_draft.py
+          python tests/verify_force_dialog.py
+
       - name: Petrol theme, layout and dialog matrix
         timeout-minutes: 5
         run: python tests/verify_redesign.py
