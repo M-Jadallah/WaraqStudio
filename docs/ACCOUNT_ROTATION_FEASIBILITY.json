@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-26T18:56:17.936273+00:00",
+  "kind": "offline_schema_inspection_only",
+  "binary": {
+    "version": "codex-cli 0.164.0-alpha.11.1",
+    "sha256": "1103e9e09c71fa2cd0afd6d8f3b9a2d63174fe8efd7cb5bd09f1cb14ef58a098"
+  },
+  "protocol": {
+    "default": {
+      "schema_file_count": 320,
+      "schema_bundle_sha256": "fce16582f69ce00bc5f5b2d74fd3e4cd1e97ac5216afb9d7449bb8f0bc5ee2bf",
+      "rate_limits_read_present": true,
+      "external_tokens_login_present": true,
+      "external_tokens_internal_only": true,
+      "external_tokens_unstable": true,
+      "quota_response_fields": [
+        "accountId",
+        "ordinaryUsageAllowed",
+        "rateLimitResetCredits",
+        "rateLimitUpsell",
+        "rateLimits",
+        "rateLimitsByLimitId"
+      ],
+      "quota_window_fields": [
+        "resetsAt",
+        "usedPercent",
+        "windowDurationMins"
+      ]
+    },
+    "experimental": {
+      "schema_file_count": 458,
+      "schema_bundle_sha256": "e3f5511a8bc4926ccba2f7dec7cfa981112a42850a1e65a99fdf8f8cef1f4789",
+      "rate_limits_read_present": true,
+      "external_tokens_login_present": true,
+      "external_tokens_internal_only": true,
+      "external_tokens_unstable": true,
+      "quota_response_fields": [
+        "accountId",
+        "ordinaryUsageAllowed",
+        "rateLimitResetCredits",
+        "rateLimitUpsell",
+        "rateLimits",
+        "rateLimitsByLimitId"
+      ],
+      "quota_window_fields": [
+        "resetsAt",
+        "usedPercent",
+        "windowDurationMins"
+      ]
+    }
+  },
+  "repository": {
+    "source_sha256": {
+      "engine/vendor/lib/constants.ts": "eefd424fc1aa49be7839b313d568010684e720ee25533af72482288211bfdfb9",
+      "engine/vendor/lib/auth/auth.ts": "8872eb6746661a944dd98a4f99423d31d809a90ca475f4da0cc8ce9b2725992e",
+      "engine/vendor/lib/auth/scopes.ts": "64bd4a07f06d5af6831cdbe0ef5ce9aa944d76ec09aad7f1d4921cf0790071f6",
+      "engine/src/rpc.js": "1272a6907ccf1e27fb5306b6f9b48e05a89b061c9041a27f6d9221a9dbfe672a",
+      "scripts/prepare_embedded_engine.py": "9e6f881addcbba89db653f7d47b5299b30d48fcc19a51bec4bfc3a36a9151b68",
+      "engine/vendor/lib/codex-usage.ts": "bc018588b0ebc4b7901a804560ef2f498e3e7de5554a3711aa73a3700776d8c7",
+      "engine/vendor/lib/request/fetch-helpers.ts": "5d1b2cec2fd400f75032a584bb40301ff763244d03b212b95f497f9e15d588cc"
+    },
+    "codex_backend_base_url": "https://chatgpt.com/backend-api",
+    "codex_usage_path": "/wham/usage",
+    "responses_route_rewritten_for_codex": true,
+    "fixed_oauth_client_id": true,
+    "requested_oauth_scopes": [
+      "openid",
+      "profile",
+      "email",
+      "offline_access"
+    ],
+    "packager_contains_codex_app_server_pin": false,
+    "credential_records_inspected": false
+  },
+  "account_login_attempted": false,
+  "authenticated_quota_read_attempted": false,
+  "inference_attempted": false,
+  "auth_file_created": false,
+  "release_gate": {
+    "status": "not_passed",
+    "runtime_feature_implemented": false,
+    "next_phase_permitted": false,
+    "not_verified": [
+      "production_support",
+      "authenticated_account_binding",
+      "inference_quota_scope",
+      "renewal_and_credential_isolation",
+      "permitted_rotation_integration"
+    ]
+  }
+}

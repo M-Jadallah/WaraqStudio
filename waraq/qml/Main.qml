@@ -1177,6 +1177,44 @@ ApplicationWindow {
                                     Accessible.name: "الفاصل بين تحديثات حصص ChatGPT بالثواني"
                                 }
                             }
+                            Flow {
+                                Layout.fillWidth: true; spacing: win.rs(8); layoutDirection: Qt.RightToLeft
+                                AppCheck {
+                                    objectName: "accountAutoSwitchEnabled"; text: "التبديل التلقائي حسب المتبقي"
+                                    checked: settings.accounts_auto_switch_enabled === true
+                                    enabled: backend.accountRotation.available === true
+                                    palette.windowText: win.ink
+                                    onClicked: { settings.accounts_auto_switch_enabled = checked; win.save() }
+                                    Accessible.name: text
+                                }
+                                LabelText { text: "عتبة المتبقي (%)"; height: rotationThreshold.height; verticalAlignment: Text.AlignVCenter }
+                                AppField {
+                                    id: rotationThreshold; objectName: "accountSwitchRemainingPercent"
+                                    width: 110 * win.uiScale; maximumLength: 32
+                                    text: Number(settings.accounts_switch_remaining_percent === undefined ? 20 : settings.accounts_switch_remaining_percent).toLocaleString(Qt.locale(), 'g', 15)
+                                    validator: DoubleValidator { bottom: 0; top: 100; notation: DoubleValidator.StandardNotation; locale: Qt.locale().name }
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    Accessible.name: "نسبة الاستخدام المتبقية التي يبدأ عندها التبديل"
+                                    onEditingFinished: {
+                                        if (!acceptableInput) return
+                                        var value = Number.fromLocaleString(Qt.locale(), text)
+                                        if (acceptableInput && isFinite(value) && value >= 0 && value <= 100) {
+                                            settings.accounts_switch_remaining_percent = value
+                                            if (!win.save()) text = Number(JSON.parse(backend.settingsJson).accounts_switch_remaining_percent).toLocaleString(Qt.locale(), 'g', 15)
+                                        }
+                                    }
+                                }
+                            }
+                            SubText {
+                                objectName: "accountRotationSupportMessage"; text: backend.accountRotation.message
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            }
+                            SubText {
+                                objectName: "accountRotationHundredHint"
+                                text: "عند تفعيل الميزة، تجعل عتبة 100% جميع الحسابات غير مؤهلة."
+                                visible: settings.accounts_switch_remaining_percent === 100
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone
+                            }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: win.rs(8)
                                 AppButton {

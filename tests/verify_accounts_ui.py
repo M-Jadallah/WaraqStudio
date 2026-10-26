@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QObject, QUrl, qInstallMessageHandler
+from PySide6.QtCore import QLocale, QMetaObject, QObject, QUrl, qInstallMessageHandler
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtTest import QSignalSpy, QTest
@@ -49,13 +49,30 @@ def main():
             return item
         try:
             assert find('accountEngineHealth').property('text')
+            assert not find('accountAutoSwitchEnabled').property('enabled')
+            assert find('accountRotationSupportMessage').property('text')
+            threshold = find('accountSwitchRemainingPercent')
+            for value in (0, 20.5, 100):
+                threshold.setProperty('text', QLocale().toString(float(value), 'g', 15))
+                assert threshold.property('acceptableInput'), value
+                assert QMetaObject.invokeMethod(threshold, 'editingFinished')
+                QTest.qWait(20)
+                assert config.snapshot()['accounts_switch_remaining_percent'] == float(value)
+            assert config.snapshot()['accounts_auto_switch_enabled'] is False
+            assert find('accountRotationHundredHint').property('visible')
+            threshold.setProperty('text', QLocale().toString(20.0, 'g', 15))
+            assert QMetaObject.invokeMethod(threshold, 'editingFinished')
+            QTest.qWait(20)
+            assert not find('accountRotationHundredHint').property('visible')
             assert find('accountMigrationNotice').property('visible')
             bridge.acknowledgeAccountMigration()
             pump(app, lambda: not bridge.accountBusy)
             assert not find('accountMigrationNotice').property('visible')
             for scale in (1.0, 1.35):
-                root.setProperty('uiScale', scale)
+                config.save({'ui_scale': scale})
+                bridge.settingsChanged.emit()
                 QTest.qWait(100)
+                assert abs(root.property('uiScale') - scale) < 0.01
                 listing = find('accountList')
                 listing.setProperty('contentY', min(100, max(0, listing.property('contentHeight') - listing.property('height'))))
                 before = listing.property('contentY')
@@ -65,6 +82,23 @@ def main():
                 QTest.qWait(80)
                 assert resets.count() == 0
                 assert abs(listing.property('contentY') - before) < 2
+            if len(sys.argv) > 1:
+                evidence = Path(sys.argv[1]).resolve()
+                evidence.mkdir(parents=True, exist_ok=True)
+                root.setWidth(1060)
+                root.setHeight(720)
+                root.setProperty('toastText', '')
+                for theme in ('dark', 'light'):
+                    for scale in (1.0, 1.4):
+                        config.save({'ui_scale': scale, 'theme': theme})
+                        bridge.settingsChanged.emit()
+                        QTest.qWait(150)
+                        image = root.grabWindow()
+                        assert not image.isNull()
+                        assert image.save(str(evidence / f'accounts-{theme}-{scale}.png'))
+                config.save({'ui_scale': 1.0, 'theme': 'dark'})
+                bridge.settingsChanged.emit()
+                QTest.qWait(100)
             ident = accounts.rows[0]['id']
             with patch('waraq.bridge.QDesktopServices.openUrl', return_value=True):
                 bridge.loginAccount(ident)

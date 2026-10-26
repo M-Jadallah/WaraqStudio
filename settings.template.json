@@ -31,6 +31,8 @@
   "accounts_max_concurrency": 5,
   "accounts_auto_refresh": true,
   "accounts_refresh_seconds": 300,
+  "accounts_auto_switch_enabled": false,
+  "accounts_switch_remaining_percent": 20,
   "opencode_providers": [],
   "prompt": "استخدم مهارة arabic-lesson-formatter-sequential لمعالجة ملف التفريغ الأصلي: {transcript_path}\nأنشئ مستند Word واحدًا واحفظه بالمسار: {output_path}\nعنوان الدرس: {title}\nرقم الدرس: {position}",
   "strict_order": false,

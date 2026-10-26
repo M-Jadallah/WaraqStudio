@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QFileDialog
 from . import __version__
 from . import app_update
 from .catalog import deepgram_models
-from .config import (BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
+from .config import (ACCOUNT_ROTATION_AVAILABLE, ACCOUNT_ROTATION_MESSAGE, BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
                      provider_info, provider_of)
 from .models import DictListModel
 from .remote import RemoteAccess
@@ -239,6 +239,11 @@ class Bridge(QObject):
     @Property("QVariantMap", notify=accountsChanged)
     def accountEngine(self):
         return dict(self._account_engine_status)
+
+    @Property("QVariantMap", constant=True)
+    def accountRotation(self):
+        return {"available": ACCOUNT_ROTATION_AVAILABLE, "state": "unsupported",
+                "reasonCode": "official_source_unverified", "message": ACCOUNT_ROTATION_MESSAGE}
 
     @Slot()
     def recoverAccountEngine(self):

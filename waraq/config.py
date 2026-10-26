@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 from pathlib import Path
 import tempfile
+
+
+# Build-time support gate, never sourced from user settings or a schema receipt.
+ACCOUNT_ROTATION_AVAILABLE = False
+ACCOUNT_ROTATION_MESSAGE = "التبديل التلقائي غير متاح في هذه النسخة؛ يمكنك حفظ العتبة لاستخدامها عند توفره."
+
+
+def valid_rotation_threshold(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100 and math.isfinite(value)
 
 
 DEFAULT_PROMPT = '''استخدم مهارة arabic-lesson-formatter-sequential لمعالجة ملف التفريغ الأصلي:
@@ -121,6 +131,7 @@ def defaults(home: Path):
         "opencode_providers": [],
         "accounts_enabled": True, "accounts_max_concurrency": 5,
         "accounts_auto_refresh": True, "accounts_refresh_seconds": 300,
+        "accounts_auto_switch_enabled": False, "accounts_switch_remaining_percent": 20,
         "library_root": str(home / "library"),
         "library_auto": True, "library_copy_audio": False,
         "theme": "dark", "ui_scale": 1.0, "ui_rail_collapsed": False, "ui_compact": True,
@@ -163,9 +174,20 @@ class Config:
             # Existing users keep their current retry policy when this key first appears.
             if "youtube_retry_attempts" not in saved:
                 self.data["youtube_retry_attempts"] = saved.get("auto_retry_attempts", self.data["youtube_retry_attempts"])
+        # A hand-edited/imported setting cannot activate an unsupported reader.
+        saved_rotation_enabled = self.data.get("accounts_auto_switch_enabled")
+        rotation_repaired = (not isinstance(saved_rotation_enabled, bool)
+                             or (saved_rotation_enabled and not ACCOUNT_ROTATION_AVAILABLE)
+                             or not valid_rotation_threshold(self.data.get("accounts_switch_remaining_percent")))
+        if not isinstance(saved_rotation_enabled, bool) or not ACCOUNT_ROTATION_AVAILABLE:
+            self.data["accounts_auto_switch_enabled"] = False
+        if not valid_rotation_threshold(self.data.get("accounts_switch_remaining_percent")):
+            self.data["accounts_switch_remaining_percent"] = 20
         self.migrate_accounts()
         self.migrate()
         self.migrate_backups()
+        if rotation_repaired:
+            self.save({})
 
     def migrate_accounts(self):
         """One-way settings migration; the retired implementation cannot be selected."""
@@ -289,9 +311,13 @@ class Config:
             if not Path(d[key]).is_absolute():
                 raise ValueError(f"اختر مسار {label} مسارًا مطلقًا.")
         for k in ("library_auto", "library_copy_audio", "ui_rail_collapsed", "ui_compact", "accounts_enabled",
-                  "accounts_auto_refresh"):
+                  "accounts_auto_refresh", "accounts_auto_switch_enabled"):
             if not isinstance(d[k], bool):
                 raise ValueError(f"{k}: القيمة يجب أن تكون true أو false.")
+        if not valid_rotation_threshold(d.get("accounts_switch_remaining_percent")):
+            raise ValueError("نسبة التبديل المتبقية يجب أن تكون رقمًا بين 0 و100.")
+        if d["accounts_auto_switch_enabled"] and not ACCOUNT_ROTATION_AVAILABLE:
+            raise ValueError(ACCOUNT_ROTATION_MESSAGE)
         for k, low, high in [
             ("youtube_request_delay", 1, 120), ("youtube_sleep_min", 5, 600),
             ("youtube_sleep_max", 5, 1200), ("project_concurrency", 1, 50),
