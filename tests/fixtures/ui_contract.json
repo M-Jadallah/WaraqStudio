@@ -11,7 +11,7 @@
     "waraq/catalog.py": "d17e04d9dd7195fa2a9fbcdac75efbd30b301b77c4123cc289aadecfc195dada",
     "waraq/config.py": "38a40494f470626a7890021c5abd9dfc6a61447463ef67f4620ee81ad568a28f",
     "waraq/embedded_accounts.py": "488b751952a801f188c6188636180a165b010b9d275aca300d3b49616d467ca7",
-    "waraq/embedded_runtime.py": "63690f5814f1d057ac0544e4ae1b0a088e25994446d91bda727386c75ec4163a",
+    "waraq/embedded_runtime.py": "fc399b9c88046dcb942a83be6f778e609ccb44700debda09326766cb750e0ced",
     "waraq/internet.py": "35e289b3b6a698f1043714e87d84f3da5ec2680efaad5b7621c3acca4b2c0e09",
     "waraq/library.py": "e618eed33cdbaf0f55395a5392294ba8636adfb11d24de54c8f2242c10ee36da",
     "waraq/mobile_assets.py": "cba99042e34da22020a7444dee5839118d5dede25da80a31e7c05f3150ba9ba8",
@@ -402,10 +402,11 @@
     "live_rotation_enabled": false
   },
   "account_transfer_change": {
-    "reason": "User-authorized password-encrypted portable ChatGPT account export/import, additive desktop UI, sanitized summaries and transfer concurrency guards.",
+    "reason": "User-authorized password-encrypted portable ChatGPT account export/import, additive desktop UI, sanitized summaries and transfer concurrency guards. Extend the local transfer RPC timeout without retrying mutations.",
     "previous_sha256": {
       "waraq/bridge.py": "0d3cc6ebda5cf2f4e012e56083138789883844abf6e8ec1893001c92f0e4df47",
-      "waraq/embedded_accounts.py": "98162e5efa55adf6fec912e581d6c10b37322724fd0b181bbbad2efdc11e6ca6"
+      "waraq/embedded_accounts.py": "98162e5efa55adf6fec912e581d6c10b37322724fd0b181bbbad2efdc11e6ca6",
+      "waraq/embedded_runtime.py": "63690f5814f1d057ac0544e4ae1b0a088e25994446d91bda727386c75ec4163a"
     },
     "api_version": 1
   }

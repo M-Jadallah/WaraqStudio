@@ -113,6 +113,16 @@ def test_http_transport_is_loopback_authenticated_no_proxy_and_no_redirect(monke
     assert isinstance(seen["handlers"][1], native._NoRedirect)
 
 
+@pytest.mark.parametrize("method,expected", [("accounts.export", 180), ("accounts.import", 180),
+                                               ("usage.refresh", 180), ("accounts.list", 30)])
+def test_transfer_rpc_allows_slow_encryption_without_changing_other_timeouts(method, expected):
+    current = runtime()
+    current.request = Mock(return_value={"output": {"ok": True, "data": {}}})
+    current.rpc(method)
+    assert current.request.call_count == 1
+    assert current.request.call_args.kwargs["timeout"] == expected
+
+
 def test_session_environment_cannot_receive_rpc_or_provider_secrets(tmp_path):
     current = runtime()
     current._lock = threading.RLock()

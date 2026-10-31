@@ -786,7 +786,8 @@ class EmbeddedRuntime:
     def rpc(self, method, params=None, timeout=30, directory=None):
         result = self.request("POST", "/api/rpc/" + PLUGIN_ID + "/" + quote(method, safe=""), {
             "input": {**(params or {}), "apiVersion": API_VERSION, "capability": self._capability}},
-            timeout=max(timeout, 180) if method == "usage.refresh" else timeout, directory=directory or self.profile / "home")
+            timeout=max(timeout, 180) if method in ("usage.refresh", "accounts.export", "accounts.import") else timeout,
+            directory=directory or self.profile / "home")
         if not isinstance(result, dict):
             raise EmbeddedRuntimeError("engine_protocol_mismatch")
         output = result.get("output")

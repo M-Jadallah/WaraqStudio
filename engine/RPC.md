@@ -69,5 +69,7 @@ authentication, invalid format/version/selection/path, size/account limits, busy
 state and I/O failure. Wrong passwords and authentication failures never write
 account state; a successful import acknowledgment survives a later failed UI
 refresh. These methods are not automatically retried after transport loss.
+Their local RPC timeout is 180 seconds to allow bounded scrypt processing and
+cold storage on slower Windows machines; a timed-out mutation is never retried.
 
 `tests/verify_embedded_engine.py` runs a packaged host and actual plugin with synthetic OAuth-shaped data. A test-only fetch wrapper redirects provider traffic to localhost and rejects every other external destination. This tests the local integration, not live OAuth availability or a production subscription. `engine/test/boundaries.test.mjs` verifies DPAPI payloads above Windows Credential Manager's blob limit and concurrent account pins.
