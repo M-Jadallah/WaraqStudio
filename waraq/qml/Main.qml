@@ -1228,6 +1228,19 @@ ApplicationWindow {
                                 }
                                 LabelText { text: "اسم الحساب" }
                             }
+                            Flow {
+                                Layout.fillWidth: true; spacing: win.rs(8); layoutDirection: Qt.RightToLeft
+                                AppButton {
+                                    objectName: "accountExportButton"; text: "تصدير الحسابات"
+                                    enabled: backend.accountTransferAvailable && backend.accountExportChoices.length > 0
+                                    onClicked: accountTransferDialog.openExport()
+                                }
+                                AppButton {
+                                    objectName: "accountImportButton"; text: "استيراد الحسابات"
+                                    enabled: backend.accountTransferAvailable
+                                    onClicked: accountTransferDialog.openImport()
+                                }
+                            }
                             RowLayout {
                                 visible: backend.accountEngine.migrationRequired === true
                                 Layout.fillWidth: true; spacing: win.rs(10)
@@ -2354,6 +2367,7 @@ ApplicationWindow {
             }
         }
     }
+    AccountTransferDialog { id: accountTransferDialog; controller: backend; theme: visualTheme }
     AppDialog {
         id: renameAccountDialog; objectName: "renameAccountDialog"; anchors.centerIn: parent; width: 450 * win.uiScale; modal: true
         title: "تغيير اسم الحساب"; standardButtons: Dialog.Save | Dialog.Cancel

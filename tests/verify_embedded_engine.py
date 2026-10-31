@@ -21,7 +21,7 @@ from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from waraq.config import Config
-from waraq.embedded_accounts import EmbeddedAccountService, AccountUnavailableError
+from waraq.embedded_accounts import EmbeddedAccountService, AccountUnavailableError, AccountEngineError
 from waraq.embedded_runtime import PackagedPayload, EmbeddedRuntimeSupervisor, private_directory
 
 
@@ -131,12 +131,40 @@ def main():
                     service.close_attempt(next_attempt['attempt_id'],outcome='cancelled')
                     assert b'synthetic-refresh-' not in (profile/'oc-codex-multi-auth-accounts.json').read_bytes()
                     old_ids={row['id'] for row in service.list()}
+                    portable=root/'portable.waraq-accounts'
+                    transfer_password='  عبارة أمان النقل  '
+                    assert all(row['can_export'] for row in service.list())
+                    assert service.export_accounts(sorted(old_ids),portable,transfer_password)=={'exported':2}
+                    assert b'synthetic-refresh-' not in portable.read_bytes()
+                    assert transfer_password.encode() not in portable.read_bytes()
+                    before_import=(profile/'oc-codex-multi-auth-accounts.json').read_bytes()
+                    try: service.import_accounts(portable,'wrong-password-123')
+                    except AccountEngineError as error: assert error.reason=='TRANSFER_DECRYPT_FAILED'
+                    else: raise AssertionError('Wrong backup password accepted')
+                    assert (profile/'oc-codex-multi-auth-accounts.json').read_bytes()==before_import
+                    assert service.import_accounts(portable,transfer_password)=={'imported':0,'skipped':2,'total':2}
                     service.close()
                     service=EmbeddedAccountService(cfg,EmbeddedRuntimeSupervisor(cfg))
                     restored=service.refresh()
                     assert {row['id'] for row in restored}==old_ids
                     assert all(row['login_state']=='authenticated' for row in restored)
-                    print(json.dumps({'status':'passed','native_version':'2.0.32','accounts':2,'shared_runtime':True,'large_dpapi_pool':True,'private_rpc':True,'global_concurrency':True,'child_session_pin':True,'fresh_attempt_failover':True,'login_survives_restart':True,'model_calls':sum(k=='model' for k,_ in calls),'usage_calls':sum(k=='usage' for k,_ in calls)}))
+                    service.close()
+                    receiver_cfg=Config(root/'receiver');receiver_cfg.data['accounts_auto_refresh']=False
+                    service=EmbeddedAccountService(receiver_cfg,EmbeddedRuntimeSupervisor(receiver_cfg))
+                    assert service.import_accounts(portable,transfer_password)=={'imported':2,'skipped':0,'total':2}
+                    received=service.refresh()
+                    assert len(received)==2 and all(row['login_state']=='authenticated' for row in received)
+                    receiver_bytes=(root/'receiver/accounts-v2/oc-codex-multi-auth-accounts.json').read_bytes()
+                    assert receiver_bytes.startswith(b'WARAQ-DPAPI-1\n') and b'synthetic-refresh-' not in receiver_bytes
+                    service.close()
+                    # The native host must not persist RPC passwords in logs,
+                    # settings, SQLite sessions or any other profile artifact.
+                    for artifact in root.rglob('*'):
+                        if artifact.is_file():
+                            content=artifact.read_bytes()
+                            assert transfer_password.encode('utf-8') not in content, artifact.name
+                            assert b'wrong-password-123' not in content, artifact.name
+                    print(json.dumps({'status':'passed','native_version':'2.0.32','accounts':2,'shared_runtime':True,'large_dpapi_pool':True,'private_rpc':True,'global_concurrency':True,'child_session_pin':True,'fresh_attempt_failover':True,'login_survives_restart':True,'portable_encrypted_transfer':True,'model_calls':sum(k=='model' for k,_ in calls),'usage_calls':sum(k=='usage' for k,_ in calls)}))
                 except Exception:
                     logfile=profile/'data/opencode/log/opencode.log'
                     if logfile.is_file():

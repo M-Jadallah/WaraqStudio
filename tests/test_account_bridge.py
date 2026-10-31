@@ -103,6 +103,18 @@ class EmbeddedAccountsDouble:
         self._called("acknowledge")
         self.status["migration_required"] = False
 
+    def export_accounts(self, ids, path, password):
+        self._called("export")
+        if getattr(self, "transfer_error", None):
+            raise self.transfer_error
+        return {"exported": len(ids), "password": password, "refreshToken": "NEVER_PUBLISH_THIS"}
+
+    def import_accounts(self, path, password):
+        self._called("import")
+        if getattr(self, "transfer_error", None):
+            raise self.transfer_error
+        return {"imported": 1, "skipped": 1, "total": 2, "password": password, "refreshToken": "NEVER_PUBLISH_THIS"}
+
     def close(self):
         pass
 
@@ -186,8 +198,67 @@ def test_signal_boundary_strips_native_secrets():
     secret = {"status": "complete", "authenticated": True, "access_token": "SECRET", "identity": "NATIVE"}
     assert Bridge._safe_account_result("finish", secret) == {"status": "complete", "authenticated": True}
     assert Bridge._safe_account_result("create", secret) is None
+    assert Bridge._safe_account_result("export", {"exported": 1, "password": "SECRET"}) == {"exported": 1}
+    assert Bridge._safe_account_result("import", {"imported": 1, "skipped": 0, "total": 1, "password": "SECRET"}) == {"imported": 1, "skipped": 0, "total": 1}
     assert Bridge._safe_account_result("methods", [{"id": "browser", "type": "oauth", "label": "Login", "secret": "SECRET"}]) == [
         {"id": "browser", "type": "oauth", "label": "Login"}]
+
+
+def test_transfer_cancel_and_invalid_input_do_not_start_workers(account_ui, monkeypatch):
+    env = account_ui
+    ident = add_account(env)
+    env.accounts.row(ident)["can_export"] = True
+    env.bridge._publish_accounts()
+    dialogs = []
+    monkeypatch.setattr("waraq.bridge.QFileDialog.getSaveFileName", lambda *args: dialogs.append(args) or ("", ""))
+    env.bridge.exportAccounts([ident], "short")
+    assert not dialogs and env.bridge.accountTransfer["status"] == "error"
+    env.bridge.exportAccounts([ident], "password-12345")
+    assert len(dialogs) == 1 and env.bridge.accountTransfer["status"] == "idle"
+    assert all(action != "export" for action, _ in env.accounts.calls)
+    monkeypatch.setattr("waraq.bridge.QFileDialog.getOpenFileName", lambda *args: ("", ""))
+    assert env.bridge.chooseAccountImportFile() == ""
+
+
+def test_transfer_runs_in_background_and_redacts_results_and_errors(account_ui, tmp_path, monkeypatch):
+    from waraq.embedded_accounts import AccountEngineError
+    env = account_ui
+    ident = add_account(env)
+    env.accounts.row(ident)["can_export"] = True
+    env.bridge._publish_accounts()
+    assert env.bridge.accountExportChoices == [{"id": ident, "alias": "الحساب الأول", "email": "PRIVATE_EMAIL"}]
+    monkeypatch.setattr("waraq.bridge.QFileDialog.getSaveFileName", lambda *args: (str(tmp_path / "backup.waraq-accounts"), ""))
+    signals = []
+    env.bridge._accountTaskReady.connect(lambda *args: signals.append(args))
+    env.accounts.gate = threading.Event()
+    env.bridge.exportAccounts([ident], "  كلمة أمان عربية  ")
+    assert env.bridge.accountBusy and env.bridge.accountTransfer["status"] == "working"
+    assert not env.bridge.accountTransferAvailable
+    env.accounts.gate.set()
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert env.bridge.accountTransfer["exported"] == 1
+    assert "NEVER_PUBLISH_THIS" not in json.dumps(signals)
+    assert "كلمة أمان" not in json.dumps(env.bridge.accountTransfer, ensure_ascii=False)
+    assert all(thread != threading.get_ident() for action, thread in env.accounts.calls if action == "export")
+    env.accounts.transfer_error = AccountEngineError("TRANSFER_DECRYPT_FAILED")
+    env.bridge.importAccounts(str(tmp_path / "backup.waraq-accounts"), "wrong-password-123")
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert env.bridge.accountTransfer == {"status": "error", "message": "كلمة المرور غير صحيحة أو الملف تالف"}
+    del env.accounts.transfer_error
+    env.bridge.importAccounts(str(tmp_path / "backup.waraq-accounts"), "password-12345")
+    pump(env.app, lambda: not env.bridge.accountBusy)
+    assert env.bridge.accountTransfer["imported"] == 1 and env.bridge.accountTransfer["skipped"] == 1
+
+
+def test_transfer_is_blocked_by_execution_and_uncertain_sessions(account_ui):
+    env = account_ui
+    ident = add_account(env)
+    env.accounts.row(ident)["in_flight"] = 1
+    env.bridge._publish_accounts()
+    assert not env.bridge.accountTransferAvailable
+    env.bridge.importAccounts("unused.waraq-accounts", "password-12345")
+    assert env.bridge.accountTransfer["status"] == "error"
+    assert all(action != "import" for action, _ in env.accounts.calls)
 
 
 def test_cached_snapshots_do_not_request_engine_or_quotas(account_ui):

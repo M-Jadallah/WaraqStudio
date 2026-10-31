@@ -7,10 +7,10 @@
     "settings.template.json": "97bacd4492d48a1b759d7ca12a476448ae163e442a965583e544eaa5afdab330",
     "waraq/__init__.py": "f02fe3feb3e90962b79964eb8a0cbb0085790ed6174f4763f15e065c004f9a51",
     "waraq/app_update.py": "b6d244c2497aa2c7eb84694c04bf7b3b632faddc51c26a471d884ccba7551fcb",
-    "waraq/bridge.py": "0d3cc6ebda5cf2f4e012e56083138789883844abf6e8ec1893001c92f0e4df47",
+    "waraq/bridge.py": "7f63227a795fb5882aca84e97c6b5cfe0f5f3a5ce77244a2bf4b8a55dda829db",
     "waraq/catalog.py": "d17e04d9dd7195fa2a9fbcdac75efbd30b301b77c4123cc289aadecfc195dada",
     "waraq/config.py": "38a40494f470626a7890021c5abd9dfc6a61447463ef67f4620ee81ad568a28f",
-    "waraq/embedded_accounts.py": "98162e5efa55adf6fec912e581d6c10b37322724fd0b181bbbad2efdc11e6ca6",
+    "waraq/embedded_accounts.py": "488b751952a801f188c6188636180a165b010b9d275aca300d3b49616d467ca7",
     "waraq/embedded_runtime.py": "63690f5814f1d057ac0544e4ae1b0a088e25994446d91bda727386c75ec4163a",
     "waraq/internet.py": "35e289b3b6a698f1043714e87d84f3da5ec2680efaad5b7621c3acca4b2c0e09",
     "waraq/library.py": "e618eed33cdbaf0f55395a5392294ba8636adfb11d24de54c8f2242c10ee36da",
@@ -400,5 +400,13 @@
       "waraq/bridge.py": "a8936fe1bd760290fcbcb5f77fd651d7eaa053cd14e6604b141859b9681620a4"
     },
     "live_rotation_enabled": false
+  },
+  "account_transfer_change": {
+    "reason": "User-authorized password-encrypted portable ChatGPT account export/import, additive desktop UI, sanitized summaries and transfer concurrency guards.",
+    "previous_sha256": {
+      "waraq/bridge.py": "0d3cc6ebda5cf2f4e012e56083138789883844abf6e8ec1893001c92f0e4df47",
+      "waraq/embedded_accounts.py": "98162e5efa55adf6fec912e581d6c10b37322724fd0b181bbbad2efdc11e6ca6"
+    },
+    "api_version": 1
   }
 }

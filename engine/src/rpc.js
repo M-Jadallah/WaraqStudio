@@ -12,6 +12,7 @@ import { startLoopbackFlow } from "../vendor/lib/auth/loopback-flow.js";
 import { createDeviceCodeSession, completeDeviceCodeSession } from "../vendor/lib/auth/device-code.js";
 import { resolveAndPersistAccountSelection, persistAccountPool } from "../vendor/lib/auth/login-runner.js";
 import { ensureCodexUsageAccessToken, fetchCodexUsage, parseCodexUsagePayload } from "../vendor/lib/codex-usage.js";
+import { exportAccountsFile, importAccountsFile, transferError } from "./account-transfer.js";
 
 const metadataPath = join(storageRoot, "waraq-metadata.json");
 let metadata;
@@ -52,7 +53,7 @@ function publicAccount(account, ref) {
   const cooldownUntil = Math.max(row.quotaBlockedUntil || 0, quotaReset(ref), account?.quotaExhaustedUntil || 0, account?.coolingDownUntil || 0, ...Object.values(account?.rateLimitResetTimes || {}).filter(Number.isFinite));
   const enabled = row.enabled !== false && account?.enabled !== false;
   return { accountRef: ref, alias: row.alias || account?.accountLabel || "Account", email: account?.email || null,
-    plan: account?.planType || null, enabled, priority: row.priority || 0,
+    plan: account?.planType || null, enabled, priority: row.priority || 0, canExport: !!account?.refreshToken,
     loginState: row.requiresLogin ? "reauth" : account?.refreshToken ? "ready" : "staged", health: !enabled ? "disabled" : cooldownUntil > Date.now() ? "cooldown" : account ? "ready" : "staged",
     bindingVersion: row.bindingVersion || "1", preferred: metadata.preferred === ref, busy: busy(ref) > 0, inFlight: busy(ref), cooldownUntil: cooldownUntil || null, quota: row.quota || null };
 }
@@ -80,6 +81,7 @@ async function completeAuth(attempt, tokenOperation) {
     const result = await tokenOperation();
     if (attempt.state === "cancelled") return;
     if (result.type !== "success") { attempt.state = "failed"; attempt.error = "AUTH_FAILED"; return; }
+    attempt.completing = true;
     const selection = await resolveAndPersistAccountSelection(result, { persistSelections: persistAccountPool });
     // Bind the user-created opaque reference to the canonical stored identity.
     const pool = await loadAccounts();
@@ -96,10 +98,12 @@ async function completeAuth(attempt, tokenOperation) {
     await persistMetadata();
     attempt.state = "success";
   } catch (e) { if (attempt.state !== "cancelled") { attempt.state = "failed"; attempt.error = e.safeCode === "DUPLICATE_ACCOUNT" ? "DUPLICATE_ACCOUNT" : "AUTH_FAILED"; } }
-  finally { attempt.close?.(); }
+  finally { attempt.completing = false; attempt.close?.(); }
 }
 const fields = {
   health: {}, "accounts.list": {}, "account.create": { alias: z.string().trim().min(1).max(120) },
+  "accounts.export": { accountRefs: z.array(z.string().min(1).max(160)).min(1).max(20), filePath: z.string().max(32768), password: z.string().max(512) },
+  "accounts.import": { filePath: z.string().max(32768), password: z.string().max(512) },
   "auth.begin": {accountRef:z.string(), method:z.enum(["browser","device"])},
   "auth.status": {attemptId:z.string(),code:z.string().max(4096).optional()}, "auth.cancel": {attemptId:z.string()},
   "account.update": {accountRef:z.string(),alias:z.string().trim().min(1).max(120).optional(),enabled:z.boolean().optional(),priority:z.number().int().min(-100).max(100).optional()},
@@ -113,6 +117,14 @@ async function dispatch(name, input, context) {
   await getMetadata();
   if (name === "health") return {apiVersion:1,pluginVersion:"6.29.0",storage:"dpapi",authMethods:[{id:"browser",label:"Browser"},{id:"device",label:"Device code"}]};
   if (name === "accounts.list") return list();
+  if (name === "accounts.export" || name === "accounts.import") {
+    if (shared.transferActive || usageRequests.size || [...leases.values()].some(a => a.state !== "closed") || [...authAttempts.values()].some(a => a.state === "pending" || a.completing)) throw transferError("TRANSFER_BUSY");
+    shared.transferActive = true;
+    try {
+      return name === "accounts.export" ? await exportAccountsFile(input, { accountRef, rows: metadata.rows }) : await importAccountsFile(input);
+    } catch (e) { throw e.safeCode ? e : transferError("TRANSFER_IO_FAILED"); }
+    finally { shared.transferActive = false; }
+  }
   if (name === "account.create") { const ref = "acct_"+randomUUID().replaceAll("-",""); metadata.rows[ref]={alias:input.alias,enabled:true,priority:0}; await persistMetadata(); return publicAccount(null,ref); }
   if (name.startsWith("account.")) {
     await lookup(input.accountRef);
@@ -155,6 +167,7 @@ async function dispatch(name, input, context) {
     return authView(attempt);
   }
   if(name==="usage.refresh") {
+    if (shared.transferActive) throw transferError("TRANSFER_BUSY");
     if(!input.accountRef) {
       const result=[];
       await Promise.all((await list()).accounts.filter(x=>x.loginState==="ready").map(async row => {

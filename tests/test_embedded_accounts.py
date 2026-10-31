@@ -115,6 +115,99 @@ def test_auth_methods_reject_manual_token_entry(service):
     assert [item["id"] for item in service.auth_methods("account_1")] == ["browser", "device"]
 
 
+def test_transfer_forwards_exact_password_and_exposes_only_allowlisted_summary(service, tmp_path):
+    password = "  كلمة أمان عربية 🔒  "
+    def response(method, params):
+        if method == "accounts.list":
+            return {"ok": True, "data": {"accounts": [row(canExport=True, refreshToken="SECRET")]}}
+        assert params["password"] == password
+        return {"ok": True, "data": {"exported": 1, "imported": 1, "skipped": 0, "total": 1, "password": password, "refreshToken": "SECRET"}}
+    service.fake_runtime.response = response
+    service.refresh()
+    assert service.list()[0]["can_export"] is True
+    assert service.export_accounts(["account_1"], tmp_path / "backup.waraq-accounts", password) == {"exported": 1}
+    assert service.import_accounts(tmp_path / "backup.waraq-accounts", password) == {"imported": 1, "skipped": 0, "total": 1}
+    assert not service._transfer_active
+    assert "SECRET" not in json.dumps(service.list())
+    assert password not in json.dumps(service.status, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("password", ["", "short", "a" * 257, "a" * 15 + "\ud800"])
+def test_invalid_transfer_password_never_reaches_engine(service, tmp_path, password):
+    with pytest.raises(AccountEngineError, match="TRANSFER_PASSWORD_INVALID"):
+        service.import_accounts(tmp_path / "backup.waraq-accounts", password)
+    assert not service.fake_runtime.calls
+
+
+@pytest.mark.parametrize("ids", [[], ["account_1", "account_1"], [["nested"]], ["bad/reference"]])
+def test_invalid_export_selection_never_reaches_engine(service, tmp_path, ids):
+    with pytest.raises(AccountEngineError):
+        service.export_accounts(ids, tmp_path / "backup.waraq-accounts", "password-12345")
+    assert not service.fake_runtime.calls
+
+
+def test_transfer_busy_and_failure_release_reservations_without_retries(service, tmp_path):
+    path = tmp_path / "backup.waraq-accounts"
+    for collection in (service._auth, service._attempts):
+        collection["existing"] = "busy"
+        with pytest.raises(AccountEngineError, match="TRANSFER_BUSY"):
+            service.import_accounts(path, "password-12345")
+        collection.clear()
+    service._usage_lock.acquire()
+    try:
+        with pytest.raises(AccountEngineError, match="TRANSFER_BUSY"):
+            service.import_accounts(path, "password-12345")
+    finally:
+        service._usage_lock.release()
+    assert not service.fake_runtime.calls
+    service.fake_runtime.response = lambda *_: {"ok": False, "error": {"code": "TRANSFER_DECRYPT_FAILED", "message": "SECRET"}}
+    with pytest.raises(AccountEngineError, match="TRANSFER_DECRYPT_FAILED") as failure:
+        service.import_accounts(path, "password-12345")
+    assert "SECRET" not in str(failure.value)
+    assert len(service.fake_runtime.calls) == 1 and not service._transfer_active
+    assert service._usage_lock.acquire(blocking=False)
+    service._usage_lock.release()
+
+
+def test_transfer_blocks_execution_and_quota_until_it_finishes(service, tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    def response(method, params):
+        entered.set()
+        assert release.wait(3)
+        return {"ok": True, "data": {"exported": 1}}
+    service.fake_runtime.response = response
+    errors = []
+    def run():
+        try:
+            service.export_accounts(["account_1"], tmp_path / "backup.waraq-accounts", "password-12345")
+        except Exception as exc:
+            errors.append(exc)
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        assert service.readiness()["reason"] == "accounts_busy"
+        assert not service.request_refresh(force=True)
+        with pytest.raises(AccountUnavailableError):
+            service.begin_attempt(1, "oc1", "model", tmp_path / "task")
+        with pytest.raises(AccountEngineError, match="TRANSFER_BUSY"):
+            service._call("usage.refresh")
+    finally:
+        release.set()
+        worker.join(3)
+    assert not errors and not worker.is_alive() and not service._transfer_active
+
+
+def test_committed_import_is_acknowledged_when_followup_refresh_fails(service, tmp_path):
+    def response(method, params):
+        if method == "accounts.import":
+            return {"ok": True, "data": {"imported": 1, "skipped": 1, "total": 2}}
+        raise EmbeddedRuntimeError("engine_connection_failed")
+    service.fake_runtime.response = response
+    assert service.import_accounts(tmp_path / "backup.waraq-accounts", "password-12345") == {"imported": 1, "skipped": 1, "total": 2}
+    assert [call[0] for call in service.fake_runtime.calls].count("accounts.import") == 1
+
+
 def test_provider_window_order_does_not_mislabel_weekly_limit(service):
     service.fake_runtime.rows = [row(quota={"observedAt": 1000000, "primary": {
         "usedPercent": 100, "resetAtMs": 2000000000000, "windowMinutes": 10080}})]

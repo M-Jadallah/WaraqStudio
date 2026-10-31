@@ -39,11 +39,15 @@ def main():
         store.add([{"title": f"درس اختباري {i} — معاينة واجهة ورق", "video_id": f"bundle{i}", "position": i, "url": "https://example.invalid/demo"} for i in range(1, 5)], config.snapshot())
         store.db.close()
 
-        def run(*arguments):
-            result = subprocess.run([str(executable), "--data-dir", str(home), *arguments], capture_output=True, text=True, timeout=60)
+        def run(*arguments, timeout=60):
+            result = subprocess.run([str(executable), "--data-dir", str(home), *arguments], capture_output=True, text=True, timeout=timeout)
             assert result.returncode == 0, (arguments, result.returncode, result.stderr)
 
-        run("--check-environment", str(evidence / "environment.json"))
+        # A cold frozen bundle validates every embedded-runtime file before
+        # starting its private engine; permit that bounded integrity pass.
+        run("--check-environment", str(evidence / "environment.json"), timeout=180)
+        environment = json.loads((evidence / "environment.json").read_text(encoding="utf-8"))
+        assert environment.get("embedded_integrity") is True and environment.get("embedded_engine_ready") is True, environment
         run("--smoke")
         for theme in ("dark", "light"):
             config.save({**config.snapshot(), "theme": theme})

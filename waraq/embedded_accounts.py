@@ -38,7 +38,10 @@ _ERRORS = frozenset(("NO_ELIGIBLE_ACCOUNT", "CONCURRENCY_LIMIT", "LOCATION_BUSY"
                      "UNAUTHORIZED", "RATE_LIMITED", "UNSUPPORTED", "ENGINE_CLOSED", "UNKNOWN_METHOD",
                      "ATTEMPT_NOT_FOUND", "METHOD_UNAVAILABLE", "BINDING_CHANGED", "USAGE_UNAVAILABLE",
                      "AUTH_BUSY", "AUTH_BEGIN_FAILED", "AUTH_ATTEMPT_NOT_FOUND", "ACCOUNT_NOT_AUTHENTICATED",
-                     "STORAGE_UNAVAILABLE", "ENGINE_UNAVAILABLE", "LOCATION_MISMATCH", "ATTEMPT_EXISTS"))
+                     "STORAGE_UNAVAILABLE", "ENGINE_UNAVAILABLE", "LOCATION_MISMATCH", "ATTEMPT_EXISTS",
+                     "TRANSFER_PASSWORD_INVALID", "TRANSFER_DECRYPT_FAILED", "TRANSFER_FORMAT_INVALID",
+                     "TRANSFER_VERSION_UNSUPPORTED", "TRANSFER_FILE_TOO_LARGE", "TRANSFER_LIMIT_EXCEEDED",
+                     "TRANSFER_BUSY", "TRANSFER_IO_FAILED", "TRANSFER_PATH_INVALID", "TRANSFER_SELECTION_INVALID"))
 _IDEMPOTENT = frozenset(("health", "accounts.list", "auth.status", "attempt.resolve"))
 # Only transport loss is safe to repeat immediately. Validation, permission,
 # ownership and protocol errors need a deliberate repair/recheck instead.
@@ -159,6 +162,7 @@ def _account(raw, previous=None):
     old = previous if previous and previous.get("id") == ident and binding and previous.get("binding_version") == binding else {}
     return {"id": ident, "alias": _text(raw.get("alias"), 80), "priority": int(_number(raw.get("priority"), 100)),
             "enabled": bool(raw.get("enabled", True)), "preferred": bool(raw.get("preferred", False)),
+            "can_export": raw.get("canExport", raw.get("can_export")) is True,
             "email": _text(raw.get("email"), 254), "subscription": _text(raw.get("plan", raw.get("subscription")), 80),
             "login_state": login, "health": health, "in_flight": max(0, int(_number(raw.get("inFlight", raw.get("in_flight"))))),
             "cooldown_until": max(0, _timestamp(raw.get("cooldownUntil", raw.get("cooldown_until")))),
@@ -180,6 +184,7 @@ class EmbeddedAccountService:
         self._operations = 0
         self._accounts, self._auth, self._attempts = {}, {}, {}
         self._closed, self._refresh_thread = False, None
+        self._transfer_active = False
         self._failures, self._next_refresh, self._next_usage = 0, 0, 0
         self._health = {"state": "starting", "reason": "", "next_retry_at": 0, "migration_required": True}
         self._health["requires_manual_recovery"] = False
@@ -219,6 +224,8 @@ class EmbeddedAccountService:
         with self._lock:
             if self._closed:
                 return {"ready": False, "reason": "engine_closed", "next_retry_at": 0}
+            if self._transfer_active:
+                return {"ready": False, "reason": "accounts_busy", "next_retry_at": self.clock() + 1}
             if self._health["state"] != "ready":
                 return {"ready": False, "reason": self._health["reason"] or "engine_starting", "next_retry_at": self._health["next_retry_at"]}
             now = self.clock()
@@ -260,6 +267,10 @@ class EmbeddedAccountService:
         with self._lock:
             if self._closed:
                 raise AccountEngineError("engine_closed")
+            if self._transfer_active and method not in ("accounts.export", "accounts.import", "health", "accounts.list", "attempt.resolve", "attempt.close"):
+                if method == "attempt.begin":
+                    raise AccountUnavailableError("CONCURRENCY_LIMIT")
+                raise AccountEngineError("TRANSFER_BUSY")
         tries = 2 if method in _IDEMPOTENT else 1
         for attempt in range(tries):
             try:
@@ -439,6 +450,51 @@ class EmbeddedAccountService:
         with self._lock:
             self._auth.pop(ident, None)
         return {"removed": True}
+
+    @_serialized
+    def _transfer_accounts(self, method, params):
+        password = params.get("password")
+        if (not isinstance(password, str) or not 12 <= len(password) <= 256
+                or any(0xD800 <= ord(char) <= 0xDFFF for char in password)):
+            raise AccountEngineError("TRANSFER_PASSWORD_INVALID")
+        if not self._usage_lock.acquire(blocking=False):
+            raise AccountEngineError("TRANSFER_BUSY")
+        reserved = False
+        try:
+            with self._lock:
+                if (self._transfer_active or self._auth or self._attempts
+                        or any(row.get("in_flight") for row in self._accounts.values())):
+                    raise AccountEngineError("TRANSFER_BUSY")
+                self._transfer_active = reserved = True
+            result = self._call(method, params)
+            keys = ("exported",) if method == "accounts.export" else ("imported", "skipped", "total")
+            if any(type(result.get(key)) is not int or not 0 <= result[key] <= 20 for key in keys):
+                raise AccountEngineError("engine_protocol_mismatch")
+            summary = {key: result[key] for key in keys}
+            # A committed import stays acknowledged even if the next metadata
+            # refresh fails. The engine reconstructs display rows from the pool.
+            if method == "accounts.import":
+                try:
+                    self.refresh()
+                except EmbeddedRuntimeError:
+                    pass
+            return summary
+        finally:
+            if reserved:
+                with self._lock:
+                    self._transfer_active = False
+            self._usage_lock.release()
+
+    def export_accounts(self, account_ids, file_path, password):
+        if (not isinstance(account_ids, (list, tuple)) or not 1 <= len(account_ids) <= 20
+                or any(not isinstance(ident, str) for ident in account_ids)
+                or len(set(account_ids)) != len(account_ids)):
+            raise AccountEngineError("TRANSFER_SELECTION_INVALID")
+        return self._transfer_accounts("accounts.export", {"accountRefs": [_identifier(ident) for ident in account_ids],
+                                                          "filePath": str(file_path), "password": password})
+
+    def import_accounts(self, file_path, password):
+        return self._transfer_accounts("accounts.import", {"filePath": str(file_path), "password": password})
 
     def auth_methods(self, ident=None):
         if ident is not None:

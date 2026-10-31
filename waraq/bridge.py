@@ -17,6 +17,7 @@ from .catalog import deepgram_models
 from .config import (ACCOUNT_ROTATION_AVAILABLE, ACCOUNT_ROTATION_MESSAGE, BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
                      provider_info, provider_of)
 from .models import DictListModel
+from .embedded_accounts import AccountEngineError
 from .remote import RemoteAccess
 from .remote_commands import RemoteCommands
 from .internet import InternetAccess
@@ -48,6 +49,7 @@ class Bridge(QObject):
     remoteAccessChanged = Signal()
     internetAccessChanged = Signal()
     accountsChanged = Signal()
+    accountTransferChanged = Signal()
     _accountTaskReady = Signal(str, int, str, object, str, int)
 
     def __init__(self, store, config, secrets, scheduler):
@@ -72,6 +74,7 @@ class Bridge(QObject):
         self._account_errors = {}
         self._account_login_choice = {}
         self._account_engine_status = {}
+        self._account_transfer = {"status": "idle", "message": ""}
         self._accounts_closing = False
         self._account_refresh_busy = False
         self._accountTaskReady.connect(self._apply_account_task, Qt.ConnectionType.QueuedConnection)
@@ -222,6 +225,68 @@ class Bridge(QObject):
 
     @Property(QObject, constant=True)
     def accountsModel(self): return self._accounts_model
+
+    @Property("QVariantMap", notify=accountTransferChanged)
+    def accountTransfer(self): return dict(self._account_transfer)
+
+    @Property("QVariantList", notify=accountsChanged)
+    def accountExportChoices(self):
+        return [{"id": row["id"], "alias": row["alias"], "email": row["email"]}
+                for row in self._accounts_model._items if row.get("canExport")]
+
+    @Property(bool, notify=accountsChanged)
+    def accountTransferAvailable(self):
+        return (not self.accountBusy and not self._accounts_closing
+                and not self.store.state_get("execution_holds", {})
+                and not any(row.get("inFlight") or row.get("uncertain") or row.get("usageRefreshing")
+                            for row in self._accounts_model._items))
+
+    def _set_account_transfer(self, status, message="", **summary):
+        self._account_transfer = {"status": status, "message": message, **summary}
+        self.accountTransferChanged.emit()
+
+    @Slot()
+    def resetAccountTransfer(self):
+        if self._account_transfer.get("status") != "working":
+            self._set_account_transfer("idle")
+
+    @Slot(result=str)
+    def chooseAccountImportFile(self):
+        if not self.accountTransferAvailable:
+            return ""
+        path, _ = QFileDialog.getOpenFileName(None, "استيراد حسابات ChatGPT", "", "حسابات ورق المشفّرة (*.waraq-accounts)")
+        return path
+
+    @Slot("QVariantList", str)
+    def exportAccounts(self, account_ids, password):
+        if not self.accountTransferAvailable:
+            self._set_account_transfer("error", "انتظر انتهاء مهام الحسابات وتسجيل الدخول وتحديث الحصص، ثم أعد المحاولة.")
+            return
+        if (not 12 <= len(password) <= 256 or not account_ids
+                or any(not isinstance(ident, str) for ident in account_ids)
+                or len(set(account_ids)) != len(account_ids)
+                or not set(account_ids).issubset({row["id"] for row in self.accountExportChoices})):
+            self._set_account_transfer("error", "اختر الحسابات وأدخل كلمة مرور من 12 إلى 256 محرفًا.")
+            return
+        path, _ = QFileDialog.getSaveFileName(None, "تصدير حسابات ChatGPT", "حسابات-ورق.waraq-accounts", "حسابات ورق المشفّرة (*.waraq-accounts)")
+        if not path:
+            self._set_account_transfer("idle")
+            return
+        if not path.lower().endswith(".waraq-accounts"):
+            path += ".waraq-accounts"
+        self._set_account_transfer("working", "جارٍ تشفير الحسابات وحفظ الملف…")
+        self._start_account_action("", "export", lambda: self.scheduler.accounts.export_accounts(account_ids, path, password))
+
+    @Slot(str, str)
+    def importAccounts(self, path, password):
+        if not self.accountTransferAvailable:
+            self._set_account_transfer("error", "انتظر انتهاء مهام الحسابات وتسجيل الدخول وتحديث الحصص، ثم أعد المحاولة.")
+            return
+        if not path or not 12 <= len(password) <= 256:
+            self._set_account_transfer("error", "اختر الملف وأدخل كلمة مرور من 12 إلى 256 محرفًا.")
+            return
+        self._set_account_transfer("working", "جارٍ فتح الملف المشفّر واستيراد الحسابات…")
+        self._start_account_action("", "import", lambda: self.scheduler.accounts.import_accounts(path, password))
 
     @Property(bool, notify=accountsChanged)
     def accountBusy(self):
@@ -376,6 +441,7 @@ class Bridge(QObject):
             rows.append({"id": ident, "alias": str(account.get("alias") or "حساب ChatGPT"),
                          "priority": int(account.get("priority") or 0), "enabled": bool(account.get("enabled")),
                          "preferred": bool(account.get("preferred")), "email": str(account.get("email") or ""),
+                         "canExport": account.get("can_export") is True,
                          "uncertain": health == "execution_uncertain",
                          "subscription": str(account.get("subscription") or ""),
                          "inFlight": int(account.get("in_flight") or 0),
@@ -456,7 +522,26 @@ class Bridge(QObject):
                     for item in (result or []) if isinstance(item, dict) and item.get("type") == "oauth"]
         if action in ("begin", "finish") and isinstance(result, dict):
             return {key: result[key] for key in ("url", "mode", "status", "userCode", "authenticated") if key in result}
+        if action in ("export", "import") and isinstance(result, dict):
+            keys = ("exported",) if action == "export" else ("imported", "skipped", "total")
+            if all(type(result.get(key)) is int and 0 <= result[key] <= 20 for key in keys):
+                return {key: result[key] for key in keys}
         return None
+
+    @staticmethod
+    def _transfer_error(reason):
+        if reason in ("TRANSFER_DECRYPT_FAILED", "TRANSFER_FORMAT_INVALID"):
+            return "كلمة المرور غير صحيحة أو الملف تالف"
+        return {
+            "TRANSFER_PASSWORD_INVALID": "أدخل كلمة مرور من 12 إلى 256 محرفًا.",
+            "TRANSFER_VERSION_UNSUPPORTED": "إصدار هذا الملف غير مدعوم. حدّث ورق ثم أعد المحاولة.",
+            "TRANSFER_FILE_TOO_LARGE": "حجم الملف يتجاوز الحد المسموح: 10 ميجابايت.",
+            "TRANSFER_LIMIT_EXCEEDED": "الاستيراد سيتجاوز الحد الأقصى: 20 حسابًا. لم تُضف أي حسابات.",
+            "TRANSFER_SELECTION_INVALID": "تغيّرت الحسابات المحددة أو لا تحتوي بيانات دخول محفوظة. افتح التصدير مجددًا.",
+            "TRANSFER_PATH_INVALID": "اختر ملف ‎.waraq-accounts خارج مجلد بيانات محرك الحسابات.",
+            "TRANSFER_BUSY": "انتظر انتهاء مهام الحسابات وتسجيل الدخول وتحديث الحصص، ثم أعد المحاولة.",
+            "TRANSFER_IO_FAILED": "تعذّرت قراءة الملف أو حفظه. تحقق من المسار والصلاحيات والمساحة المتاحة.",
+        }.get(reason, "تعذّرت عملية نقل الحسابات. تحقق من حالة المحرك ثم أعد المحاولة.")
 
     def _account_task(self, ident, generation, action, work):
         self._account_serial += 1
@@ -468,6 +553,8 @@ class Bridge(QObject):
             result, error = None, ""
             try:
                 result = self._safe_account_result(action, work())
+            except AccountEngineError as exc:
+                error = self._transfer_error(exc.reason) if action in ("export", "import") else "تعذّرت عملية الحساب. تحقق من حالة المحرك ثم أعد المحاولة."
             except Exception:
                 error = "تعذّرت عملية الحساب. تحقق من حالة المحرك ثم أعد المحاولة."
             self._accountTaskReady.emit(ident, generation, action, result, error, token)
@@ -549,6 +636,16 @@ class Bridge(QObject):
             self.accountsChanged.emit()
             return
         self._account_ops.pop(ident, None)
+        if action in ("export", "import"):
+            if error or result is None:
+                self._set_account_transfer("error", error or "تعذّر التحقق من نتيجة نقل الحسابات. أعد فحص القائمة قبل المحاولة مجددًا.")
+            elif action == "export":
+                self._set_account_transfer("success", "تم تصدير " + str(result["exported"]) + " حسابات إلى الملف المشفّر.", **result)
+            else:
+                self._set_account_transfer("success", "تم استيراد " + str(result["imported"]) + " حسابات، وتخطي " + str(result["skipped"]) + " حسابات موجودة.", **result)
+            self._publish_accounts()
+            self.accountsChanged.emit()
+            return
         if error:
             self._account_errors[ident] = error
             if action not in ("sync", "usage"):
