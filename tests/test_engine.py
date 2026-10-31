@@ -743,9 +743,11 @@ def test_opencode_quota_retries_hourly_then_terminal(env, tmp_path):
         worker["model"] = "local/mock"
     ident = local_txt_job(store, cfg, tmp_path, {"opencode_limit_retries": 2})
     calls = []
+    attempt_times = []
     class FakeOC:
         def process(self, job, worker, cfg, secret, cancel, log):
             calls.append(1)
+            attempt_times.append(time.time())
             raise ServiceError(LIMIT_MESSAGE, "rate_limited")
     scheduler = Scheduler(store, cfg, None, opencode=FakeOC(), limit_retry_delay=0.05)
     deadline = time.time() + 5
@@ -757,7 +759,7 @@ def test_opencode_quota_retries_hourly_then_terminal(env, tmp_path):
             break
         scheduler.tick()
         time.sleep(0.01)
-    assert deferred is not None and deferred["next_retry"] > time.time()
+    assert deferred is not None and deferred["next_retry"] >= attempt_times[0] + 0.05
     pump(scheduler, store, ident, "opencode", ("failed",))
     stage = store.get(ident)["stages"]["opencode"]
     assert "استُنفدت محاولات الانتظار (2)" in stage["error"]
