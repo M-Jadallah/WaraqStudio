@@ -4,12 +4,12 @@
     "build_windows.py": "2e4c94d4254e1a4d65eb8edec772f5146ec3823a35637e7f282712ec165a37c2",
     "main.py": "fb0a92c5c77c8f8789358c2a0174fe7d847fc59a09af49f2799d184e2ba3bcf1",
     "requirements.txt": "8e7d2ecf695527679758826ae50b29bb62079ba69e0025a055a0cd3f29cd8cdb",
-    "settings.template.json": "97bacd4492d48a1b759d7ca12a476448ae163e442a965583e544eaa5afdab330",
+    "settings.template.json": "18378e2155b255754fcb93a4d6b8ba1a90541e62a435144a08918fe89a6744ac",
     "waraq/__init__.py": "f02fe3feb3e90962b79964eb8a0cbb0085790ed6174f4763f15e065c004f9a51",
     "waraq/app_update.py": "b6d244c2497aa2c7eb84694c04bf7b3b632faddc51c26a471d884ccba7551fcb",
-    "waraq/bridge.py": "7f63227a795fb5882aca84e97c6b5cfe0f5f3a5ce77244a2bf4b8a55dda829db",
+    "waraq/bridge.py": "567e8c4e15cf8e15df1feab14201d3e60802f731b551b35c0771af23fea22834",
     "waraq/catalog.py": "d17e04d9dd7195fa2a9fbcdac75efbd30b301b77c4123cc289aadecfc195dada",
-    "waraq/config.py": "38a40494f470626a7890021c5abd9dfc6a61447463ef67f4620ee81ad568a28f",
+    "waraq/config.py": "4ac2e9ece02a38455ea46aea1268bde3d832edf8371f84d5cf91c6ecd2c06b76",
     "waraq/embedded_accounts.py": "488b751952a801f188c6188636180a165b010b9d275aca300d3b49616d467ca7",
     "waraq/embedded_runtime.py": "fc399b9c88046dcb942a83be6f778e609ccb44700debda09326766cb750e0ced",
     "waraq/internet.py": "35e289b3b6a698f1043714e87d84f3da5ec2680efaad5b7621c3acca4b2c0e09",
@@ -20,8 +20,8 @@
     "waraq/remote_commands.py": "508b38b36f016ace7ca3a9d8f183c9f1216f69155b7ecfa1a6f0b02f743a6477",
     "waraq/remote_common.py": "55b7c54b144e44619e231de5f5220ab9f5b4fe49874a54da6e87a09f7c0cb624",
     "waraq/remote_library.py": "5c8359dd038d220bfb9bf80442ec412b9575a2d2b7f6c0f9f83ba8ba2fbb17e5",
-    "waraq/scheduler.py": "3a5ad1b0bd2ab60a43d69975f994591a9dbfb62e8e6b83d7fa4aaf6cd7d2964f",
-    "waraq/services.py": "0762b98ed75b46ce0b38f6bc7c6d23baee8d439e80988c7c369200e070298de7",
+    "waraq/scheduler.py": "b2fa82763ac95215d35834da119a34a1abece0e0f35f02e3417831c951acdcc4",
+    "waraq/services.py": "a7e629d5c5ec2f347a272385ab165035845cb67a6719a20965304c98eccbf7fa",
     "waraq/store.py": "ecaefd1bf1f9a68bb1105f021fbec3bff097a64dbfa83ea7c3cecd2c0123b3ed",
     "waraq/youtube_update.py": "ce0e16cba920fe975628e650234bb8a05740fbbb86e38644c76c97906480fa69"
   },
@@ -409,5 +409,15 @@
       "waraq/embedded_runtime.py": "63690f5814f1d057ac0544e4ae1b0a088e25994446d91bda727386c75ec4163a"
     },
     "api_version": 1
+  },
+  "cliproxy_api_change": {
+    "reason": "Add the CLI Proxy API connection mode, isolated OpenCode configuration, model discovery, linked-account quota display, and desktop controls for API and management keys.",
+    "previous_sha256": {
+      "settings.template.json": "97bacd4492d48a1b759d7ca12a476448ae163e442a965583e544eaa5afdab330",
+      "waraq/config.py": "38a40494f470626a7890021c5abd9dfc6a61447463ef67f4620ee81ad568a28f",
+      "waraq/services.py": "0762b98ed75b46ce0b38f6bc7c6d23baee8d439e80988c7c369200e070298de7",
+      "waraq/scheduler.py": "3a5ad1b0bd2ab60a43d69975f994591a9dbfb62e8e6b83d7fa4aaf6cd7d2964f",
+      "waraq/bridge.py": "7f63227a795fb5882aca84e97c6b5cfe0f5f3a5ce77244a2bf4b8a55dda829db"
+    }
   }
 }

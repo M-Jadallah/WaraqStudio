@@ -14,7 +14,9 @@ from PySide6.QtWidgets import QFileDialog
 from . import __version__
 from . import app_update
 from .catalog import deepgram_models
-from .config import (ACCOUNT_ROTATION_AVAILABLE, ACCOUNT_ROTATION_MESSAGE, BUILTIN_PROVIDERS, credential_name, defaults, key_env_for, provider_catalog,
+from .cliproxy import (DEFAULT_CLIPROXY_URL, THINKING_LEVEL_OPTIONS, fetch_cliproxy_accounts,
+                       fetch_cliproxy_models, normalize_cliproxy_url)
+from .config import (ACCOUNT_ROTATION_AVAILABLE, ACCOUNT_ROTATION_MESSAGE, BUILTIN_PROVIDERS, cliproxy_enabled, credential_name, defaults, key_env_for, provider_catalog,
                      provider_info, provider_of)
 from .models import DictListModel
 from .embedded_accounts import AccountEngineError
@@ -51,6 +53,9 @@ class Bridge(QObject):
     accountsChanged = Signal()
     accountTransferChanged = Signal()
     _accountTaskReady = Signal(str, int, str, object, str, int)
+    cliProxyChanged = Signal()
+    _cliProxyModelsLoaded = Signal(object, str)
+    _cliProxyAccountsLoaded = Signal(object, str)
 
     def __init__(self, store, config, secrets, scheduler):
         super().__init__()
@@ -88,6 +93,23 @@ class Bridge(QObject):
         self._opencode_models = []
         self._catalog_errors = {"deepgram": "", "opencode": ""}
         self._catalog_busy = False
+        cached_models = self.store.state_get("cliproxy_models_cache", [])
+        self._cliproxy_models = [dict(item) for item in cached_models
+                                 if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]] if isinstance(cached_models, list) else []
+        self._cliproxy_accounts_model = DictListModel([
+            "id", "authIndex", "name", "email", "provider", "providerLabel", "plan", "status", "statusLabel",
+            "available", "disabled", "remainingPercent", "hasLimits", "fiveHourRemaining", "fiveHourResetText",
+            "weeklyRemaining", "weeklyResetText", "limitsSummary", "windows", "error"], self)
+        self._cliproxy_models_busy = False
+        self._cliproxy_accounts_busy = False
+        self._cliproxy_models_error = ""
+        self._cliproxy_accounts_error = ""
+        self._cliproxy_models_url = ""
+        self._cliproxy_accounts_url = ""
+        self._cliproxy_status_message = ""
+        self._cliProxyModelsLoaded.connect(self._apply_cliproxy_models, Qt.ConnectionType.QueuedConnection)
+        self._cliProxyAccountsLoaded.connect(self._apply_cliproxy_accounts, Qt.ConnectionType.QueuedConnection)
+        self.settingsChanged.connect(self.cliProxyChanged)
         self._update_release = None
         self._update_installer = None
         self._update_cancel = threading.Event()
@@ -158,6 +180,212 @@ class Bridge(QObject):
 
     @Property("QVariantList", notify=modelCatalogChanged)
     def deepgramModels(self): return self._deepgram_models
+
+    @Property("QVariantMap", notify=cliProxyChanged)
+    def cliProxyState(self):
+        cfg = self.config.snapshot()
+        rows = self._cliproxy_accounts_model._items
+        return {"mode": cfg.get("opencode_source_mode", "current"),
+                "baseUrl": cfg.get("cliproxy_base_url", DEFAULT_CLIPROXY_URL),
+                "model": cfg.get("cliproxy_model", ""),
+                "thinkingLevel": cfg.get("cliproxy_thinking_level", "high"),
+                "hasApiKey": bool(self._cliproxy_key("api_key")),
+                "hasManagementKey": bool(self._cliproxy_key("management_key")),
+                "modelsBusy": self._cliproxy_models_busy, "accountsBusy": self._cliproxy_accounts_busy,
+                "modelsError": self._cliproxy_models_error, "accountsError": self._cliproxy_accounts_error,
+                "statusMessage": self._cliproxy_status_message, "modelsCount": len(self._cliproxy_models),
+                "accountsCount": len(rows), "availableAccountsCount": sum(1 for row in rows if row.get("available"))}
+
+    @Property("QVariantList", notify=cliProxyChanged)
+    def cliProxyModels(self):
+        models = [m["id"] if isinstance(m, dict) else str(m) for m in self._cliproxy_models]
+        saved = str(self.config.snapshot().get("cliproxy_model") or "")
+        if saved and saved not in models:
+            models.insert(0, saved)
+        return models
+
+    @Property("QVariantList", notify=cliProxyChanged)
+    def cliProxyModelItems(self): return list(self._cliproxy_models)
+
+    @Property("QVariantList", constant=True)
+    def cliProxyThinkingLevels(self): return list(THINKING_LEVEL_OPTIONS)
+
+    @Property(QObject, constant=True)
+    def cliProxyAccountsModel(self): return self._cliproxy_accounts_model
+
+    @Property("QVariantList", notify=cliProxyChanged)
+    def cliProxyAccounts(self): return list(self._cliproxy_accounts_model._items)
+
+    def _cliproxy_key(self, kind):
+        try:
+            return self.secrets.get(credential_name("cliproxy", kind)) if self.secrets else ""
+        except Exception:
+            return ""
+
+    def _cliproxy_error(self, exc, *keys):
+        message = str(exc)
+        for key in keys:
+            if key:
+                message = message.replace(key, "[محجوب]")
+        return message
+
+    @Slot(str, result=bool)
+    def setOpenCodeSourceMode(self, mode):
+        try:
+            if mode not in ("current", "cliproxy"):
+                raise ValueError("اختر مصدر OpenCode صالحًا.")
+            self.config.save({"opencode_source_mode": mode})
+            self.scheduler.disabled_workers.clear()
+            self.settingsChanged.emit()
+            self.cliProxyChanged.emit()
+            self.refresh()
+            return True
+        except Exception as exc:
+            self.notice.emit(str(exc), True)
+            return False
+
+    @Slot(str, str, str, result=bool)
+    def saveCliProxyConnection(self, base_url, api_key, management_key):
+        try:
+            normalized = normalize_cliproxy_url(base_url)
+            api_key, management_key = api_key.strip(), management_key.strip()
+            if (api_key or management_key) and not self.secrets:
+                raise ValueError("مخزن بيانات الاعتماد غير متاح.")
+            self.config.save({"cliproxy_base_url": normalized})
+            if api_key:
+                self.secrets.set(credential_name("cliproxy", "api_key"), api_key)
+            if management_key:
+                self.secrets.set(credential_name("cliproxy", "management_key"), management_key)
+            self.scheduler.forget_keys()
+            self.scheduler.disabled_workers.clear()
+            self._cliproxy_status_message = "حُفظ اتصال CLI Proxy API."
+            self.settingsChanged.emit()
+            self.cliProxyChanged.emit()
+            self.notice.emit(self._cliproxy_status_message, False)
+            self.refresh()
+            return True
+        except Exception as exc:
+            self.notice.emit(self._cliproxy_error(exc, api_key, management_key), True)
+            return False
+
+    @Slot(str)
+    def clearCliProxyKey(self, kind):
+        if kind not in ("api_key", "management_key"):
+            return
+        try:
+            if self.secrets:
+                self.secrets.delete(credential_name("cliproxy", kind))
+            self.scheduler.forget_keys()
+            self.cliProxyChanged.emit()
+            self.refresh()
+        except Exception:
+            self.notice.emit("تعذر حذف مفتاح CLI Proxy API من مخزن بيانات الاعتماد.", True)
+
+    @Slot(str, str, result=bool)
+    def saveCliProxyModelSettings(self, model, thinking_level):
+        try:
+            self.config.save({"cliproxy_model": model.strip(), "cliproxy_thinking_level": thinking_level.strip()})
+            self.scheduler.disabled_workers.clear()
+            self.settingsChanged.emit()
+            self.cliProxyChanged.emit()
+            self.refresh()
+            return True
+        except Exception as exc:
+            self.notice.emit(str(exc), True)
+            return False
+
+    def _cliproxy_connection(self, base_url, api_key, management_key):
+        if base_url.strip() or api_key.strip() or management_key.strip():
+            base_url = base_url.strip() or self.config.snapshot().get("cliproxy_base_url", DEFAULT_CLIPROXY_URL)
+            if not self.saveCliProxyConnection(base_url, api_key, management_key):
+                return None
+        cfg = self.config.snapshot()
+        return (normalize_cliproxy_url(cfg.get("cliproxy_base_url") or DEFAULT_CLIPROXY_URL),
+                self._cliproxy_key("api_key"), self._cliproxy_key("management_key"))
+
+    @Slot()
+    @Slot(str, str, str)
+    def fetchCliProxyModels(self, base_url="", api_key="", management_key=""):
+        if self._cliproxy_models_busy:
+            return
+        try:
+            connection = self._cliproxy_connection(base_url, api_key, management_key)
+            if connection is None:
+                return
+        except Exception as exc:
+            self._cliproxy_models_error = self._cliproxy_error(exc, api_key, management_key)
+            self.cliProxyChanged.emit()
+            return
+        self._cliproxy_models_busy = True
+        self._cliproxy_models_error = ""
+        self._cliproxy_models_url = connection[0]
+        self.cliProxyChanged.emit()
+        def work():
+            try:
+                models = fetch_cliproxy_models(connection[0], api_key=connection[1], management_key=connection[2])
+                self._cliProxyModelsLoaded.emit(models, "")
+            except Exception as exc:
+                self._cliProxyModelsLoaded.emit(None, self._cliproxy_error(exc, connection[1], connection[2]))
+        threading.Thread(target=work, daemon=True, name="cliproxy-models").start()
+
+    @Slot(object, str)
+    def _apply_cliproxy_models(self, models, error):
+        if self._cliproxy_models_url and self._cliproxy_models_url != self.config.snapshot().get("cliproxy_base_url"):
+            models, error = None, "تغيّر اتصال CLI Proxy API أثناء الجلب؛ أعد جلب النماذج."
+        self._cliproxy_models_busy = False
+        self._cliproxy_models_error = error
+        if models is not None and not error:
+            try:
+                self._cliproxy_models = list(models)
+                self.store.state_put("cliproxy_models_cache", self._cliproxy_models)
+                if models and not self.config.snapshot().get("cliproxy_model"):
+                    self.config.save({"cliproxy_model": models[0]["id"]})
+                    self.scheduler.disabled_workers.clear()
+                    self.settingsChanged.emit()
+                self._cliproxy_status_message = f"جُلب {len(models)} نموذجًا من CLI Proxy API."
+            except Exception as exc:
+                error = self._cliproxy_models_error = str(exc)
+        self.cliProxyChanged.emit()
+        self.notice.emit(error or self._cliproxy_status_message, bool(error))
+        self.refresh()
+
+    @Slot()
+    @Slot(str, str, str)
+    def refreshCliProxyAccounts(self, base_url="", api_key="", management_key=""):
+        if self._cliproxy_accounts_busy:
+            return
+        try:
+            connection = self._cliproxy_connection(base_url, api_key, management_key)
+            if connection is None:
+                return
+        except Exception as exc:
+            self._cliproxy_accounts_error = self._cliproxy_error(exc, api_key, management_key)
+            self.cliProxyChanged.emit()
+            return
+        self._cliproxy_accounts_busy = True
+        self._cliproxy_accounts_error = ""
+        self._cliproxy_accounts_url = connection[0]
+        self.cliProxyChanged.emit()
+        def work():
+            try:
+                accounts = fetch_cliproxy_accounts(connection[0], management_key=connection[2], api_key=connection[1])
+                self._cliProxyAccountsLoaded.emit(accounts, "")
+            except Exception as exc:
+                self._cliProxyAccountsLoaded.emit(None, self._cliproxy_error(exc, connection[1], connection[2]))
+        threading.Thread(target=work, daemon=True, name="cliproxy-accounts").start()
+
+    @Slot(object, str)
+    def _apply_cliproxy_accounts(self, accounts, error):
+        if self._cliproxy_accounts_url and self._cliproxy_accounts_url != self.config.snapshot().get("cliproxy_base_url"):
+            accounts, error = None, "تغيّر اتصال CLI Proxy API أثناء التحديث؛ أعد تحديث الحسابات."
+        self._cliproxy_accounts_busy = False
+        self._cliproxy_accounts_error = error
+        if accounts is not None and not error:
+            self._cliproxy_accounts_model.update_items(accounts)
+            self._cliproxy_status_message = f"حُدّثت حالة {len(accounts)} حسابًا في CLI Proxy API."
+        self.cliProxyChanged.emit()
+        if error:
+            self.notice.emit(error, True)
 
     @Property("QVariantList", notify=modelCatalogChanged)
     def opencodeModels(self): return self._opencode_models
@@ -342,9 +570,12 @@ class Bridge(QObject):
     def _schedule_account_usage(self):
         if self._accounts_closing or self._account_operation_busy():
             return
+        cfg = self.config.snapshot()
+        if cliproxy_enabled(cfg) and getattr(self.scheduler, "provider_override", "") != "login":
+            return
         # Scheduler wakeups and this timer share the service's enable/backoff/
         # single-flight gate. Neither GUI snapshots nor force wakeups bypass it.
-        if self.config.snapshot().get("accounts_enabled", True):
+        if cfg.get("accounts_enabled", True):
             self.scheduler.accounts.request_refresh()
             self._publish_accounts()
 

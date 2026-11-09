@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 from .config import atomic_json, compose_model, key_env_for, provider_isolated, provider_of
+from .cliproxy import DEFAULT_CLIPROXY_URL, normalize_cliproxy_url, write_opencode_cliproxy_config
 from .store import fingerprint
 
 
@@ -791,14 +792,27 @@ class OpenCode:
         return module_paths
 
     def process(self, job, worker, cfg, secret, cancel, log):
-        if cfg.get("_embedded_accounts"):
+        proxy = cfg.get("opencode_source_mode") == "cliproxy" or worker.get("provider") == "cliproxy"
+        if cfg.get("_embedded_accounts") and not proxy:
             return self._process_managed(job, worker, cfg, cancel, log)
+        proxy_settings = {}
+        if proxy:
+            base_url = normalize_cliproxy_url(cfg.get("cliproxy_base_url") or DEFAULT_CLIPROXY_URL)
+            raw_model = str(worker.get("model") or cfg.get("cliproxy_model") or "").strip()
+            if not raw_model:
+                raise ServiceError("حدد نموذج الذكاء الاصطناعي لنظام CLI Proxy API من الإعدادات.", "blocked")
+            variant = str(worker.get("variant") if worker.get("variant") is not None else cfg.get("cliproxy_thinking_level", "")).strip()
+            worker = {**worker, "provider": "cliproxy", "model": raw_model, "variant": variant}
+            proxy_settings = {"base_url": base_url, "model": raw_model, "thinking_level": variant}
         transcript = Path(job["transcript"])
         if not transcript.is_file() or not transcript.read_text(encoding="utf-8-sig").strip():
             raise ServiceError("ملف التفريغ فارغ أو غير موجود.", "blocked")
         original_hash = digest(transcript)
-        version = fingerprint({"input": original_hash, "worker": worker, "prompt": cfg["prompt"],
-                               "revision": cfg.get("revision_opencode", "")})
+        version_inputs = {"input": original_hash, "worker": worker, "prompt": cfg["prompt"],
+                          "revision": cfg.get("revision_opencode", "")}
+        if proxy:
+            version_inputs["cliproxy"] = proxy_settings
+        version = fingerprint(version_inputs)
         work = Path(job["folder"]) / ("word-" + version)
         work.mkdir(parents=True, exist_ok=True)
         output = work / f'{job["position"]:03d}-{safe_title(job["title"])}.docx'
@@ -829,6 +843,17 @@ class OpenCode:
         provider = provider_of(worker, cfg)
         model = compose_model(provider, worker["model"])
         env.update(worker_env(worker, provider, secret, cfg))
+        if proxy:
+            base = Path(cfg["opencode_data_root"]) / worker["id"]
+            config_dir = base / "config"
+            write_opencode_cliproxy_config(config_dir, base_url, raw_model, variant)
+            env.update(XDG_DATA_HOME=str(base / "data"), XDG_STATE_HOME=str(base / "state"),
+                       OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_CONFIG_DIR=str(config_dir),
+                       CLIPROXY_API_KEY=secret or "cliproxy-local")
+            # Inherited ad-hoc config must not replace the proxy provider or
+            # inject credentials from a different OpenCode invocation.
+            env.pop("OPENCODE_CONFIG", None)
+            env.pop("OPENCODE_CONFIG_CONTENT", None)
         executable = resolve_opencode(cfg["opencode_executable"])
         cli_version = opencode_version(executable)
         # V2 uses PWD before process.cwd(); an inherited PWD can otherwise
@@ -843,6 +868,8 @@ class OpenCode:
         denied = []
         limited = []
         def track(line):
+            if proxy and secret:
+                line = line.replace(secret, "[محجوب]")
             if "auto-rejecting" in line:
                 denied.append(line)
             if limit_reached(line):
@@ -852,10 +879,12 @@ class OpenCode:
             run_process(command, work, cancel, cfg["opencode_timeout"], track, env)
         except Cancelled:
             raise
-        except ServiceError:
+        except ServiceError as exc:
             # A quota stop is retryable; other failures keep their own diagnosis.
             if limited:
                 raise ServiceError(LIMIT_MESSAGE, "rate_limited") from None
+            if proxy and secret and secret in str(exc):
+                raise ServiceError(str(exc).replace(secret, "[محجوب]"), exc.kind, exc.retry_after) from None
             raise
         finally:
             if digest(transcript) != original_hash:

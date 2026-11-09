@@ -7,6 +7,7 @@ import os
 import re
 from pathlib import Path
 import tempfile
+import unicodedata
 
 
 # Build-time support gate, never sourced from user settings or a schema receipt.
@@ -49,6 +50,8 @@ def provider_catalog(cfg=None):
 
 
 def provider_info(provider, cfg=None):
+    if provider == "cliproxy":
+        return {"id": "cliproxy", "name": "CLI Proxy API", "key_env": "CLIPROXY_API_KEY", "isolated": True}
     for item in provider_catalog(cfg):
         if item["id"] == provider:
             return item
@@ -75,6 +78,10 @@ def key_env_for(provider, cfg=None):
 def compose_model(provider, model):
     """Full provider/model id OpenCode expects. Login models pass through."""
     model = str(model or "").strip()
+    if provider == "cliproxy":
+        while model.startswith("cliproxy/"):
+            model = model[len("cliproxy/"):]
+        return "cliproxy/" + model if model else ""
     if not model or provider in ("", "login") or model.startswith(provider + "/"):
         return model
     return provider + "/" + model
@@ -82,9 +89,15 @@ def compose_model(provider, model):
 
 def credential_name(stage, worker_id, provider=""):
     """Credential-store entry: one key per provider per OpenCode worker, bare id for Deepgram."""
+    if stage == "cliproxy":
+        return f"cliproxy:{worker_id}"
     if stage == "opencode":
         return f"{worker_id}:{provider or 'login'}"
     return worker_id
+
+
+def cliproxy_enabled(cfg=None):
+    return str((cfg or {}).get("opencode_source_mode", "current") or "current") == "cliproxy"
 
 
 def default_deepgram_workers(count=7):
@@ -128,6 +141,9 @@ def defaults(home: Path):
         "opencode_templates": [{"id": "default", "name": "افتراضي", "text": DEFAULT_PROMPT}],
         "auto_retry_attempts": 3, "opencode_limit_retries": 5,
         "opencode_data_root": str(home / "opencode-workers"),
+        "opencode_source_mode": "current",
+        "cliproxy_base_url": "http://127.0.0.1:8317",
+        "cliproxy_model": "", "cliproxy_thinking_level": "high",
         "opencode_providers": [],
         "accounts_enabled": True, "accounts_max_concurrency": 5,
         "accounts_auto_refresh": True, "accounts_refresh_seconds": 300,
@@ -303,6 +319,21 @@ class Config:
 
     @staticmethod
     def validate(d):
+        from .cliproxy import normalize_cliproxy_url
+
+        mode = d.get("opencode_source_mode", "current")
+        if mode not in ("current", "cliproxy"):
+            raise ValueError("مصدر OpenCode يجب أن يكون current أو cliproxy.")
+        base_url = str(d.get("cliproxy_base_url", "http://127.0.0.1:8317") or "").strip()
+        if base_url or mode == "cliproxy":
+            d["cliproxy_base_url"] = normalize_cliproxy_url(base_url)
+        model = d.get("cliproxy_model", "")
+        if (not isinstance(model, str) or len(model) > 160
+                or any(char.isspace() or unicodedata.category(char).startswith("C") for char in model)):
+            raise ValueError("اسم نموذج CLI Proxy API غير صالح؛ استخدم حتى 160 محرفًا دون مسافات أو محارف تحكم.")
+        thinking = d.get("cliproxy_thinking_level", "high")
+        if not isinstance(thinking, str) or (thinking and not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", thinking)):
+            raise ValueError("مستوى التفكير لنظام CLI Proxy API غير صالح.")
         if not Path(d["output_root"]).is_absolute():
             raise ValueError("اختر مسار نتائج مطلقًا.")
         if os.name == "nt" and len(str(Path(d["output_root"]))) > 125:
@@ -379,7 +410,7 @@ class Config:
                 raise ValueError("المزودون: صيغة غير صالحة.")
             ident = str(item.get("id", ""))
             name = str(item.get("name", "")).strip()
-            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,19}", ident) or ident in provider_ids or ident in BUILTIN_PROVIDER_IDS:
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,19}", ident) or ident in provider_ids or ident in BUILTIN_PROVIDER_IDS or ident == "cliproxy":
                 raise ValueError("المزودون: المعرّف بحروف لاتينية صغيرة وأرقام وشرطات، فريد، وغير مستخدم في المدمجين.")
             provider_ids.add(ident)
             if not 1 <= len(name) <= 40:

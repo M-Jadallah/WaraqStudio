@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from .config import compose_model, credential_name, key_env_for, provider_info, provider_of
+from .config import cliproxy_enabled, compose_model, credential_name, key_env_for, provider_info, provider_of
 from .embedded_accounts import EmbeddedAccountService
 from .library import Library
 from .services import Cancelled, Deepgram, OpenCode, ServiceError, Youtube
@@ -51,6 +51,8 @@ class Scheduler:
 
     def provider_of_worker(self, worker, cfg):
         """Effective OpenCode provider: the queue override wins over the worker default."""
+        if not self.provider_override and cliproxy_enabled(cfg):
+            return "cliproxy"
         return self.provider_override or provider_of(worker, cfg)
 
     def effective_worker(self, worker):
@@ -60,6 +62,10 @@ class Scheduler:
         provider, so the list and the dispatch always agree on what will run.
         """
         if not self.provider_override:
+            cfg = self.config.snapshot()
+            if cliproxy_enabled(cfg):
+                return {**worker, "provider": "cliproxy", "model": str(cfg.get("cliproxy_model") or "").strip(),
+                        "variant": str(cfg.get("cliproxy_thinking_level") or "").strip()}
             return worker
         model = compose_model(self.provider_override, self.provider_override_model or worker.get("model", ""))
         return {**worker, "provider": self.provider_override, "variant": self.provider_override_variant,
@@ -221,12 +227,18 @@ class Scheduler:
                                  accountStatus="running" if active.get("account_id") else waiting.get("status", ""),
                                  accountWaitUntil=waiting.get("until", 0))
                     if stage == "opencode":
-                        provider = self.provider_of_worker(w, cfg)
-                        model = (self.provider_override_model or w.get("model", "")) if self.provider_override else w.get("model", "")
+                        effective = self.effective_worker(w)
+                        provider = provider_of(effective, cfg)
+                        model = effective.get("model", "")
                         entry.update({"provider": provider, "providerLabel": provider_info(provider, cfg)["name"],
                                       "keyEnv": key_env_for(provider, cfg),
                                       "modelResolved": compose_model(provider, model),
-                                      "hasKey": self.key_state(stage, w, provider)})
+                                      "hasKey": (self.key_state("cliproxy", {"id": "api_key"})
+                                                 or self.key_state("cliproxy", {"id": "management_key"}))
+                                      if provider == "cliproxy" else self.key_state(stage, w, provider)})
+                        if provider == "cliproxy":
+                            entry.update(model=model, variant=effective.get("variant", ""),
+                                         modelResolved=compose_model(provider, model) or "لم يُحدد نموذج")
                     elif stage == "deepgram":
                         entry["hasKey"] = self.key_state(stage, w)
                     results.append(entry)
@@ -240,8 +252,16 @@ class Scheduler:
         return self.effective_worker(result) if stage == "opencode" else result
 
     def uses_accounts(self, worker, cfg):
+        if (not self.provider_override and cliproxy_enabled(cfg)) or worker.get("provider") == "cliproxy":
+            return False
         return bool(provider_of(worker, cfg) == "login"
                     and str(worker.get("model", "")).lower().startswith("openai/"))
+
+    def _cliproxy_secret(self):
+        if not self.secrets:
+            return ""
+        return (self.secrets.get(credential_name("cliproxy", "api_key"))
+                or self.secrets.get(credential_name("cliproxy", "management_key")) or "")
 
     def ready(self, job, stage, jobs):
         record = job["stages"][stage]
@@ -316,7 +336,12 @@ class Scheduler:
                     queued = next((j for j in jobs if self.ready(j, stage, jobs)), None)
                     candidate = self.run_worker(queued, stage, worker) if queued else self.effective_worker(worker)
                     provider = provider_of(candidate, cfg)
-                    if key_env_for(provider, cfg):
+                    if provider == "cliproxy":
+                        if not str(candidate.get("model") or "").strip():
+                            self.disabled_workers[wid] = "حدد نموذج CLI Proxy API من الإعدادات"
+                            continue
+                        secret = self._cliproxy_secret()
+                    elif key_env_for(provider, cfg):
                         secret = self.secrets.get(credential_name(stage, wid, provider)) if self.secrets else ""
                         if not secret:
                             self.disabled_workers[wid] = f"أضف مفتاح {provider_info(provider, cfg)['name']} لهذا العامل"
@@ -350,7 +375,12 @@ class Scheduler:
                         if stage == "opencode":
                             provider = provider_of(dispatch_worker, cfg)
                             secret = ""
-                            if key_env_for(provider, cfg):
+                            if provider == "cliproxy":
+                                if not str(dispatch_worker.get("model") or "").strip():
+                                    self.disabled_workers[wid] = "حدد نموذج CLI Proxy API من الإعدادات"
+                                    break
+                                secret = self._cliproxy_secret()
+                            elif key_env_for(provider, cfg):
                                 secret = self.secrets.get(credential_name(stage, wid, provider)) if self.secrets else ""
                                 if not secret:
                                     self.disabled_workers[wid] = f"أضف مفتاح {provider_info(provider, cfg)['name']} لهذا العامل"
@@ -402,6 +432,19 @@ class Scheduler:
             live = self.config.snapshot()
             for k in ("cookies_file", "opencode_executable", "opencode_context", "opencode_data_root"):
                 cfg[k] = live[k]
+            for k in ("opencode_source_mode", "cliproxy_base_url", "cliproxy_model", "cliproxy_thinking_level"):
+                if k in live:
+                    cfg[k] = live[k]
+            if stage == "opencode" and not self.provider_override and cliproxy_enabled(live):
+                worker = {**worker, "provider": "cliproxy", "model": str(live.get("cliproxy_model") or "").strip(),
+                          "variant": str(live.get("cliproxy_thinking_level") or "").strip()}
+            if stage == "opencode" and self.provider_override and worker.get("provider") != "cliproxy":
+                cfg["opencode_source_mode"] = "current"
+            if stage == "opencode" and provider_of(worker, live) == "cliproxy":
+                if not str(worker.get("model") or "").strip():
+                    self.disabled_workers[wid] = "حدد نموذج CLI Proxy API من الإعدادات"
+                    raise ServiceError("حدد نموذج CLI Proxy API من الإعدادات", "blocked")
+                secret = self._cliproxy_secret()
             managed = stage == "opencode" and self.uses_accounts(worker, live)
             if managed:
                 cfg["_embedded_accounts"] = True

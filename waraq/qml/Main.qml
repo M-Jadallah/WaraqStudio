@@ -16,6 +16,7 @@ ApplicationWindow {
     readonly property string savedOutputRoot: JSON.parse(backend.settingsJson).output_root || ""
     readonly property var queueSnapshot: JSON.parse(backend.jobsJson)
     readonly property var appUpdateState: backend.appUpdate || ({status: "idle", version: "", progress: 0, message: "", hasToken: false})
+    readonly property var cliProxyState: backend.cliProxyState || ({})
     readonly property var remoteState: backend.remoteAccess || ({enabled: false, port: 8765, urls: [], code: "", qr: "", clients: 0, error: ""})
     readonly property var internetState: backend.internetAccess || ({registered: false, connected: false, busy: false, name: "", url: "", status: "متوقف", error: "", pairUrl: "", pendingPhones: [], phones: []})
     property bool dark: settings.theme !== "light"
@@ -1677,7 +1678,7 @@ ApplicationWindow {
                         layoutDirection: Qt.RightToLeft
                         Layout.fillWidth: true
                         Repeater {
-                            model: ["المظهر والواجهة", "المسارات والأدوات", "المعالجة والمكتبة", "البرومبت والقوالب"]
+                            model: ["المظهر والواجهة", "المسارات والأدوات", "المعالجة والمكتبة", "البرومبت والقوالب", "الذكاء الاصطناعي · CLI Proxy"]
                             delegate: AppButton {
                                 required property int index
                                 required property string modelData
@@ -1897,6 +1898,199 @@ ApplicationWindow {
                                         SubText { text: "الإصدار المستخدم: " + backend.youtubeVersion }
                                     }
                                     SubText { text: "يجلب أحدث إصدار مستقر رسمي ويتحقق من بصمته، ثم يستخدمه التطبيق لقراءة المصادر والتنزيل. يحتاج إلى اتصال إنترنت."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                }
+                            }
+                            AppButton {
+                                objectName: "aiSettingsShortcut"
+                                visible: win.settingsTab === 0
+                                Layout.fillWidth: true
+                                text: "الذكاء الاصطناعي · " + ((settings.opencode_source_mode || "current") === "cliproxy" ? "CLI Proxy API" : "النظام الحالي") + "  ·  إدارة الاتصال والنماذج"
+                                onClicked: win.settingsTab = 4
+                            }
+                            Box {
+                                objectName: "cliProxySettingsCard"
+                                visible: win.settingsTab === 2 || win.settingsTab === 4
+                                Layout.fillWidth: true; Layout.minimumWidth: 0
+                                implicitHeight: cliProxySettingsBody.implicitHeight + 32
+                                ColumnLayout {
+                                    id: cliProxySettingsBody
+                                    anchors.fill: parent; anchors.margins: 16; spacing: 14
+                                    LabelText { text: "نظام الذكاء الاصطناعي"; font.pixelSize: win.fs(20); Layout.fillWidth: true }
+                                    SubText { text: "اختر مصدر نماذج OpenCode، ثم أدر الاتصال والنموذج وحدود الحسابات من مكان واحد."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    GridLayout {
+                                        Layout.fillWidth: true; columns: win.contentUnits < 850 ? 1 : 2
+                                        layoutDirection: Qt.RightToLeft; columnSpacing: 12; rowSpacing: 12
+                                        WChoiceCard {
+                                            objectName: "aiModeCurrentCard"; theme: visualTheme
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.fillHeight: true
+                                            text: "النظام الأول · النظام الحالي"
+                                            description: "استخدام إعدادات عمال OpenCode وحسابات ورق المدمجة ومزودي المفاتيح كما هو الآن"
+                                            checked: (settings.opencode_source_mode || "current") !== "cliproxy"
+                                            onClicked: { settings.opencode_source_mode = "current"; backend.setOpenCodeSourceMode("current") }
+                                        }
+                                        WChoiceCard {
+                                            objectName: "aiModeCliProxyCard"; theme: visualTheme
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.fillHeight: true
+                                            text: "النظام الثاني · CLI Proxy API"
+                                            description: "استخدام خادم CLI Proxy API لجلب النماذج وتحديد مستوى التفكير ومتابعة حدود الحسابات"
+                                            checked: settings.opencode_source_mode === "cliproxy"
+                                            onClicked: { settings.opencode_source_mode = "cliproxy"; backend.setOpenCodeSourceMode("cliproxy") }
+                                        }
+                                    }
+                                    Box {
+                                        objectName: "currentAiModeSummary"; visible: (settings.opencode_source_mode || "current") !== "cliproxy"
+                                        Layout.fillWidth: true; implicitHeight: currentAiModeBody.implicitHeight + 24; color: visualTheme.inset
+                                        ColumnLayout {
+                                            id: currentAiModeBody; anchors.fill: parent; anchors.margins: 12; spacing: 6
+                                            LabelText { text: "النظام الحالي نشط"; color: visualTheme.success; Layout.fillWidth: true }
+                                            SubText { text: "يستمر العمل بإعدادات عمال OpenCode وحسابات ورق ومزودي المفاتيح كما هو معتاد. يمكنك إدارتها من صفحة العمال والخدمات."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                        }
+                                    }
+                                    ColumnLayout {
+                                        visible: settings.opencode_source_mode === "cliproxy"
+                                        Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: 14
+                                        Box {
+                                            objectName: "cliProxyConnectionPanel"; Layout.fillWidth: true
+                                            implicitHeight: cliProxyConnectionBody.implicitHeight + 28; color: visualTheme.inset
+                                            ColumnLayout {
+                                                id: cliProxyConnectionBody; anchors.fill: parent; anchors.margins: 14; spacing: 10
+                                                LabelText { text: "١ · ربط خادم CLI Proxy API"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                                SubText { text: "تُحفظ المفاتيح في مخزن اعتماد Windows. اترك الحقل فارغًا للاحتفاظ بالمفتاح المحفوظ."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                LabelText { text: "عنوان الخادم"; Layout.fillWidth: true }
+                                                AppField {
+                                                    id: cliProxyUrlField; objectName: "cliProxyUrlField"
+                                                    Layout.fillWidth: true; Layout.minimumWidth: 0; horizontalAlignment: Text.AlignLeft
+                                                    text: settings.cliproxy_base_url || "http://127.0.0.1:8317"; placeholderText: "http://127.0.0.1:8317"
+                                                    onTextEdited: settings.cliproxy_base_url = text.trim()
+                                                    Accessible.name: "عنوان خادم CLI Proxy API"
+                                                }
+                                                LabelText { text: "مفتاح API للعميل"; Layout.fillWidth: true }
+                                                AppField {
+                                                    id: cliProxyApiKeyField; objectName: "cliProxyApiKeyField"
+                                                    Layout.fillWidth: true; Layout.minimumWidth: 0; echoMode: TextInput.Password
+                                                    placeholderText: "مفتاح العميل (اختياري للخادم المحلي)"; Accessible.name: "مفتاح API للعميل"
+                                                }
+                                                SubText { objectName: "cliProxyApiKeyStatus"; text: win.cliProxyState.hasApiKey ? "مفتاح العميل محفوظ في مخزن اعتماد Windows." : "لا يوجد مفتاح عميل محفوظ."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                AppButton { objectName: "clearCliProxyApiKeyButton"; text: "حذف مفتاح العميل المحفوظ"; visible: win.cliProxyState.hasApiKey === true; onClicked: backend.clearCliProxyKey("api_key") }
+                                                LabelText { text: "مفتاح الإدارة"; Layout.fillWidth: true }
+                                                AppField {
+                                                    id: cliProxyManagementKeyField; objectName: "cliProxyManagementKeyField"
+                                                    Layout.fillWidth: true; Layout.minimumWidth: 0; echoMode: TextInput.Password
+                                                    placeholderText: "مفتاح الإدارة لجلب الحسابات والحدود المتبقية"; Accessible.name: "مفتاح الإدارة"
+                                                }
+                                                SubText { objectName: "cliProxyManagementKeyStatus"; text: win.cliProxyState.hasManagementKey ? "مفتاح الإدارة محفوظ في مخزن اعتماد Windows." : "لا يوجد مفتاح إدارة محفوظ. أضفه لجلب الحسابات والحدود."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                AppButton { objectName: "clearCliProxyManagementKeyButton"; text: "حذف مفتاح الإدارة المحفوظ"; visible: win.cliProxyState.hasManagementKey === true; onClicked: backend.clearCliProxyKey("management_key") }
+                                                AppButton {
+                                                    objectName: "saveCliProxyConnectionButton"; text: "حفظ بيانات الربط"; primary: true
+                                                    onClicked: {
+                                                        if (backend.saveCliProxyConnection(cliProxyUrlField.text.trim(), cliProxyApiKeyField.text, cliProxyManagementKeyField.text)) {
+                                                            cliProxyApiKeyField.text = ""; cliProxyManagementKeyField.text = ""
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Box {
+                                            objectName: "cliProxyModelPanel"; Layout.fillWidth: true
+                                            implicitHeight: cliProxyModelBody.implicitHeight + 28; color: visualTheme.inset
+                                            ColumnLayout {
+                                                id: cliProxyModelBody; anchors.fill: parent; anchors.margins: 14; spacing: 10
+                                                LabelText { text: "٢ · النموذج ومستوى التفكير"; font.pixelSize: win.fs(18); Layout.fillWidth: true }
+                                                AppButton {
+                                                    objectName: "fetchCliProxyModelsButton"; primary: true; enabled: !win.cliProxyState.modelsBusy
+                                                    text: win.cliProxyState.modelsBusy ? "جارٍ جلب النماذج…" : "جلب النماذج المتاحة"
+                                                    onClicked: {
+                                                        backend.fetchCliProxyModels(cliProxyUrlField.text.trim(), cliProxyApiKeyField.text, cliProxyManagementKeyField.text)
+                                                        if (win.cliProxyState.modelsBusy) { cliProxyApiKeyField.text = ""; cliProxyManagementKeyField.text = "" }
+                                                    }
+                                                }
+                                                SubText { text: "النماذج المتاحة: " + (win.cliProxyState.modelsCount || 0) + " · يمكنك اختيار نموذج أو إدخال معرّفه."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                LabelText { text: "النموذج"; Layout.fillWidth: true }
+                                                AppCombo {
+                                                    id: cliProxyModelCombo; objectName: "cliProxyModelCombo"
+                                                    Layout.fillWidth: true; Layout.minimumWidth: 0; editable: true; model: backend.cliProxyModels
+                                                    currentIndex: backend.cliProxyModels.indexOf(settings.cliproxy_model || "")
+                                                    editText: settings.cliproxy_model || ""; Accessible.name: "نموذج CLI Proxy API"
+                                                    onActivated: {
+                                                        settings.cliproxy_model = currentText.trim()
+                                                        backend.saveCliProxyModelSettings(settings.cliproxy_model, settings.cliproxy_thinking_level || "")
+                                                    }
+                                                    onAccepted: {
+                                                        settings.cliproxy_model = editText.trim()
+                                                        backend.saveCliProxyModelSettings(settings.cliproxy_model, settings.cliproxy_thinking_level || "")
+                                                    }
+                                                }
+                                                LabelText { text: "مستوى التفكير (Thinking level)"; Layout.fillWidth: true }
+                                                AppCombo {
+                                                    id: cliProxyThinkingCombo; objectName: "cliProxyThinkingCombo"
+                                                    Layout.fillWidth: true; Layout.minimumWidth: 0
+                                                    model: backend.cliProxyThinkingLevels; textRole: "name"; valueRole: "id"
+                                                    currentIndex: backend.cliProxyThinkingLevels.findIndex(function(level) { return level.id === (settings.cliproxy_thinking_level || "") })
+                                                    Accessible.name: "مستوى التفكير"
+                                                    onActivated: {
+                                                        settings.cliproxy_thinking_level = currentValue || ""
+                                                        backend.saveCliProxyModelSettings(cliProxyModelCombo.editText.trim() || settings.cliproxy_model || "", settings.cliproxy_thinking_level)
+                                                    }
+                                                }
+                                                LabelText { objectName: "cliProxyModelsError"; text: win.cliProxyState.modelsError || ""; visible: (win.cliProxyState.modelsError || "").length > 0; color: visualTheme.danger; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                            }
+                                        }
+                                        Box {
+                                            objectName: "cliProxyAccountsPanel"; Layout.fillWidth: true
+                                            implicitHeight: cliProxyAccountsBody.implicitHeight + 28; color: visualTheme.inset
+                                            ColumnLayout {
+                                                id: cliProxyAccountsBody; anchors.fill: parent; anchors.margins: 14; spacing: 12
+                                                LabelText { text: "٣ · الحسابات المربوطة والحدود المتبقية"; font.pixelSize: win.fs(18); Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                SubText { objectName: "cliProxyAccountsSummary"; text: "إجمالي الحسابات: " + (win.cliProxyState.accountsCount || 0) + "  ·  المتاح: " + (win.cliProxyState.availableAccountsCount || 0); Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                AppButton {
+                                                    objectName: "refreshCliProxyAccountsButton"; enabled: !win.cliProxyState.accountsBusy
+                                                    text: win.cliProxyState.accountsBusy ? "جارٍ تحديث الحسابات…" : "تحديث الحسابات والحدود"
+                                                    onClicked: {
+                                                        backend.refreshCliProxyAccounts(cliProxyUrlField.text.trim(), cliProxyApiKeyField.text, cliProxyManagementKeyField.text)
+                                                        if (win.cliProxyState.accountsBusy) { cliProxyApiKeyField.text = ""; cliProxyManagementKeyField.text = "" }
+                                                    }
+                                                }
+                                                LabelText { objectName: "cliProxyAccountsError"; text: win.cliProxyState.accountsError || ""; visible: (win.cliProxyState.accountsError || "").length > 0; color: visualTheme.danger; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                SubText { objectName: "cliProxyAccountsEmpty"; visible: (win.cliProxyState.accountsCount || 0) === 0 && !(win.cliProxyState.accountsError || "").length; text: win.cliProxyState.accountsBusy ? "جارٍ قراءة الحسابات وحدودها…" : "لم تُجلب الحسابات بعد. احفظ مفتاح الإدارة ثم حدّث الحسابات والحدود."; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                ColumnLayout {
+                                                    objectName: "cliProxyAccountsList"; Layout.fillWidth: true; spacing: 10
+                                                    Repeater {
+                                                        model: backend.cliProxyAccounts
+                                                        delegate: Box {
+                                                            id: cliProxyAccountCard; objectName: "cliProxyAccountCard"
+                                                            required property var modelData
+                                                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                                                            implicitHeight: cliProxyAccountBody.implicitHeight + 24
+                                                            ColumnLayout {
+                                                                id: cliProxyAccountBody; anchors.fill: parent; anchors.margins: 12; spacing: 8
+                                                                RowLayout {
+                                                                    Layout.fillWidth: true; layoutDirection: Qt.RightToLeft; spacing: 10
+                                                                    LabelText { text: cliProxyAccountCard.modelData.name || cliProxyAccountCard.modelData.email || "حساب"; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                                    LabelText { text: cliProxyAccountCard.modelData.statusLabel || ""; color: cliProxyAccountCard.modelData.available ? visualTheme.success : (cliProxyAccountCard.modelData.disabled ? win.muted : visualTheme.warning) }
+                                                                }
+                                                                SubText { text: cliProxyAccountCard.modelData.email || ""; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
+                                                                SubText { text: (cliProxyAccountCard.modelData.providerLabel || "") + (cliProxyAccountCard.modelData.plan ? " · " + cliProxyAccountCard.modelData.plan : ""); Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                                LabelText { objectName: "cliProxyAccountLimitsSummary"; text: cliProxyAccountCard.modelData.limitsSummary || ""; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                                Repeater {
+                                                                    model: cliProxyAccountCard.modelData.windows || []
+                                                                    delegate: ColumnLayout {
+                                                                        id: cliProxyWindow
+                                                                        required property var modelData
+                                                                        Layout.fillWidth: true; spacing: 6
+                                                                        LabelText { text: (cliProxyWindow.modelData.label || "") + " · " + (cliProxyWindow.modelData.remainingPercent >= 0 ? Math.round(cliProxyWindow.modelData.remainingPercent) + "٪ متبقٍ" : "الحصة غير معروفة"); Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                                        AppProgress { Layout.fillWidth: true; from: 0; to: 100; value: Math.max(0, Math.min(100, cliProxyWindow.modelData.remainingPercent >= 0 ? cliProxyWindow.modelData.remainingPercent : 0)); Accessible.name: "الحصة المتبقية " + (cliProxyWindow.modelData.label || "") }
+                                                                        SubText { text: cliProxyWindow.modelData.resetText || ""; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                                    }
+                                                                }
+                                                                SubText { text: cliProxyAccountCard.modelData.error || ""; visible: text.length > 0; color: visualTheme.warning; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SubText { text: win.cliProxyState.statusMessage || ""; visible: text.length > 0; color: visualTheme.success; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    }
                                 }
                             }
                             Box {
