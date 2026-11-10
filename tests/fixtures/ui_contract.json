@@ -21,7 +21,7 @@
     "waraq/remote_common.py": "55b7c54b144e44619e231de5f5220ab9f5b4fe49874a54da6e87a09f7c0cb624",
     "waraq/remote_library.py": "5c8359dd038d220bfb9bf80442ec412b9575a2d2b7f6c0f9f83ba8ba2fbb17e5",
     "waraq/scheduler.py": "b2fa82763ac95215d35834da119a34a1abece0e0f35f02e3417831c951acdcc4",
-    "waraq/services.py": "a7e629d5c5ec2f347a272385ab165035845cb67a6719a20965304c98eccbf7fa",
+    "waraq/services.py": "d1e7955f92f80b7db5299f198034689cb5df43d571effd95b7cbfe81f30e5544",
     "waraq/store.py": "ecaefd1bf1f9a68bb1105f021fbec3bff097a64dbfa83ea7c3cecd2c0123b3ed",
     "waraq/youtube_update.py": "ce0e16cba920fe975628e650234bb8a05740fbbb86e38644c76c97906480fa69"
   },
@@ -409,6 +409,13 @@
       "waraq/embedded_runtime.py": "63690f5814f1d057ac0544e4ae1b0a088e25994446d91bda727386c75ec4163a"
     },
     "api_version": 1
+  },
+  "cliproxy_no_route_fix": {
+    "base": "11f53503bb7d2cf26888bf79a05de880cabc47f9",
+    "reason": "User-authorized CLI Proxy routing fix: classify the exact structured provider.no-route error as a blocked configuration failure, prevent automatic retries and reject uncommitted output. Other providers and managed account execution remain unchanged.",
+    "previous_sha256": {
+      "waraq/services.py": "a7e629d5c5ec2f347a272385ab165035845cb67a6719a20965304c98eccbf7fa"
+    }
   },
   "cliproxy_api_change": {
     "reason": "Add the CLI Proxy API connection mode, isolated OpenCode configuration, model discovery, linked-account quota display, and desktop controls for API and management keys.",

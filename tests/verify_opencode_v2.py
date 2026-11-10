@@ -2,7 +2,7 @@
 
 Run: python tests/verify_opencode_v2.py
 Exercises real discovery, private servers, model listing, worker credentials,
-tool execution, Arabic paths, and the DOCX commit contract.
+tool execution, generated CLI Proxy variants, Arabic paths, and the DOCX commit contract.
 """
 
 import base64
@@ -21,6 +21,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from waraq.catalog import opencode_models
+from waraq.cliproxy import write_opencode_cliproxy_config
 from waraq.config import defaults
 from waraq.services import OpenCode, ServiceError, opencode_version, resolve_opencode, validate_docx
 
@@ -34,6 +35,7 @@ def main():
     version = opencode_version(executable)
     assert version.startswith("2."), f"Expected OpenCode 2, got {version}"
     calls = []
+    proxy_requests = []
     tools_seen = []
 
     class Model(BaseHTTPRequestHandler):
@@ -43,8 +45,11 @@ def main():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             credential = self.headers.get("Authorization")
-            assert credential in ("Bearer local-smoke-key-oc1", "Bearer local-smoke-key-oc2")
+            assert credential in ("Bearer local-smoke-key-oc1", "Bearer local-smoke-key-oc2",
+                                  "Bearer local-proxy-key")
             calls.append((self.path, credential))
+            if credential == "Bearer local-proxy-key":
+                proxy_requests.append((self.path, body))
             tools = {t["function"]["name"]: t["function"] for t in body.get("tools", [])}
             tools_seen.append(sorted(tools))
             tool_reply = any(m.get("role") == "tool" for m in body.get("messages", []))
@@ -105,11 +110,16 @@ def main():
                 }},
                 "model": "localtest/mock", "snapshots": False,
             }), encoding="utf-8")
-            env = {"XDG_CONFIG_HOME": str(root / "config-home"), "OPENCODE_CONFIG_DIR": str(config_dir),
+            # Inherited ad-hoc configuration and credentials must not redirect
+            # this acceptance test to a real provider or the user's database.
+            env = {key: value for key, value in os.environ.items()
+                   if not key.startswith("OPENCODE_") and not key.endswith("_API_KEY")}
+            env.update({"XDG_CONFIG_HOME": str(root / "config-home"), "OPENCODE_CONFIG_DIR": str(config_dir),
                    "XDG_DATA_HOME": str(root / "data"), "XDG_STATE_HOME": str(root / "state"),
                    "XDG_CACHE_HOME": str(root / "cache"), "OPENCODE_TEST_HOME": str(root / "home"),
-                   "PWD": str(root / "wrong inherited directory"), "WARAQ_LOCAL_SMOKE_KEY": "local-smoke-key"}
-            with patch.dict(os.environ, env):
+                   "OPENCODE_DISABLE_AUTOUPDATE": "1",
+                   "PWD": str(root / "wrong inherited directory"), "WARAQ_LOCAL_SMOKE_KEY": "local-smoke-key"})
+            with patch.dict(os.environ, env, clear=True):
                 models = opencode_models(str(executable), str(root))
                 assert "localtest/mock" in models, [m for m in models if m.startswith("localtest/")]
                 source = root / "تفريغ أصلي.txt"
@@ -148,6 +158,33 @@ def main():
                 assert source.read_text(encoding="utf-8") == "مادة عربية للاختبار المحلي."
                 for wid in ("oc1", "oc2"):
                     assert sum(key == "Bearer local-smoke-key-" + wid for _, key in calls) >= 2, (calls, tools_seen)
+
+                # Exercise the application-generated provider config with the
+                # real CLI. A string[] variants regression silently drops the
+                # model, which mocked process tests cannot detect.
+                proxy_config = root / "opencode-workers" / "proxy1" / "config"
+                proxy_url = f"http://127.0.0.1:{server.server_port}"
+                write_opencode_cliproxy_config(proxy_config, proxy_url, "gpt-6.1-sol", "high")
+                with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": str(proxy_config),
+                                             "CLIPROXY_API_KEY": "local-proxy-key"}):
+                    models = opencode_models(str(executable), str(root))
+                assert "cliproxy/gpt-6.1-sol" in models, [m for m in models if m.startswith("cliproxy/")]
+                proxy_cfg = {**cfg, "opencode_source_mode": "cliproxy", "cliproxy_base_url": proxy_url,
+                             "cliproxy_model": "gpt-6.1-sol", "cliproxy_thinking_level": "high"}
+                proxy_worker = {"id": "proxy1", "provider": "cliproxy", "model": "gpt-6.1-sol",
+                                "variant": "high", "agent": "build"}
+                proxy_job = {"transcript": str(source), "folder": str(root / "مجلد CLI Proxy"),
+                             "title": "اختبار", "position": 1}
+                with patch.object(OpenCode, "prepare_context", return_value=[]):
+                    proxy_output = OpenCode().process(proxy_job, proxy_worker, proxy_cfg,
+                                                      "local-proxy-key", threading.Event(), lambda _: None)
+                proxy_report = validate_docx(proxy_output)
+                assert (proxy_output.parent / "validated.json").is_file()
+                assert source.read_text(encoding="utf-8") == "مادة عربية للاختبار المحلي."
+                assert len(proxy_requests) >= 2, proxy_requests
+                assert all(path == "/v1/chat/completions" and body.get("model") == "gpt-6.1-sol"
+                           and body.get("reasoning_effort") == "high" for path, body in proxy_requests)
+
                 # --auto must retain explicit denies and a failed tool must
                 # never be committed as a successful Word task.
                 config_path = config_dir / "opencode.json"
@@ -168,6 +205,8 @@ def main():
                 assert any("execute" in tools and "shell" not in tools and "bash" not in tools for tools in tools_seen)
                 print(json.dumps({"version": version, "local_model_calls": len(calls),
                                   "parallel_workers": 2, "explicit_deny_preserved": True,
+                                  "proxy_model": "cliproxy/gpt-6.1-sol", "proxy_thinking": "high",
+                                  "proxy_calls": len(proxy_requests), "proxy_docx_characters": proxy_report["characters"],
                                   "docx_characters": [r["characters"] for r in reports], "status": "passed"}))
     finally:
         server.shutdown()

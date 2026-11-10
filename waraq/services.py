@@ -104,6 +104,27 @@ def _quota_evidence(message):
         "usage limit has been reached", "usage_limit_reached", "usage_limit_exceeded"))
 
 
+def cliproxy_error(line):
+    """Classify the CLI Proxy's explicit no-route code, never its prose."""
+    try:
+        event = json.loads(line)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(event, dict) or event.get("type") != "error":
+        return None
+
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return None
+    data = error.get("data")
+    if (error.get("type") == "provider.no-route" or error.get("code") == "provider.no-route"
+            or (isinstance(data, dict) and data.get("code") == "provider.no-route")):
+        return ServiceError(
+            "تعذر على OpenCode توجيه النموذج عبر CLI Proxy API؛ راجع إعداد المزوّد ومعرّف النموذج.",
+            "blocked", scope="model")
+    return None
+
+
 def opencode_error(line, account_id=""):
     """Classify native errors conservatively, preserving reset/scope when stated."""
     try:
@@ -867,6 +888,7 @@ class OpenCode:
         command = opencode_run_command(executable, cli_version, worker, model, work, prompt)
         denied = []
         limited = []
+        no_route = []
         def track(line):
             if proxy and secret:
                 line = line.replace(secret, "[محجوب]")
@@ -874,6 +896,10 @@ class OpenCode:
                 denied.append(line)
             if limit_reached(line):
                 limited.append(line)
+            if proxy:
+                error = cliproxy_error(line)
+                if error:
+                    no_route.append(error)
             log(line)
         try:
             run_process(command, work, cancel, cfg["opencode_timeout"], track, env)
@@ -883,6 +909,8 @@ class OpenCode:
             # A quota stop is retryable; other failures keep their own diagnosis.
             if limited:
                 raise ServiceError(LIMIT_MESSAGE, "rate_limited") from None
+            if proxy and no_route:
+                raise no_route[0] from None
             if proxy and secret and secret in str(exc):
                 raise ServiceError(str(exc).replace(secret, "[محجوب]"), exc.kind, exc.retry_after) from None
             raise
@@ -893,6 +921,8 @@ class OpenCode:
             raise ServiceError("منع OpenCode الوصول إلى مسار خارج مجلد عمله: " + denied[0], "failed")
         if not output.is_file() and limited:
             raise ServiceError(LIMIT_MESSAGE, "rate_limited")
+        if proxy and no_route:
+            raise no_route[0]
         report = validate_docx(output)
         atomic_json(verified, {**report, "input_sha256": original_hash, "output": str(output)})
         return output

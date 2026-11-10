@@ -912,7 +912,12 @@ def write_opencode_cliproxy_config(
                 "models": {
                     raw_model: {
                         "limit": {"context": 200000, "output": 32000},
-                        "variants": variants,
+                        # OpenCode V2 expects variant objects; strings silently
+                        # prevent the provider's models from being registered.
+                        "variants": [
+                            {"id": level, "settings": {"reasoningEffort": level}}
+                            for level in variants
+                        ],
                     }
                 },
             }

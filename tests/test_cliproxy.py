@@ -118,13 +118,25 @@ def test_accounts_layer3_quota_signals(monkeypatch, provider, signals, five, wee
     assert row['fiveHourRemaining']==five and row['weeklyRemaining']==weekly
 
 
-def test_write_proxy_config_isolated(tmp_path):
-    path=cliproxy.write_opencode_cliproxy_config(tmp_path,'https://proxy/v1','cliproxy/org/model#old','xhigh')
+@pytest.mark.parametrize('thinking_level', ['', 'xhigh', 'custom-effort'])
+def test_write_proxy_config_isolated(tmp_path, monkeypatch, thinking_level):
+    monkeypatch.setenv('CLIPROXY_API_KEY', 'runtime-secret-must-not-be-persisted')
+    path=cliproxy.write_opencode_cliproxy_config(tmp_path,'https://proxy/v1','cliproxy/cliproxy/org/model#old',thinking_level)
     data=json.loads(path.read_text())
     assert data['providers']['cliproxy']['env']==['CLIPROXY_API_KEY']
     assert data['providers']['cliproxy']['settings']['baseURL']=='https://proxy/v1'
     assert data['model']=='cliproxy/org/model'
-    assert 'xhigh' in data['providers']['cliproxy']['models']['org/model']['variants']
+    provider=data['providers']['cliproxy']
+    assert set(provider['models']) == {'org/model'}
+    expected_levels=[level for level in cliproxy.THINKING_LEVELS if level]
+    if thinking_level and thinking_level not in expected_levels:
+        expected_levels.append(thinking_level)
+    assert provider['models']['org/model']['variants'] == [
+        {'id': level, 'settings': {'reasoningEffort': level}}
+        for level in expected_levels
+    ]
+    assert 'apiKey' not in provider['settings']
+    assert 'runtime-secret-must-not-be-persisted' not in path.read_text()
 
 
 def test_config_allows_empty_proxy_model_and_scheduler_stops_clearly(tmp_path):
