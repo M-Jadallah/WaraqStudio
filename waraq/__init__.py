@@ -1,5 +1,5 @@
 """Waraq Studio — durable local media-to-document workflows."""
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 
 def _packaged_version():

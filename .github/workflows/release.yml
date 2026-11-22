@@ -188,6 +188,10 @@ jobs:
       - name: Build Windows bundle (PyInstaller)
         run: python build_windows.py
 
+      - name: Verify bundled Windows app
+        timeout-minutes: 15
+        run: python tests/verify_bundle.py
+
       - name: Verify bundle contents
         run: |
           test -f Windows/WaraqStudio/WaraqStudio.exe
