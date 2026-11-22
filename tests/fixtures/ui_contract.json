@@ -5,7 +5,7 @@
     "main.py": "fb0a92c5c77c8f8789358c2a0174fe7d847fc59a09af49f2799d184e2ba3bcf1",
     "requirements.txt": "8e7d2ecf695527679758826ae50b29bb62079ba69e0025a055a0cd3f29cd8cdb",
     "settings.template.json": "18378e2155b255754fcb93a4d6b8ba1a90541e62a435144a08918fe89a6744ac",
-    "waraq/__init__.py": "f02fe3feb3e90962b79964eb8a0cbb0085790ed6174f4763f15e065c004f9a51",
+    "waraq/__init__.py": "60e6a701a3d3f638e60d67d2d2facec6fb3d0bda40611e6340a0e730274b87c7",
     "waraq/app_update.py": "b6d244c2497aa2c7eb84694c04bf7b3b632faddc51c26a471d884ccba7551fcb",
     "waraq/bridge.py": "567e8c4e15cf8e15df1feab14201d3e60802f731b551b35c0771af23fea22834",
     "waraq/catalog.py": "d17e04d9dd7195fa2a9fbcdac75efbd30b301b77c4123cc289aadecfc195dada",
